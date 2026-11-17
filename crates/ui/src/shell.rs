@@ -815,6 +815,8 @@ fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<Setti
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     Chat,
+    /// The trading desk (Aurea's dashboard).
+    Trading,
     PullRequests,
     Settings(SettingsSection),
 }
@@ -971,6 +973,8 @@ impl SessionPanels {
 pub enum NavEntry {
     /// A chat route; the id of the selected chat ("" = the new-chat canvas).
     Chat(String),
+    /// The trading desk route.
+    Trading,
     PullRequests,
     /// One pull request's detail view over the board, and the device whose
     /// `gh` reads it (`None` = this device).
@@ -2213,6 +2217,8 @@ pub struct Shell {
     settings_search: Option<settings_search::SettingsSearch>,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
+    /// The trading desk, made on its first render.
+    trading_page: Option<Entity<crate::trading::TradingSurface>>,
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     /// Opened pull requests, as tabs in a pane beside the board.
     pull_request_pane: pull_request_pane::PullRequestPane,
@@ -2655,6 +2661,7 @@ impl Shell {
         // remembered like any other link to a section.
         let open_route = std::env::var("ZERON_OPEN_ROUTE").ok();
         let route = match open_route.as_deref() {
+            Some("trading") => Route::Trading,
             Some("pull-requests") => Route::PullRequests,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
@@ -2705,6 +2712,7 @@ impl Shell {
         };
         let nav = NavHistory::new(match route {
             Route::Chat => NavEntry::Chat(String::new()),
+            Route::Trading => NavEntry::Trading,
             Route::PullRequests => NavEntry::PullRequests,
             Route::Settings(section) => NavEntry::Settings(section),
         });
@@ -2792,6 +2800,7 @@ impl Shell {
             settings_return_route: Route::Chat,
             settings_search: None,
             nav,
+            trading_page: None,
             pull_requests_page: None,
             pull_request_pane: Default::default(),
             pending_pull_request: None,
@@ -5815,6 +5824,18 @@ impl Shell {
         }
     }
 
+    /// The trading desk route: the dashboard is the destination, so a click
+    /// records the visit and closes the transient menus on the way in.
+    fn open_trading(&mut self, cx: &mut Context<Self>) {
+        self.set_route(Route::Trading, cx);
+        if self.nav.current() != &NavEntry::Trading {
+            self.nav.push(NavEntry::Trading);
+        }
+        self.close_user_menu(cx);
+        self.close_chat_menu(cx);
+        cx.notify();
+    }
+
     /// The Pull requests entry: from elsewhere, return to the board as it
     /// was left, its pane included; on the board already, show it alone.
     fn open_pull_requests(&mut self, cx: &mut Context<Self>) {
@@ -5894,6 +5915,9 @@ impl Shell {
                 if self.state.read(cx).selected_chat != target {
                     self.state.update(cx, |s, cx| s.select_chat(target, cx));
                 }
+            }
+            NavEntry::Trading => {
+                self.set_route(Route::Trading, cx);
             }
             NavEntry::PullRequests => {
                 self.enter_pull_requests_route(cx);
@@ -10705,6 +10729,46 @@ impl Shell {
             .into_any_element()
     }
 
+    fn render_trading_button(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let active = matches!(self.route, Route::Trading);
+        div()
+            .id("open-trading")
+            .role(gpui::Role::Button)
+            .aria_label("Mesa de trading")
+            .tab_index(0)
+            .debug_selector(|| "open-trading".into())
+            .focus_visible(|style| style.border_2().border_color(theme.accent))
+            .size(px(SIDEBAR_FOOTER_ACTION_SIZE))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.0))
+            .text_color(if active { theme.accent } else { theme.text_muted })
+            .bg(if active {
+                theme.accent.opacity(0.10)
+            } else {
+                motion::hover_blend(
+                    "open-trading",
+                    theme.glass_hover().opacity(0.0),
+                    theme.glass_hover(),
+                )
+            })
+            .on_hover(motion::hover_listener("open-trading"))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.settings_focus_pending = false;
+                this.open_trading(cx);
+            }))
+            .tooltip(crate::settings::widgets::text_tooltip("Mesa de trading"))
+            .child(icon(icons::WALLET).size(px(15.0)).text_color(if active {
+                theme.accent
+            } else {
+                motion::hover_blend("open-trading", theme.text_muted, theme.text)
+            }))
+            .into_any_element()
+    }
+
     fn render_pull_requests_button(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("open-pull-requests")
@@ -10768,6 +10832,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Pull requests sits just left of Settings, in the same action group.
+        let trading = self.render_trading_button(theme, cx);
         let pull_requests = self.render_pull_requests_button(theme, cx);
         let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
@@ -10989,6 +11054,7 @@ impl Shell {
                     .items_center()
                     .gap(px(2.0))
                     .children(voice_trigger)
+                    .child(trading)
                     .child(pull_requests)
                     .child(
                         div()
@@ -11662,6 +11728,27 @@ impl Shell {
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
+
+        if matches!(self.route, Route::Trading) {
+            if self.trading_page.is_none() {
+                self.trading_page =
+                    Some(cx.new(|cx| crate::trading::TradingSurface::new(self.state.clone(), cx)));
+            }
+            let outlet = self
+                .trading_page
+                .as_ref()
+                .cloned()
+                .map(IntoElement::into_any_element)
+                .unwrap_or_else(|| Empty.into_any_element());
+            return div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0().child(outlet))
+                .into_any_element();
+        }
 
         if matches!(self.route, Route::PullRequests) {
             if self.pull_requests_page.is_none() {

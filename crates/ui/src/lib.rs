@@ -82,6 +82,7 @@ pub(crate) mod tool_images;
 pub mod theme;
 pub mod theme_library;
 pub mod toast;
+pub mod trading;
 pub mod transcript;
 pub mod typography;
 pub mod visuals;

@@ -35,14 +35,21 @@ git -c credential.helper= -c "http.extraheader=AUTHORIZATION: basic $b64" push
 | Qué | Estado |
 |---|---|
 | Quitas ligeras | ✅ (solo apps legacy) |
-| `cargo check --workspace` | ⛔ bloqueado por Windows SDK |
+| `cargo check --workspace` | ⛔ bloqueado por Windows SDK (MSIs en curso: `WindowsSDKDesktopLibraries` aún pendiente) |
 | Manifiestos | ✅ `cargo metadata --no-deps` exit 0 |
 | Contratos proto trading/warp | ✅ escritos y corregidos contra el schema (v0.3) |
 | Constantes RPC | ✅ 18 trading + 3 warp en `crates/rpc/src/lib.rs` |
 | Brazos engine RPC | ✅ 20 métodos + 3 WARP en `engine/rpc.rs` |
-| Crate `crates/trading` | ✅ mock vivo cada 2 s + acciones simuladas interactivas |
-| Sintaxis | ✅ rustfmt OK en los 7 ficheros tocados (sin commitear aún) |
+| Crate `crates/trading` | ✅ mock vivo cada 2 s + acciones simuladas interactivas + `pool.rs` (A1) |
+| Lane B (UI) | ✅ `crates/ui/src/trading/{model,surface,mod}.rs` + `Route::Trading` + botón Mesa en footer |
+| Sintaxis | ✅ rustfmt OK en todos los ficheros tocados (sin commitear) |
 | Specs | ✅ 12 en repo |
+
+### Lane B — lo que hay
+- `model.rs`: `Phase`, `Confirm`, `Kpis`, ordenaciones, formato español (`10.085,30 $`, `+0,15 %`), `clock/short_clock/relative`, `spark_bars` + 6 tests puros.
+- `surface.rs`: header (fase/DEMO/versión + Cerrar todo + Pánico), barra de confirmación para toda acción de dinero, strip de errores, KPI strip, sparkline de equity, tabla de posiciones con cierre confirmado, tarjetas de sistemas (start/stop) y tareas (cancelar), registro del motor. Stream `WatchTradingSnapshot` vía `EngineHandle`.
+- `shell.rs`: `Route::Trading`, `NavEntry::Trading`, `open_trading` (historial back/forward), rama en `render_main` (lazy entity), botón `open-trading` (icono WALLET) junto a Pull Requests en el footer, `ZERON_OPEN_ROUTE=trading` para pruebas.
+- Pendiente menor: entrada destacada arriba del árbol de sesiones (hoy en footer; el árbol lleva FLIP keyed rows y se toca tras el check verde).
 
 ## Pendientes del USUARIO
 1. **~23:00 TWS re-login** tras su reinicio (credenciales solo en chat). TWS API ✅ en 7497 paper; 7496 cerrado.

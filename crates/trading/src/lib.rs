@@ -5,6 +5,7 @@
 //! dashboard consumes until the real engine (lane A) lands.
 
 pub mod mock;
+pub mod pool;
 
 /// Shared protocol types re-exported for convenience.
 pub use zeron_proto::trading;

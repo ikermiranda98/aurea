@@ -90,6 +90,7 @@ impl Shell {
     pub(super) fn navigation_focus_fallback(&self, cx: &App) -> (FocusHandle, FocusHandle) {
         let right_open = match self.route {
             Route::Chat => self.right_pane_open(cx),
+            Route::Trading => false,
             Route::PullRequests => self.pull_request_pane_open(),
             Route::Settings(_) => false,
         };
