@@ -1130,7 +1130,7 @@ impl Client {
                 .provider_switch
         {
             return Err(ClientError::Unsupported(
-                "This chat's computer needs a newer Zeron to switch provider.".into(),
+                "This chat's computer needs a newer Aurea to switch provider.".into(),
             ));
         }
         self.chat_write(chat_id, |doc| doc.set_chat_config(chat_id, config))

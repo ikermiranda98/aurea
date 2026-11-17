@@ -646,7 +646,7 @@ impl Client {
             .await?
             .ok_or_else(|| {
                 ClientError::Unsupported(
-                "Cloud can't reach this project's repository — install the Zeron GitHub App on it."
+                "Cloud can't reach this project's repository — install the Aurea GitHub App on it."
                     .into(),
             )
             })?;

@@ -41,9 +41,11 @@ git -c credential.helper= -c "http.extraheader=AUTHORIZATION: basic $b64" push
 | Constantes RPC | ✅ 18 trading + 3 warp en `crates/rpc/src/lib.rs` |
 | Brazos engine RPC | ✅ 20 métodos + 3 WARP en `engine/rpc.rs` |
 | Crate `crates/trading` | ✅ mock vivo cada 2 s + acciones simuladas interactivas + `pool.rs` (A1) |
-| Lane B (UI) | ✅ `crates/ui/src/trading/{model,surface,mod}.rs` + `Route::Trading` + botón Mesa en footer |
+| Lane B (UI) | ✅ `crates/ui/src/trading/{model,surface,mod}.rs` + `Route::Trading` + botón Mesa en footer + tarjeta Conexiones + paleta |
+| Lane D1 (TWS) | ✅ `crates/tws/{codec,client}.rs` con framing, handshake v100+ verificado, `START_API`, 326 terminal, reconexión y watchdog + 11 tests |
+| Renombrado visible | ✅ menús, onboarding, etiquetas de accesibilidad, avisos UI y errores de cliente → Aurea (interno intacto) |
 | Sintaxis | ✅ rustfmt OK en todos los ficheros tocados (sin commitear) |
-| Specs | ✅ 12 en repo |
+| Specs | ✅ 12 en repo + handshake real documentado en `SPECS/D1.md` |
 
 ### Lane B — lo que hay
 - `model.rs`: `Phase`, `Confirm`, `Kpis`, ordenaciones, formato español (`10.085,30 $`, `+0,15 %`), `clock/short_clock/relative`, `spark_bars` + 6 tests puros.
@@ -57,8 +59,8 @@ git -c credential.helper= -c "http.extraheader=AUTHORIZATION: basic $b64" push
 3. Aviso cupo free: si un modelo muere con "Free usage limit reached", cambiar de modelo, decir «sigue» — BOARD lo cubre.
 
 ## Cola del orquestador
-1. Al terminar el SDK: `cargo check --workspace` → iterar a verde → commit `fase 0: contratos + mock interactivo` → push → congelar CONTRACTS.md v1.
-2. Lane A (motor real) en orden A1→A2; D1 (cliente TWS); luego B (dashboard GPUI sobre el mock ya vivo).
+1. Al terminar el SDK: `cargo check --workspace` → iterar a verde → commit `fase 0: contratos + mock interactivo + D1` → push → congelar CONTRACTS.md v1.
+2. Lanes en paralelo (zonas disjuntas): **D2** (cuentas/posiciones TWS, `crates/tws`), **C1** (WARP, `crates/warp`), **A3** (MT5, `crates/trading/src/mt5.rs`). Luego A2/A4/A5 y B6/B7.
 3. Wiring RPC/MCP: SOLO orquestador. Commits: SOLO orquestador.
 4. TWS solo paper (7497). PROHIBIDO live (7496). Puerta de dinero SIEMPRE con el usuario.
 
@@ -76,3 +78,5 @@ git -c credential.helper= -c "http.extraheader=AUTHORIZATION: basic $b64" push
 - 22:20 DECISIÓN: quitas ligeras; restore engine/harness/preview al baseline; apps fuera. cargo/rustc YA instalados.
 - 22:30 primer `cargo check` (falla por `link.exe`); restore preview-label + Cargo.toml baseline (`e5cd907`).
 - 21:30 (reloj VM) barrido completo del schema: corregidos `Link.connected`, `mt5_login` número, `IbkrPort.open`, `Programs`, `PoolSelectResult.systems`, `TaskAddInput` (`systemIDs`/`atTime` "HH:MM"). Proto v0.3 + 20 brazos RPC + mock interactivo (start/stop/close/close-all/panic/tasks/links/detect/pool). rustfmt OK. Check pendiente del SDK.
+- 21:46 Lane D1 entregada (big-pickle): codec + cliente tokio, 11 tests. Revisión detectó que el handshake de la spec (`API\0v100..v1\0<id>\0`) era el del protocolo antiguo: verificado contra `@stoqey/ib@1.6.13` descargado de npm → cabecera `API\0` + u32 BE + `v100..193`, y `START_API` (`71,2,<id>,""`) tras el frame de versión del servidor. Corregido en `client.rs` (+ `IbEvent::ServerVersion`) y bug de reconexión que reabría `session` sobre el socket muerto.
+- 21:48 renombrado visible: menús nativos, onboarding, etiquetas de accesibilidad, avisos de appshots/cambios y errores de cliente. Rutas, esquemas URL y el binario `zeron` intactos. SDK: 34 paquetes aplicados, Desktop Libs aún pendiente.

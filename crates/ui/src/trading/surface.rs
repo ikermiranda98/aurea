@@ -10,7 +10,8 @@ use gpui::{
 };
 use serde_json::json;
 use zeron_proto::trading::{
-    LogLevel, Position, PositionSide, Snapshot, System, Task as TradingTask, TaskKind, TaskStatus,
+    Broker, IbkrPort, Link, LogLevel, Mt5Detected, Position, PositionSide, Snapshot, System,
+    Task as TradingTask, TaskKind, TaskStatus,
 };
 use zeron_rpc::methods;
 
@@ -29,11 +30,11 @@ enum ButtonTone {
 }
 
 pub struct TradingSurface {
-    state: Entity<AppState>,
     engine: Option<EngineHandle>,
     snapshot: Option<Snapshot>,
     phase: Phase,
     error: Option<SharedString>,
+    notice: Option<SharedString>,
     confirm: Option<Confirm>,
     _watch: Option<Task<()>>,
 }
@@ -47,11 +48,11 @@ impl TradingSurface {
             Phase::Failed("Este motor no expone el servicio de trading.".into())
         };
         let mut surface = Self {
-            state,
             engine,
             snapshot: None,
             phase,
             error: None,
+            notice: None,
             confirm: None,
             _watch: None,
         };
@@ -120,17 +121,37 @@ impl TradingSurface {
     /// Fires a unary engine call without blocking the UI; failures land in the
     /// error strip instead of a dialog.
     fn call(&mut self, method: &'static str, params: serde_json::Value, cx: &mut Context<Self>) {
+        self.call_with(method, params, cx, |_, _, _| {});
+    }
+
+    /// Like [`Self::call`], with the reply handed to `on_ok` so a screen can
+    /// chain a second request (detect → register, for instance).
+    fn call_with(
+        &mut self,
+        method: &'static str,
+        params: serde_json::Value,
+        cx: &mut Context<Self>,
+        on_ok: impl FnOnce(&mut Self, serde_json::Value, &mut Context<Self>) + 'static,
+    ) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
         self.error = None;
         cx.spawn(async move |this, cx| {
-            if let Err(error) = engine.client().call(method, params).await {
-                let message = format!("{error}");
-                let _ = this.update(cx, |this, cx| {
-                    this.error = Some(message.into());
-                    cx.notify();
-                });
+            match engine.client().call(method, params).await {
+                Ok(value) => {
+                    let _ = this.update(cx, |this, cx| {
+                        on_ok(this, value, cx);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let message = format!("{error}");
+                    let _ = this.update(cx, |this, cx| {
+                        this.error = Some(message.into());
+                        cx.notify();
+                    });
+                }
             }
         })
         .detach();
@@ -349,6 +370,39 @@ impl TradingSurface {
         )
     }
 
+    fn notice_strip(&self, theme: &Theme) -> Option<Div> {
+        let notice = self.notice.clone()?;
+        Some(
+            div()
+                .flex_none()
+                .w_full()
+                .px(px(18.0))
+                .py(px(6.0))
+                .bg(theme.accent.opacity(0.06))
+                .border_b_1()
+                .border_color(theme.accent.opacity(0.18))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.accent)
+                        .child("AVISO"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_muted)
+                        .child(notice),
+                ),
+        )
+    }
+
     // ------------------------------------------------------------------- body
 
     fn body(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -433,6 +487,7 @@ impl TradingSurface {
                             .flex_col()
                             .gap(px(14.0))
                             .child(self.systems_card(&snapshot, theme, cx))
+                            .child(self.links_card(&snapshot, theme, cx))
                             .child(self.tasks_card(&snapshot, theme, cx)),
                     ),
             )
@@ -727,6 +782,210 @@ impl TradingSurface {
             .child(action)
     }
 
+    fn links_card(&self, snapshot: &Snapshot, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let links = snapshot.links.clone().unwrap_or_default();
+        let connected = links.iter().filter(|link| link.connected).count();
+        let mut rows: Vec<Div> = Vec::with_capacity(links.len());
+        if links.is_empty() {
+            rows.push(empty_row(theme, "Sin conexiones registradas."));
+        } else {
+            for (ix, link) in links.iter().enumerate() {
+                rows.push(self.link_row(ix, link, theme, cx));
+            }
+        }
+        let actions = div()
+            .px(px(12.0))
+            .py(px(8.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                button(
+                    ("trading-link-add-tws", 0),
+                    "Añadir TWS paper",
+                    ButtonTone::Ghost,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.notice = Some("Registrando TWS paper en 127.0.0.1:7497…".into());
+                    this.call(
+                        methods::TRADING_LINK_ADD,
+                        json!({
+                            "host": "127.0.0.1",
+                            "port": 7497,
+                            "label": "TWS paper",
+                            "broker": "ibkr",
+                        }),
+                        cx,
+                    );
+                    cx.notify();
+                })),
+            )
+            .child(
+                button(
+                    ("trading-link-add-mt5", 1),
+                    "Añadir MT5",
+                    ButtonTone::Ghost,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.notice = Some("Buscando terminales MetaTrader 5 en este equipo…".into());
+                    this.call_with(
+                        methods::TRADING_MT5_DETECT,
+                        json!({ "probe": false }),
+                        cx,
+                        |this, value, cx| {
+                            let detected = match serde_json::from_value::<Vec<Mt5Detected>>(value) {
+                                Ok(detected) => detected,
+                                Err(error) => {
+                                    this.error =
+                                        Some(format!("Respuesta MT5 inválida: {error}").into());
+                                    return;
+                                }
+                            };
+                            let Some(account) = detected.into_iter().next() else {
+                                this.notice =
+                                    Some("No se detectó ningún MetaTrader 5 instalado.".into());
+                                return;
+                            };
+                            this.notice = Some(
+                                format!("Vinculando MT5 {}@{}…", account.login, account.server)
+                                    .into(),
+                            );
+                            this.call(
+                                methods::TRADING_LINK_ADD,
+                                json!({
+                                    "broker": "mt5",
+                                    "mt5Login": account.login,
+                                    "mt5Server": account.server,
+                                    "label": account.name,
+                                }),
+                                cx,
+                            );
+                        },
+                    );
+                    cx.notify();
+                })),
+            )
+            .child(div().flex_1())
+            .child(
+                button(
+                    ("trading-detect-ports", 2),
+                    "Detectar puertos",
+                    ButtonTone::Ghost,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.notice = Some("Sondeando los puertos de TWS…".into());
+                    this.call_with(
+                        methods::TRADING_IBKR_DETECT,
+                        json!({}),
+                        cx,
+                        |this, value, _cx| {
+                            let ports = match serde_json::from_value::<Vec<IbkrPort>>(value) {
+                                Ok(ports) => ports,
+                                Err(error) => {
+                                    this.error =
+                                        Some(format!("Respuesta de puertos inválida: {error}").into());
+                                    return;
+                                }
+                            };
+                            let summary = ports
+                                .iter()
+                                .map(|port| {
+                                    format!(
+                                        "{}:{} {}",
+                                        port.host,
+                                        port.port,
+                                        if port.open { "abierto" } else { "cerrado" }
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" · ");
+                            this.notice = Some(format!("TWS → {summary}").into());
+                        },
+                    );
+                    cx.notify();
+                })),
+            );
+        card(theme)
+            .child(section_header(
+                theme,
+                "Conexiones",
+                SharedString::from(format!("{connected}/{} activas", links.len())),
+            ))
+            .children(rows)
+            .child(actions)
+    }
+
+    fn link_row(&self, ix: usize, link: &Link, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let (broker_label, broker_tone) = match link.broker {
+            Some(Broker::Mt5) => ("MT5", theme.accent),
+            Some(Broker::Nt) => ("NT", theme.warning),
+            Some(Broker::Ibkr) | None => ("IBKR", theme.success),
+        };
+        let (state_label, state_tone) = if link.connected {
+            ("CONECTADA", theme.success)
+        } else {
+            ("CAÍDA", theme.danger)
+        };
+        let link_id = link.id.clone();
+        let label = link.label.clone().unwrap_or_else(|| link.id.clone());
+        div()
+            .px(px(12.0))
+            .py(px(7.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .child(chip(broker_label, broker_tone))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .truncate()
+                            .child(SharedString::from(label)),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme.font_mono.clone())
+                            .text_size(px(9.0))
+                            .text_color(theme.text_faint)
+                            .truncate()
+                            .child(SharedString::from(link.id.clone())),
+                    ),
+            )
+            .child(chip(state_label, state_tone))
+            .child(
+                button(
+                    ("trading-link-remove", ix),
+                    "Quitar",
+                    ButtonTone::Ghost,
+                    theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.call(
+                        methods::TRADING_LINK_REMOVE,
+                        json!({ "linkId": link_id.clone() }),
+                        cx,
+                    );
+                    cx.notify();
+                })),
+            )
+    }
+
     fn tasks_card(&self, snapshot: &Snapshot, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let tasks = model::tasks_sorted(snapshot);
         let mut rows: Vec<Div> = Vec::with_capacity(tasks.len());
@@ -931,6 +1190,9 @@ impl Render for TradingSurface {
             root = root.child(bar);
         }
         if let Some(strip) = self.error_strip(&theme) {
+            root = root.child(strip);
+        }
+        if let Some(strip) = self.notice_strip(&theme) {
             root = root.child(strip);
         }
         root.child(self.body(&theme, cx))

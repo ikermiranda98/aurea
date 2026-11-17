@@ -895,3 +895,237 @@ pub fn pool_select(dir: &str) -> Result<PoolSelectResult, TradingError> {
         systems: fixture().systems.len() as u32,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// The overlay is process-global, so the action tests take turns.
+    fn serial() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = LOCK.get_or_init(|| Mutex::new(()));
+        match lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn reset() {
+        let mut overrides = match overrides().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *overrides = Overrides::default();
+    }
+
+    #[test]
+    fn fixture_is_complete_and_demo() {
+        let snapshot = fixture();
+        assert_eq!(snapshot.systems.len(), 2);
+        assert_eq!(snapshot.positions.len(), 3);
+        assert!(snapshot.connected);
+        let account = snapshot.account.expect("fixture ships an account");
+        assert_eq!(account.demo, Some(true));
+        assert_eq!(snapshot.tasks.len(), 2);
+        assert_eq!(snapshot.equity.as_ref().map(Vec::len), Some(24));
+        assert_eq!(snapshot.links.as_ref().map(Vec::len), Some(2));
+        assert_eq!(snapshot.programs.map(|programs| programs.tws), Some(ProgramState::Running));
+    }
+
+    #[test]
+    fn start_and_stop_flip_the_system_flags() {
+        let _guard = serial();
+        reset();
+        let started = start_system("02_nq_tws").expect("known system");
+        assert!(started.running);
+        assert!(started.pid.is_some());
+        let stopped = stop_system("02_nq_tws").expect("known system");
+        assert!(!stopped.running);
+        assert!(stopped.pid.is_none());
+        assert!(start_system("nope").is_none());
+    }
+
+    #[test]
+    fn close_retires_one_position_and_refuses_unknowns() {
+        let _guard = serial();
+        reset();
+        assert!(!close_position("UNKNOWN").ok);
+        let result = close_position("EURUSD");
+        assert!(result.ok, "{}", result.message);
+        assert!(!current().positions.iter().any(|p| p.symbol == "EURUSD"));
+        assert!(!close_position("EURUSD").ok, "second close finds nothing");
+    }
+
+    #[test]
+    fn close_all_and_panic_empty_the_book() {
+        let _guard = serial();
+        reset();
+        let all = close_all_positions();
+        assert!(all.ok, "{}", all.message);
+        assert!(current().positions.is_empty());
+        let empty = close_all_positions();
+        assert!(empty.ok);
+        reset();
+        let panic = panic();
+        assert!(panic.stopped.contains(&"01_eurusd_mt5".to_string()));
+        let snapshot = current();
+        assert!(snapshot.positions.is_empty());
+        assert!(snapshot.systems.iter().all(|system| !system.running));
+    }
+
+    #[test]
+    fn task_validation_matches_the_typescript_engine() {
+        let _guard = serial();
+        reset();
+        let both = TaskAddInput {
+            kind: TaskKind::StopSystems,
+            system_ids: None,
+            delay_minutes: Some(5.0),
+            at_time: Some("10:00".into()),
+        };
+        assert!(matches!(
+            task_add(&both),
+            Err(TradingError::InvalidTask { .. })
+        ));
+        let neither = TaskAddInput {
+            kind: TaskKind::StopSystems,
+            system_ids: None,
+            delay_minutes: None,
+            at_time: None,
+        };
+        assert!(matches!(
+            task_add(&neither),
+            Err(TradingError::InvalidTask { .. })
+        ));
+        let negative = TaskAddInput {
+            kind: TaskKind::StopSystems,
+            system_ids: None,
+            delay_minutes: Some(-1.0),
+            at_time: None,
+        };
+        assert!(matches!(
+            task_add(&negative),
+            Err(TradingError::InvalidTask { .. })
+        ));
+        let bad_clock = TaskAddInput {
+            kind: TaskKind::StopSystems,
+            system_ids: None,
+            delay_minutes: None,
+            at_time: Some("25:00".into()),
+        };
+        assert!(matches!(
+            task_add(&bad_clock),
+            Err(TradingError::InvalidTask { .. })
+        ));
+        let unknown = TaskAddInput {
+            kind: TaskKind::StartSystems,
+            system_ids: Some(vec!["nope".into()]),
+            delay_minutes: Some(1.0),
+            at_time: None,
+        };
+        assert!(matches!(
+            task_add(&unknown),
+            Err(TradingError::SystemNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn task_add_schedules_and_cancel_resolves() {
+        let _guard = serial();
+        reset();
+        let now = now_ms();
+        let input = TaskAddInput {
+            kind: TaskKind::StartSystems,
+            system_ids: Some(vec!["02_nq_tws".into()]),
+            delay_minutes: Some(30.0),
+            at_time: None,
+        };
+        let task = task_add(&input).expect("valid task");
+        assert_eq!(task.status, TaskStatus::Pending);
+        assert!(task.run_at > now + 29 * 60_000);
+        assert_eq!(current().tasks.first().map(|t| t.id.as_str()), Some(task.id.as_str()));
+        let cancelled = task_cancel(&task.id).expect("own task");
+        assert_eq!(cancelled.status, TaskStatus::Cancelled);
+        assert!(cancelled.resolved_at.is_some());
+        assert!(matches!(
+            task_cancel("trd_missing"),
+            Err(TradingError::TaskNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn links_build_ids_and_mt5_needs_its_identity() {
+        let _guard = serial();
+        reset();
+        let missing = LinkAddInput {
+            host: None,
+            port: None,
+            live: None,
+            label: None,
+            broker: Some(Broker::Mt5),
+            mt5_login: None,
+            mt5_server: None,
+        };
+        assert!(matches!(
+            link_add(&missing),
+            Err(TradingError::InvalidRequest { .. })
+        ));
+        let mt5 = LinkAddInput {
+            host: None,
+            port: None,
+            live: None,
+            label: Some("Cuenta demo".into()),
+            broker: Some(Broker::Mt5),
+            mt5_login: Some(51_234_567),
+            mt5_server: Some("AureaDemo".into()),
+        };
+        let link = link_add(&mt5).expect("valid mt5 link");
+        assert_eq!(link.id, "mt5-51234567@AureaDemo");
+        assert_eq!(link.mt5_login, Some(51_234_567));
+        let removed = link_remove(&link.id).expect("known link");
+        assert!(!removed.iter().any(|l| l.id == link.id));
+        assert!(matches!(
+            link_remove("nope"),
+            Err(TradingError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn connect_disconnect_and_pool_selection_are_honest() {
+        let _guard = serial();
+        reset();
+        assert!(disconnect().is_none());
+        let snapshot = current();
+        assert!(!snapshot.connected);
+        assert!(snapshot.account.is_none());
+        assert!(snapshot.positions.is_empty());
+        assert!(connect().is_some());
+        assert!(current().connected);
+        assert!(matches!(
+            pool_select("  "),
+            Err(TradingError::InvalidRequest { .. })
+        ));
+        let picked = pool_select("C:\\Aurea\\otro").expect("non-empty dir");
+        assert_eq!(picked.systems, 2);
+        assert_eq!(current().systems_dir.as_deref(), Some("C:\\Aurea\\otro"));
+        assert!(matches!(
+            account_select("DU-other"),
+            Err(TradingError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn detectors_report_paper_not_live() {
+        let ports = ibkr_detect(None, None);
+        let paper = ports.iter().find(|p| p.port == 7497).expect("paper port");
+        assert!(!paper.live);
+        assert!(paper.open);
+        let live = ports.iter().find(|p| p.port == 7496).expect("live port");
+        assert!(live.live);
+        assert!(!live.open);
+        let detected = mt5_detect(true);
+        assert_eq!(detected.len(), 1);
+        assert!(detected[0].active);
+    }
+}

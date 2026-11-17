@@ -801,7 +801,7 @@ impl Onboarding {
                     .line_height(px(30.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(SharedString::from("Welcome to Zeron")),
+                    .child(SharedString::from("Bienvenido a Aurea")),
             )
             .child(
                 div()
@@ -1044,7 +1044,7 @@ impl Onboarding {
             .child(heading(
                 theme,
                 "Sync your work",
-                "Log in to keep your chats, projects and settings in step everywhere you use Zeron.",
+                "Log in to keep your chats, projects and settings in step everywhere you use Aurea.",
             ))
             .child(
                 widgets::section_card(theme)
@@ -1066,7 +1066,7 @@ impl Onboarding {
                         theme,
                         false,
                         icons::CLOUD,
-                        "Zeron Cloud",
+                        "Aurea Cloud",
                         "Hand chats to cloud machines that keep going while your computer sleeps.",
                     )),
             )
@@ -1129,7 +1129,7 @@ impl Onboarding {
             AgentsSummary::NoneInstalled => (
                 "Install an agent",
                 format!(
-                    "Zeron runs the coding agents you already use, and none are on {place} yet. Install one to continue."
+                    "Aurea runs the coding agents you already use, and none are on {place} yet. Install one to continue."
                 ),
             ),
             AgentsSummary::Installed(names) => (
@@ -1302,7 +1302,7 @@ impl Onboarding {
                     .map(|el| {
                         if has_projects {
                             el.child(
-                                wide_button(theme, "onboarding-finish", "Start using Zeron")
+                                wide_button(theme, "onboarding-finish", "Empezar a usar Aurea")
                                     .on_click(cx.listener(|this, _, _, cx| this.finish(false, cx))),
                             )
                         } else {

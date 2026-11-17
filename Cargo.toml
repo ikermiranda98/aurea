@@ -18,6 +18,7 @@ members = [
     "crates/harness",
     "crates/engine",
     "crates/trading",
+    "crates/tws",
     "crates/rpc",
     "crates/update",
     "crates/cli",
@@ -60,6 +61,7 @@ zeron-sync = { path = "crates/sync" }
 zeron-harness = { path = "crates/harness" }
 zeron-engine = { path = "crates/engine" }
 zeron-trading = { path = "crates/trading" }
+zeron-tws = { path = "crates/tws" }
 zeron-rpc = { path = "crates/rpc" }
 zeron-update = { path = "crates/update" }
 zeron-cli = { path = "crates/cli" }
