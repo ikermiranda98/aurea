@@ -62,7 +62,7 @@ aurea.exe (GPUI, headed) ── IPC WebSocket ── aurea-engine (daemon Rust)
   · MT5: bridge Python re-hospedado          → catálogo filtrado:
     (JSON stdio) + translator Rust              DeepSeek v4.1 · GLM 5.3
   · ciclos de cierre + claims              · MCP del engine: herramientas
-    SQLite (7 tablas) + gate                  `trading.*` para los agentes
+    SQLite (8 tablas) + gate                  `trading.*` para los agentes
   · tasks · links · snapshot · panic
   · WARP ring (fase 4): warp-cli, rotación por rechazo, egress proxy
 ```
@@ -114,7 +114,7 @@ aurea.exe (GPUI, headed) ── IPC WebSocket ── aurea-engine (daemon Rust)
 
 | Trabajo | Origen | Destino | Tamaño aprox. |
 |---|---|---|---|
-| **Módulo trading Rust** | `packages/core/src/trading.ts` (4.214 LOC) + `trading/*` (2.7k) | Nueva `crates/trading` integrada en engine | ~7k LOC TS → ~9-11k LOC Rust |
+| **Módulo trading Rust** | `packages/core/src/trading.ts` (4.445 LOC) + `trading/*` (2.7k) | Nueva `crates/trading` integrada en engine | ~7k LOC TS → ~9-11k LOC Rust |
 | Cliente TWS Rust | `@stoqey/ib` parcheado (Node) | Cliente socket nativo (crate `ibapi` o propio) | Nuevo, ~2-4k LOC |
 | Translator MT5 Rust | `trading/bots-mt5.ts` (912) | Port 1:1 a Rust (semántica de órdenes, OCA, fills) | ~1.2k LOC Rust |
 | RPCs de trading | 17 endpoints `experimental.trading.*` | RPCs nativos: `WatchTradingSnapshot` (stream), `TradingAction*` | ~15-25 métodos |
@@ -134,8 +134,8 @@ aurea.exe (GPUI, headed) ── IPC WebSocket ── aurea-engine (daemon Rust)
 
 | Origen | LOC | Notas |
 |---|---|---|
-| `packages/core/src/trading.ts` | 4.214 | Pool scan, ciclo de vida de bots, TWS, cierres con fallback OCA ±4 ticks en grid de tick, panic, tasks, links, snapshot, claims `cierre:<requestId>` con valides 5 min y replay 24 h, fail-closed con DB caída |
-| `packages/core/src/trading/sql.ts` | 127 | 7 tablas drizzle → `rusqlite` con migraciones equivalentes |
+| `packages/core/src/trading.ts` | 4.445 | Pool scan, ciclo de vida de bots, TWS, cierres con fallback OCA ±4 ticks en grid de tick, panic, tasks, links, snapshot, claims `cierre:<requestId>` con valides 5 min y replay 24 h, fail-closed con DB caída |
+| `packages/core/src/trading/sql.ts` | 127 | 8 tablas drizzle → `rusqlite` con migraciones equivalentes |
 | `packages/core/src/trading/servidor-bots.ts` | 104 | API local `/bot/*` con header `X-OpenBot-Bot` por sistema |
 | `packages/core/src/trading/bots-mt5.ts` | 912 | Semántica `ib_async` → MT5 DEAL/pending/SL/TP, OCA, matemática de lotes que preserva exposición |
 | `packages/core/src/trading/mt5-ordenes.ts` | 133 | Codificación de órdenes MT5 |
@@ -203,7 +203,7 @@ aurea.exe (GPUI, headed) ── IPC WebSocket ── aurea-engine (daemon Rust)
 Nuevo repo `aurea` desde `zeronsh/zeron`; aplicar quita (§4.2); árbol compila; binario `aurea`; rename visible mínimo; tema default con acento dorado; CI Windows; arranque local-first sin login. **Criterio de salida:** la app abre, el shell luce, sesiones de prueba con DeepSeek/GLM funcionan vía harness opencode con catálogo filtrado.
 
 **Fase 1 — Motor trading en Rust + dashboard mínimo** (~4-6 semanas)
-`crates/trading`: pool, ciclo de vida de bots, servidor-bots, snapshot, DB 7 tablas, **MT5 completo** (bridge re-hospedado + translator Rust), RPCs `WatchTradingSnapshot`/acciones; UI: nav strip, KPIs, posiciones, sistemas, registro, wizard de link MT5. **Criterio:** arrancar/parar bots MT5 y cerrar posiciones desde el dashboard, con claims y veredictos traducidos.
+`crates/trading`: pool, ciclo de vida de bots, servidor-bots, snapshot, DB 8 tablas, **MT5 completo** (bridge re-hospedado + translator Rust), RPCs `WatchTradingSnapshot`/acciones; UI: nav strip, KPIs, posiciones, sistemas, registro, wizard de link MT5. **Criterio:** arrancar/parar bots MT5 y cerrar posiciones desde el dashboard, con claims y veredictos traducidos.
 
 **Fase 2 — Agentes y gate** (~2-3 semanas)
 Desk chat con contexto permanente; MCP tools `trading.*` para los agentes; filtrado del catálogo confirmado (DeepSeek v4.1 + GLM 5.3); gate de cierre al salir; notificaciones de fills/panic. **Criterio:** pedir al agente "cierra la posición de X" y verlo ejecutarse; el gate avisa con bots vivos.
@@ -307,10 +307,10 @@ I: CI/updater (Beam)                    J: pony express (Hy4/MiMo/Inkling)      
 ### 10.4 Colas de tareas por lane (entrega + criterio de aceptación)
 
 **Lane A — Motor trading (DeepSeek V4.1) → `crates/trading/`**
-- **A1** Pool de sistemas (`config.py`/`reglas.json`/`system.json`, patrón `NN_name`, `META`) + snapshot síncrono + store SQLite (7 tablas, migraciones). *Criterio: `snapshot()` reproduce los fixtures de Openbot; tests de sql portados.*
+- **A1** Pool de sistemas (`config.py`/`reglas.json`/`system.json`, patrón `NN_name`, `META`) + snapshot síncrono + store SQLite (8 tablas, migraciones). *Criterio: `snapshot()` reproduce los fixtures de Openbot; tests de sql portados.*
 - **A2** Ciclo de vida de bots: `arrancar/arrancarNucleo` (spawn `pythonw bot.py`, adopción vía `panel.pid`), `pararBot/detener/detenerTodos` con pid-guard (CommandLine contiene `bot.py` en la carpeta del sistema), servidor-bots HTTP `/bot/*` con header por sistema. *Criterio: sección lifecycle de `trading-engine.test.ts` pasa en Rust.*
 - **A3** Translator MT5 (`bots-mt5.ts`→Rust): semántica `ib_async` → DEAL/pending/SL/TP, OCA, matemática de lotes que preserva exposición + `mt5-ordenes`. *Criterio: `trading-bots-mt5.test.ts` (141 LOC) pasa; test OCA e2e con flag.*
-- **A4** Ciclos de cierre: `closePosition` (cancelar órdenes propias primero; órdenes ajenas abortan; relectura; mercado opuesto; fallback dos límites OCA GTC ±4 ticks en grid de tick) + `closeAllPositionsInterno` + `panic` + **claims** (`cierre:<requestId>`, lock único, validez 5 min, replay 24 h, fail-closed con DB caída) + veredictos (`veredictoCierre/Vestigio/Interrumpido/Ocupado/DbCaida`). *Criterio: tests de claims/replay idénticos a Openbot.*
+- **A4** Ciclos de cierre: `closePosition` (cancelar órdenes propias primero; órdenes ajenas abortan; relectura; mercado opuesto; fallback dos límites OCA GTC ±4 ticks en grid de tick) + `closeAllPositionsInterno` + `panic` + **claims** (`cierre:<requestId>`, lock único, validez 5 min, replay 24 h, fail-closed con DB caída) + veredictos de cierre (los constructores son `Vestigio/Interrumpido/Ocupado/DbCaida`; el veredicto de cierre normal se construye inline en `cerrarUna` con su `message_key`). *Criterio: tests de claims/replay idénticos a Openbot.*
 - **A5** Tasks programadas (`taskAdd/taskCancel`, expiry loop), links persistidos, `programas.ts` (detección TWS/MT5 en registro + `tasklist`), stub de `registro-ib` hacia el crate `tws`. *Criterio: detección encuentra instalaciones reales en Windows.*
 - **A6** Superficie de acciones del engine (firma exacta de `state/system_start/system_stop/task_add/task_cancel/position_close/positions_close_all/panic/connect/disconnect/account_select`) para mi wiring RPC+MCP. *Criterio: contratos cumplen el doc de contratos (mío).*
 
@@ -444,11 +444,11 @@ Hechos comprobados leyendo el código de ambos repos, en los que se apoyan las d
 - Update transaccional (`crates/update`): swap atómico con rollback y watchdog.
 
 **Openbot-v2 (`ikermiranda98/Openbot-v2`, MIT, fork de OpenCode V2):**
-- Motor trading: `packages/core/src/trading.ts` (4.214 LOC, Effect) + `trading/*` (servidor-bots HTTP 127.0.0.1 `/bot/*` con header por sistema; translator MT5 912 LOC; PUENTE_PY bridge JSON-stdio; pyshim `ib_async` 576 LOC que se inyecta en PYTHONPATH; programas/detección; registro-ib con `@stoqey/ib` parcheado).
+- Motor trading: `packages/core/src/trading.ts` (4.445 LOC, Effect) + `trading/*` (servidor-bots HTTP 127.0.0.1 `/bot/*` con header por sistema; translator MT5 912 LOC; PUENTE_PY bridge JSON-stdio; pyshim `ib_async` 576 LOC que se inyecta en PYTHONPATH; programas/detección; registro-ib con `@stoqey/ib` parcheado).
 - Claims de cierre: tabla `trading_close`, lock único por contrato, validez 5 min, replay de veredicto 24 h, fail-closed con DB caída. Veredictos = claves i18n `trading.*` (en 407 / es 398 claves × 68 locales) — **no son LLM**.
 - Bots = carpetas Python del usuario (`NN_name/bot.py`, `ib_async`), spawn/adopt/kill con pid-guard; NO son agentes.
 - Chat del desk: sesión con metadata `opencode.trading`, contexto permanente via `InstructionEntry`, tools `trading.*` gated a esa sesión (siempre piden permiso, sin "always-allow").
-- DB: 7 tablas drizzle/SQLite (`trading_task/trade/link/meta/account/bot_order/bot_fill/close`), 9 migraciones.
+- DB: 8 tablas drizzle/SQLite (`trading_task/trade/link/meta/account/bot_order/bot_fill/close`), 9 migraciones.
 - UI: `packages/app/src/trading/` ~4.700 LOC SolidJS (route.tsx 3.093) en `/trading/:serverKey/:id`; motor.ts poll 3 s con fallback DEMO.
 - WARP ring: `ghost.ts` (733) + `ghost-egress.ts` (211, rutea el tráfico LLM) + UI del anillo (`usage/free-daily-ring*`) + elevación NSIS (`warp.nsh`).
 - Gate de cierre: `desktop/src/main/windows/trading-close.ts` consulta el snapshot (timeout 1,5 s) y avisa con bots vivos o posiciones abiertas; fail-closed.
