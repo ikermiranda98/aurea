@@ -19,15 +19,17 @@
 | Toolchain Rust+MSVC | background shell | `sh_1eaed3ada001FtsBXX1YfJ5VV2` · log `C:\Users\WDAGUtilityAccount\tools\toolchain-setup.log` | instalando (VS Build Tools descargando) |
 | Lane F — 12 specs de port (SPECS/) | subagente longcat-2.5-free | `ses_e15120839ffeErkn199VfCdvBw` | corriendo |
 | Fase 0 — quitas PLAN §4.2 | subagente deepseek-v4.1-flash-free | `ses_e15120838ffeYt2nHCq2jHYPyw` | corriendo (NO hace commit) |
-| gh auth login device flow | background shell | `sh_1eaf39a900022KZL2r3S6ofUHI` | esperando que el usuario meta el código |
+| gh auth login device flow | background shell | `sh_1eaf39a900022KZL2r3S6ofUHI` | ✅ logueado como ikermiranda98 |
+| gh repo aurea | repo creado | `https://github.com/ikermiranda98/aurea` (privado) | push pendiente de scope `workflow` |
+| gh auth refresh (scope workflow) | background shell | `sh_1eaf80853001CUbHh1nBJyXANR` | esperando 2º código del usuario |
 
 ## Pendientes del USUARIO (bloquean cosas)
-1. **GitHub device code**: `B133-ABF7` en `https://github.com/login/device` (si caducó: relanzar
-   `("", "y") | & "C:\Users\WDAGUtilityAccount\tools\gh\bin\gh.exe" auth login --hostname github.com --git-protocol https --web`
-   en background y leer el código del .out del shell). Tras autenticar: `gh repo create aurea --private --source . --push`.
-2. **TWS API**: TWS corre (PID 9920, `C:\Jts\`) pero el socket no escucha. Pedirle al usuario:
-   Global Configuration → API → Settings → ☑ Enable ActiveX and Socket Clients, puerto **7497**,
-   ☐ Read-Only API desmarcado. Verificar luego `netstat :7497`. Si no abre hasta reiniciar, va con el reinicio de las 23:00.
+1. **Push del baseline al repo `aurea`**: el device flow inicial no trae scope `workflow` (Zeron lleva
+   `.github/workflows/*.yml`). Pedir 2º código: `("", "y") | & gh auth refresh --hostname github.com --scopes workflow`
+   (ya lanzado, shell `sh_1eaf80853001CUbHh1nBJyXANR`, código en su .out). Cuando el usuario lo acepte → push automático.
+   Repo ya creado: `gh repo create aurea --private --source .` falló el push pero CREÓ el repo; tras el scope: `git push -u origin main`.
+2. **TWS API**: ✅ HECHO (2026-11-17 ~21:15) — socket escuchando en 7497 (paper, PID 9920), 7496 cerrado.
+   TWS disponible para lane D en `127.0.0.1:7497`. Recordar al usuario el re-login tras reinicio de las 23:00.
 3. **MT5**: terminal64.exe PID 6768 con demo activa. Más adelante marcar
    Herramientas → Opciones → Asistentes Expertos → ☑ Permitir trading automático (para el puente Python del translator MT5).
 4. **23:00**: TWS se reinicia — gestionar re-login con el usuario (credenciales SOLO en el chat, jamás en ficheros/commits).
