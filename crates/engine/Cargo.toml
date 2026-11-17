@@ -10,6 +10,7 @@ zeron-launch.workspace = true
 # Host-side answers to terminal queries (terminals/replies.rs).
 alacritty_terminal.workspace = true
 zeron-preview.workspace = true
+zeron-trading.workspace = true
 zeron-proto.workspace = true
 zeron-theme.workspace = true
 zeron-doc.workspace = true

@@ -47,6 +47,29 @@ pub mod methods {
     pub const STOP_VOICE_V2: &str = "StopVoiceV2";
     pub const CANCEL_VOICE_ATTEMPT_V2: &str = "CancelVoiceAttemptV2";
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
+    // Trading surface (Aurea): the dashboard's snapshot stream and its actions.
+    pub const WATCH_TRADING_SNAPSHOT: &str = "WatchTradingSnapshot";
+    pub const TRADING_SNAPSHOT: &str = "TradingSnapshot";
+    pub const TRADING_SYSTEM_START: &str = "TradingSystemStart";
+    pub const TRADING_SYSTEM_STOP: &str = "TradingSystemStop";
+    pub const TRADING_TASK_LIST: &str = "TradingTaskList";
+    pub const TRADING_TASK_ADD: &str = "TradingTaskAdd";
+    pub const TRADING_TASK_CANCEL: &str = "TradingTaskCancel";
+    pub const TRADING_POSITION_CLOSE: &str = "TradingPositionClose";
+    pub const TRADING_POSITIONS_CLOSE_ALL: &str = "TradingPositionsCloseAll";
+    pub const TRADING_PANIC: &str = "TradingPanic";
+    pub const TRADING_CONNECT: &str = "TradingConnect";
+    pub const TRADING_DISCONNECT: &str = "TradingDisconnect";
+    pub const TRADING_ACCOUNT_SELECT: &str = "TradingAccountSelect";
+    pub const TRADING_LINK_ADD: &str = "TradingLinkAdd";
+    pub const TRADING_LINK_REMOVE: &str = "TradingLinkRemove";
+    pub const TRADING_MT5_DETECT: &str = "TradingMt5Detect";
+    pub const TRADING_IBKR_DETECT: &str = "TradingIbkrDetect";
+    pub const TRADING_POOL_SELECT: &str = "TradingPoolSelect";
+    // WARP ring (free-model egress rotation).
+    pub const WARP_STATUS: &str = "WarpStatus";
+    pub const WARP_ROTATE: &str = "WarpRotate";
+    pub const WARP_HISTORY: &str = "WarpHistory";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const CANCEL_INSTALL: &str = "CancelInstall";
     pub const INSTALL_HARNESS: &str = "InstallHarness";

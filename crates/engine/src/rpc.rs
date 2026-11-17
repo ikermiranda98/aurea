@@ -4210,6 +4210,125 @@ impl RpcService for EngineRpc {
                 );
                 Ok(RpcReply::Stream(Box::pin(stream)))
             }
+            methods::WATCH_TRADING_SNAPSHOT => Ok(RpcReply::Stream(watch_stream(
+                zeron_trading::mock_watch(),
+            ))),
+            methods::TRADING_SNAPSHOT => RpcReply::value(&zeron_trading::snapshot()),
+            methods::TRADING_SYSTEM_START => {
+                let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
+                match zeron_trading::mock::start_system(&p.system_id) {
+                    Some(system) => RpcReply::value(&system),
+                    None => {
+                        return Err(RpcError::Failed(format!(
+                            "System not found: {}",
+                            p.system_id
+                        )));
+                    }
+                }
+            }
+            methods::TRADING_SYSTEM_STOP => {
+                let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
+                match zeron_trading::mock::stop_system(&p.system_id) {
+                    Some(system) => RpcReply::value(&system),
+                    None => {
+                        return Err(RpcError::Failed(format!(
+                            "System not found: {}",
+                            p.system_id
+                        )));
+                    }
+                }
+            }
+            methods::TRADING_TASK_LIST => RpcReply::value(&zeron_trading::task_list()),
+            methods::TRADING_TASK_ADD => {
+                let p: zeron_proto::trading::TaskAddInput = parse_params(params)?;
+                match zeron_trading::mock::task_add(&p) {
+                    Ok(task) => RpcReply::value(&task),
+                    Err(error) => return Err(RpcError::Failed(error.to_string())),
+                }
+            }
+            methods::TRADING_TASK_CANCEL => {
+                let p: zeron_proto::trading::TaskIdParams = parse_params(params)?;
+                match zeron_trading::mock::task_cancel(&p.task_id) {
+                    Ok(task) => RpcReply::value(&task),
+                    Err(error) => return Err(RpcError::Failed(error.to_string())),
+                }
+            }
+            methods::TRADING_POSITION_CLOSE => {
+                let p: zeron_proto::trading::ClosePositionParams = parse_params(params)?;
+                RpcReply::value(&zeron_trading::mock::close_position(&p.symbol))
+            }
+            methods::TRADING_POSITIONS_CLOSE_ALL => {
+                let _ = params;
+                RpcReply::value(&zeron_trading::mock::close_all_positions())
+            }
+            methods::TRADING_PANIC => {
+                let _ = params;
+                RpcReply::value(&zeron_trading::mock::panic())
+            }
+            methods::TRADING_CONNECT => {
+                let _ = params;
+                RpcReply::value(&zeron_trading::mock::connect())
+            }
+            methods::TRADING_DISCONNECT => {
+                let _ = params;
+                RpcReply::value(&zeron_trading::mock::disconnect())
+            }
+            methods::TRADING_ACCOUNT_SELECT => {
+                let p: zeron_proto::trading::AccountIdParams = parse_params(params)?;
+                match zeron_trading::mock::account_select(&p.account_id) {
+                    Ok(account) => RpcReply::value(&account),
+                    Err(error) => return Err(RpcError::Failed(error.to_string())),
+                }
+            }
+            methods::TRADING_LINK_ADD => {
+                let p: zeron_proto::trading::LinkAddInput = parse_params(params)?;
+                match zeron_trading::mock::link_add(&p) {
+                    Ok(link) => RpcReply::value(&link),
+                    Err(error) => return Err(RpcError::Failed(error.to_string())),
+                }
+            }
+            methods::TRADING_LINK_REMOVE => {
+                let p: zeron_proto::trading::LinkIdParams = parse_params(params)?;
+                match zeron_trading::mock::link_remove(&p.link_id) {
+                    Ok(links) => RpcReply::value(&links),
+                    Err(error) => return Err(RpcError::Failed(error.to_string())),
+                }
+            }
+            methods::TRADING_MT5_DETECT => {
+                let p: zeron_proto::trading::Mt5DetectParams = parse_params(params)?;
+                RpcReply::value(&zeron_trading::mock::mt5_detect(
+                    p.probe.unwrap_or(false),
+                ))
+            }
+            methods::TRADING_IBKR_DETECT => {
+                let p: zeron_proto::trading::IbkrDetectParams = parse_params(params)?;
+                RpcReply::value(&zeron_trading::mock::ibkr_detect(
+                    p.host.as_deref(),
+                    p.port,
+                ))
+            }
+            methods::TRADING_POOL_SELECT => {
+                let p: zeron_proto::trading::PoolSelectParams = parse_params(params)?;
+                match zeron_trading::mock::pool_select(&p.dir) {
+                    Ok(result) => RpcReply::value(&result),
+                    Err(error) => return Err(RpcError::Failed(error.to_string())),
+                }
+            }
+            // WARP: constants exist; the ring's crate lands in lane C, so the
+            // surface degrades honestly until then.
+            methods::WARP_STATUS => RpcReply::value(&zeron_proto::warp::WarpStatus {
+                state: zeron_proto::warp::WarpState::Unavailable,
+                day: None,
+                prefix: None,
+                last_rotate_at: None,
+            }),
+            methods::WARP_ROTATE => RpcReply::value(&zeron_proto::warp::WarpRotateResult {
+                state: zeron_proto::warp::WarpState::Unavailable,
+                prefix: None,
+            }),
+            methods::WARP_HISTORY => {
+                RpcReply::value(&Vec::<zeron_proto::warp::WarpHistoryEntry>::new())
+            }
             methods::WATCH_CHATS if wants_changes(&params) => Ok(RpcReply::Stream(
                 keyed_changes_stream(self.workspace.watch_chats(), "id"),
             )),

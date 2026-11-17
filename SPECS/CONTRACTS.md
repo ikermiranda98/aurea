@@ -1,140 +1,96 @@
 # CONTRACTS — Contratos proto/RPC de trading de Aurea
 
-> **ESTADO: BORRADOR v0.1** (2026-11-17). Se **congela** cuando: (1) quitas Fase 0 integradas,
-> (2) `cargo check --workspace` verde. Tras congelar, cualquier cambio aquí pasa por el orquestador.
-> Fuente de comportamiento: `SPECS/A6.md` (superficie exacta del engine TS) y `SPECS/A1/A4/A5.md`.
-> Nombres: internos y de ficheros siguen la convención Zeron; los métodos RPC son públicos.
+> **ESTADO: v0.3 (2026-11-17 ~21:35)** — tipos en `crates/proto/src/trading.rs` + `warp.rs`,
+> constantes en `crates/rpc/src/lib.rs`, brazos en `crates/engine/src/rpc.rs` y mock
+> interactivo en `crates/trading/`. Sintaxis validada con `rustfmt`; el `cargo check` está
+> bloqueado por el Windows SDK (ver BOARD). Se **congela** cuando el check esté verde.
+> Cambios posteriores: solo orquestador + bump de versión.
+> Fuente de comportamiento: `SPECS/A6.md` y `packages/schema/src/trading.ts` (Openbot).
 
-## 1. Tipos — `crates/proto/src/trading.rs` (nuevo, wire `pub mod trading;` en proto lib)
+## 1. Tipos (fuente de verdad = código)
 
-Convenciones: `serde {rename_all = "camelCase"}`, `DateTime<Utc>` de chrono, `Option` con
-`#[serde(default, skip_serializing_if = "Option::is_none")]`. La Lane A ajusta cualquier `Option`
-al schema TS original (`packages/schema/src/trading.ts`) y reporta desviaciones.
+`crates/proto/src/trading.rs` — port del schema TS, con estas decisiones:
 
-```rust
-pub struct System { pub id: String, pub name: String, pub running: bool, pub active: bool,
-    pub pid: Option<u32>, pub started_at: Option<DateTime<Utc>>, pub symbol: Option<String>,
-    pub timeframe: Option<String>, pub pnl_day: f64, pub client_id: Option<String>,
-    pub close_hour: Option<u8>, pub last_activity_at: Option<DateTime<Utc>>,
-    pub description: Option<String>, pub rules: Option<serde_json::Value> }
+| Tipo | Notas |
+|---|---|
+| `Broker` | `ibkr \| nt \| mt5` (lowercase). `nt` = NinjaTrader, previsto en el schema. |
+| `Link` | `id, host?, port?, label (nullable), broker?, mt5_login? (NÚMERO), mt5_server?, connected (bool requerido)`. |
+| `Account` | `type` es string libre (campo Rust `kind` con `rename = "type"`); `cash/equity/pnl_day/pnl_realized` requeridos-nullables; tags IBKR optional-nullable; `updated_at` epoch ms; `link?`. |
+| `System` | `started_at`/`last_activity_at` epoch ms (`i64`); `pid: Option<u32>`; `client_id: Option<i64>`; `rules: Option<BTreeMap<String,String>>`. |
+| `Position` | `symbol, side(long\|short), size, entry?, current?, pnl?, pnl_pct?` — exacto del schema, sin account_id ni closeable. |
+| `PositionCloseResult` | `ok, message, message_key?, message_params?`. |
+| `PanicResult` | `stopped: Vec<String>, close: PositionCloseResult, message, message_key?, message_params?`. |
+| `Log` | `ts` epoch ms; `level: info\|warning\|error`; `system` requerido ("motor" = engine-wide); `event?: open\|close\|signal`. |
+| `Task` | `id` (`trd_`), `kind: start-systems\|stop-systems` (**solo dos**), `system_ids` (vacío = todos), `run_at` epoch ms PC, `status: pending\|ran\|missed\|cancelled\|failed`, `resolved_at` nullable, `time_created/time_updated`. |
+| `Trade` | `system, ts, pnl?, message` (de registro.log, cap 200, newest first). |
+| `EquityPoint` | `ts, equity?, pnl_day?` (cada 15 s, cap 1000, oldest first). |
+| `ProgramState` | `running \| opening \| closed \| missing`. |
+| `Programs` | `{ tws: ProgramState, mt5?: ProgramState }` — forma exacta del schema. |
+| `Snapshot` | `version: String`; `connected`; `client_in_use?`; `account` nullable; `systems`; `positions`; `open_positions?`; `closable_positions?`; `logs`; `tasks`; `trades?`; `equity?`; `accounts?`; `links?`; `systems_dir?`; `programs?`. |
+| `Mt5Detected` | `login: i64, server, name?, active, live`. |
+| `IbkrPort` | `host, port: u16, live, open` (`live` = 7496; `open` = algo aceptó TCP). |
+| `PoolSelectResult` | `dir: String, systems: u32` — **recuento**, no lista. |
+| `TradingError` | serde tag `code` snake_case: `system_not_found`, `invalid_task`, `task_not_found`, `invalid_request` + message. |
 
-pub struct Account { pub id: String, pub kind: AccountKind /* live|paper|demo|watch */,
-    pub cash: f64, pub equity: f64, pub pnl_day: f64, pub pnl_realized: f64,
-    pub available_funds: Option<f64>, pub demo: Option<bool>, pub buying_power: Option<f64>,
-    pub margin_used: Option<f64>, pub excess_liquidity: Option<f64>,
-    pub updated_at: Option<DateTime<Utc>>, pub link: Option<String> }
+### Inputs de acciones (camelCase en el cable)
 
-pub struct Task { pub id: String /* trd_* */, pub kind: TaskKind, pub system_ids: Vec<String>,
-    pub run_at: DateTime<Utc>, pub status: TaskStatus, pub resolved_at: Option<DateTime<Utc>>,
-    pub time_created: DateTime<Utc>, pub time_updated: DateTime<Utc> }
-pub enum TaskKind { Stop, CloseAll, Panic } // según schema TS
-pub enum TaskStatus { Pending, Ran, Missed, Cancelled, Failed }
+- `TaskAddInput`: `kind`, `systemIDs?` (mayúsculas exactas del core), `delayMinutes?` (número
+  positivo), `atTime?` (**string "HH:MM"** local; mutuamente excluyentes). Validado en el mock
+  igual que `trading.ts` (`Give either delayMinutes or atTime, not both.`).
+- `LinkAddInput`: `host?`, `port?`, `live?`, `label?`, `broker?`, `mt5Login?` (**número**),
+  `mt5Server?`.
+- Params unarios definidos en el proto: `SystemIdParams{systemId}`, `TaskIdParams{taskId}`,
+  `ClosePositionParams{symbol, requestId?}`, `RequestIdParams{requestId?}`,
+  `AccountIdParams{accountId}`, `LinkIdParams{linkId}`, `Mt5DetectParams{probe?}`,
+  `IbkrDetectParams{host?,port?}`, `PoolSelectParams{dir}`.
 
-pub struct Position { pub symbol: String, pub side: PositionSide, pub quantity: f64,
-    pub avg_price: Option<f64>, pub market_price: Option<f64>, pub unrealized_pnl: Option<f64>,
-    pub account_id: Option<String>, pub system_id: Option<String>, pub closeable: bool }
-pub enum PositionSide { Long, Short }
+## 2. Métodos RPC (constantes en `crates/rpc/src/lib.rs`, brazos en `engine/rpc.rs`)
 
-pub struct PositionCloseResult { pub ok: bool, pub message: String,
-    pub message_key: Option<String>, pub message_params: Option<serde_json::Value> }
-pub struct PanicResult { pub stopped: Vec<String>, pub close: PositionCloseResult,
-    pub message: String, pub message_key: Option<String>, pub message_params: Option<serde_json::Value> }
+Stream: `WatchTradingSnapshot` (cada item = `Snapshot` completo).
 
-pub struct Log { pub ts: DateTime<Utc>, pub level: LogLevel, pub system: Option<String>,
-    pub message: String, pub message_key: Option<String>, pub message_params: Option<serde_json::Value>,
-    pub event: Option<String> }
-pub enum LogLevel { Debug, Info, Warn, Error }
+Unary: `TradingSnapshot`, `TradingSystemStart`/`Stop`, `TradingTaskList`, `TradingTaskAdd`,
+`TradingTaskCancel`, `TradingPositionClose`, `TradingPositionsCloseAll`, `TradingPanic`,
+`TradingConnect`/`TradingDisconnect`, `TradingAccountSelect`, `TradingLinkAdd`/`LinkRemove`,
+`TradingMt5Detect`/`TradingIbkrDetect`, `TradingPoolSelect`.
 
-pub struct Link { pub id: String, pub label: Option<String>, pub host: Option<String>,
-    pub port: Option<u16>, pub live: Option<bool>, pub broker: Option<String>,
-    pub mt5_login: Option<String>, pub mt5_server: Option<String> }
+WARP: `WarpStatus`, `WarpRotate`, `WarpHistory` — **hoy devuelven `Unavailable`/vacío** hasta que
+exista `crates/warp` (lane C); la superficie no miente ni finge un túnel.
 
-pub struct Snapshot { pub version: u32, pub connected: bool, pub client_in_use: Option<String>,
-    pub account: Option<Account>, pub systems: Vec<System>, pub positions: Vec<Position>,
-    pub open_positions: Option<Vec<Position>>, pub closable_positions: Option<Vec<Position>>,
-    pub logs: Vec<Log>, pub tasks: Vec<Task>, pub trades: Option<Vec<serde_json::Value>>,
-    pub equity: Option<Vec<EquityPoint>>, pub accounts: Option<Vec<Account>>,
-    pub links: Option<Vec<Link>>, pub systems_dir: Option<String>,
-    pub programs: Option<Vec<ProgramStatus /* proto::program_status */>> }
-pub struct EquityPoint { pub t: DateTime<Utc>, pub equity: f64 }
+## 3. Reglas de oro del wiring
 
-pub struct TaskAddInput { pub kind: TaskKind, pub system_ids: Option<Vec<String>>,
-    pub delay_minutes: Option<i64>, pub at_time: Option<DateTime<Utc>> } // delay/at excluyentes
-pub struct LinkAddInput { pub host: Option<String>, pub port: Option<u16>, pub live: Option<bool>,
-    pub label: Option<String>, pub broker: Option<String>, pub mt5_login: Option<String>, pub mt5_server: Option<String> }
-pub struct PoolSelectResult { pub dir: String, pub systems: Vec<System> }
-pub struct Mt5Detected { /* según schema TS: login, server, terminal, path… */ }
-pub struct IbkrPort { pub host: String, pub port: u16, pub live: bool }
+1. `TradingPositionClose`/`TradingPositionsCloseAll`/`TradingPanic` con `requestId`: UI genera
+   `ui:<id>`; chat del desk `chat:<sessionId>` → replay 24 h del veredicto (A4). HTTP sin
+   requestId → id anónimo con sello (sin replay).
+2. Gate de dinero v1: (a) `PermissionGate` inyectado en el engine para cierres; (b) confirmación
+   nativa en UI (B7); (c) tools MCP **siempre** preguntan (sin always-allow).
+3. Tool `state` recorta `logs` a 20; el RPC completo devuelve todo.
+4. Cuenta watch = solo lectura (la UI no ofrece cierre); regla `vistaOpera` de A6.
+5. `TradingConnect/Disconnect` devuelven la cuenta en ese instante (null sin balances aún).
 
-/// Errores del motor, serializados como `{code, message, params?}` en la `err` del RPC.
-pub enum TradingError { SystemNotFound { system_id: String }, InvalidTask { message: String },
-    TaskNotFound { task_id: String }, InvalidRequest { message: String } }
-```
+## 4. Mock interactivo (desbloquea la UI antes del engine real)
 
-## 2. Métodos RPC — constantes en `crates/rpc/src/lib.rs` (`pub mod methods`)
+`crates/trading/src/mock.rs`: snapshot vivo cada 2 s con 2 sistemas (MT5/IBKR), 3 posiciones,
+1 cuenta demo, 2 tasks, 5 logs, 24 puntos de equity, 2 links y `programs` de TWS/MT5.
 
-Stream (el patrón `Watch*` de Zeron; cada item un `Snapshot` completo):
+Las acciones **mutan** el fixture y republican de inmediato (el dashboard ya es interactivo):
 
-```rust
-pub const WATCH_TRADING_SNAPSHOT: &str = "WatchTradingSnapshot";
-```
+| Acción | Efecto simulado |
+|---|---|
+| `TradingSystemStart/Stop` | flags `running/pid/started_at` + log `trading.log.system_started/stopped` |
+| `TradingPositionClose` | retira la fila + veredicto `ok` + log `trading.close.ok` |
+| `TradingPositionsCloseAll` | cierra todas + `trading.close.all_ok` |
+| `TradingPanic` | para todos los bots y cierra todo + log error `trading.panic.done` |
+| `TradingTaskAdd/Cancel` | valida HH:MM/minutos, crea `trd_mockNNNN` o cancela con `resolved_at` |
+| `TradingConnect/Disconnect` | `connected` + vacía cuenta/posiciones al desconectar |
+| `TradingAccountSelect` | acepta la cuenta demo, error `invalid_request` si no existe |
+| `TradingLinkAdd/Remove` | construye `host:port` o `mt5-login@server`, retira del snapshot |
+| `TradingMt5Detect` / `TradingIbkrDetect` | 1 cuenta demo / knock 7496 cerrado + 7497 abierto |
+| `TradingPoolSelect` | cambia `systems_dir` y devuelve el recuento |
 
-Unary (params → ok):
-
-```rust
-pub const TRADING_SNAPSHOT:          &str = "TradingSnapshot";          // {} → Snapshot
-pub const TRADING_SYSTEM_START:      &str = "TradingSystemStart";      // {systemId} → System   (engine: activate)
-pub const TRADING_SYSTEM_STOP:       &str = "TradingSystemStop";       // {systemId} → System   (engine: pause)
-pub const TRADING_TASK_LIST:         &str = "TradingTaskList";         // {} → [Task]
-pub const TRADING_TASK_ADD:          &str = "TradingTaskAdd";          // TaskAddInput → Task
-pub const TRADING_TASK_CANCEL:       &str = "TradingTaskCancel";       // {taskId} → Task
-pub const TRADING_POSITION_CLOSE:    &str = "TradingPositionClose";    // {symbol, requestId?} → PositionCloseResult
-pub const TRADING_POSITIONS_CLOSE_ALL: &str = "TradingPositionsCloseAll"; // {requestId?} → PositionCloseResult
-pub const TRADING_PANIC:             &str = "TradingPanic";            // {} → PanicResult
-pub const TRADING_CONNECT:           &str = "TradingConnect";          // {} → Account|null
-pub const TRADING_DISCONNECT:        &str = "TradingDisconnect";       // {} → null
-pub const TRADING_ACCOUNT_SELECT:    &str = "TradingAccountSelect";    // {accountId} → Account|null
-pub const TRADING_LINK_ADD:          &str = "TradingLinkAdd";          // LinkAddInput → Link
-pub const TRADING_LINK_REMOVE:       &str = "TradingLinkRemove";       // {linkId} → [Link]
-pub const TRADING_MT5_DETECT:        &str = "TradingMt5Detect";        // {probe?} → [Mt5Detected]
-pub const TRADING_IBKR_DETECT:       &str = "TradingIbkrDetect";       // {host?, port?} → [IbkrPort]
-pub const TRADING_POOL_SELECT:       &str = "TradingPoolSelect";       // {dir} → PoolSelectResult
-```
-
-WARP (lane C, tipos en `crates/proto/src/warp.rs` — mínimo):
-
-```rust
-pub const WARP_STATUS:  &str = "WarpStatus";   // {} → {state: connected|connecting|disconnected|unavailable, day?, prefix?, lastRotateAt?}
-pub const WARP_ROTATE:  &str = "WarpRotate";   // {} → {state, prefix}
-pub const WARP_HISTORY: &str = "WarpHistory";  // {} → [{at, from, to, reason}]
-```
-
-## 3. Reglas de oro del wiring (orquestador)
-
-1. `TradingPositionClose` / `TradingPositionsCloseAll` / `TradingPanic` llevan `requestId` opcional:
-   UI genera `ui:<id>`; el chat del desk usa `chat:<sessionId>` → replay 24 h del veredicto (A4).
-2. El gate de dinero en v1: (a) el motor exige `PermissionGate` inyectado en acciones de cierre;
-   (b) la UI B7 muestra confirmación nativa; (c) las tools MCP **siempre** preguntan (sin always-allow).
-3. `snapshot()` del tool `state` recorta `logs` a las últimas 20 — el RPC `TradingSnapshot` devuelve todo;
-   el recorte es cosa del caller.
-4. La cuenta en `Snapshot.account` puede ser watch (solo lectura): la UI no ofrece cierre para ella
-   (regla `vistaOpera` de A6 §2.2, ahora nativa en la UI).
-5. `TradingConnect`/`Disconnect` devuelven el estado en ese instante (null si aún no hay balances).
-
-## 4. Mock (para que la UI vuele antes del engine)
-
-`crates/trading/src/mock.rs` (orquestador): si el engine trading no está configurado, el match arm de
-`WatchTradingSnapshot` sirve un stream con datos fixture (2 sistemas, 3 posiciones, 1 cuenta demo,
-2 tasks, log de 5 entradas) y las acciones unarias devuelven respuestas simuladas inmediatas + evento
-en el log del mock. UI indistinguible del real → QA visual (lane E) puede empezar sin engine.
-
-## 5. Congelado
-
-Al integrar (quitas + toolchain verde): escribir `proto/trading.rs` + `warp.rs`, constantes, mock,
-match arms en `engine/src/rpc.rs` → `cargo check --workspace` verde → commit `contratos: trading proto/RPC`
-→ cambiar ESTE encabezado a **CONGELADO v1**. Cambios posteriores: solo orquestador, con bump de versión
-y nota en la tabla inferior.
+## 5. Versionado
 
 | Versión | Fecha | Cambio |
 |---|---|---|
 | v0.1 | 2026-11-17 | Borrador desde SPECS/A6 + schema TS |
+| v0.2 | 2026-11-17 | Tipos exactos del schema en `proto/trading.rs` + `warp.rs` + constantes RPC |
+| v0.3 | 2026-11-17 | Correcciones del barrido completo: `Broker::Nt`, `Link.connected`/`mt5_login` numérico, `IbkrPort.open`, `Programs` exacto, `PoolSelectResult.systems` recuento, `TaskAddInput` camelCase con `atTime` "HH:MM"; brazos RPC (20 + 3 WARP) y mock interactivo |

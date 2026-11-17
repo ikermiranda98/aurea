@@ -18,6 +18,8 @@ pub mod motion;
 pub mod plan_usage;
 pub mod preview;
 pub mod program_status;
+pub mod trading;
+pub mod warp;
 pub mod projectless;
 pub mod redact;
 pub mod relay_gen;

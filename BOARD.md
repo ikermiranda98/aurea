@@ -2,9 +2,9 @@
 
 > **LEEME PRIMERO SI ERES UN MODELO NUEVO:** este archivo es la memoria operativa del orquestador.
 > Compáctalo mentalmente en 30 segundos y sigue. Plan maestro: `PLAN.md`; briefs: `BRIEFS/`;
-> specs de port: `SPECS/`; contratos: `SPECS/CONTRACTS.md` (borrador v0.1). NUNCA credenciales en ficheros.
+> specs de port: `SPECS/`; contratos: `SPECS/CONTRACTS.md` (v0.3). NUNCA credenciales en ficheros.
 >
-> Última actualización: 2026-11-17 ~22:30 · **Fase 0 cerrando, hora ~2,5**
+> Última actualización: 2026-11-17 ~21:35 · **Fase 0 cerrando, contratos escritos**
 
 ## Identidad del proyecto
 - **Aurea** = fork de `zeronsh/zeron` (Rust+GPUI) → app de trading de escritorio. Motor portado de Openbot-v2 (TS) a Rust.
@@ -14,40 +14,46 @@
 
 ## DECISIÓN CLAVE (2026-11-17 ~22:20): quitas §4.2 en modo ligero
 Los 2 subagentes de quitas murieron por cupo free (DeepSeek y GLM). La quita literal (engine+UI+rpc.rs 7.409 líneas/432 arms) es ~1,5 días de cirugía y NO está en la ruta crítica.
-**Aplicado:** eliminados `apps/zgx`, `apps/card-web`, `apps/landing`, `apps/www-redirect`, `crates/preview-label` (sin ondulación de compilación). **Restaurado al baseline:** `crates/engine`, `crates/harness`, `crates/preview` (el árbol vuelve a ser compilable).
-**Pendiente (hardening post-v1, documentar en release):** quitas profundas de engine/UI/RPC (repos/git/cloud/plugins/agent_accounts) — se harán con CI y compilador en verde, no a ciegas.
+**Aplicado:** eliminados `apps/zgx`, `apps/card-web`, `apps/landing`, `apps/www-redirect`.
+**Restaurado al baseline:** `crates/engine`, `crates/harness`, `crates/preview`, `crates/preview-label` y `Cargo.toml` (el árbol vuelve a ser compilable).
+**Pendiente (hardening post-v1):** quitas profundas de engine/UI/RPC (repos/git/cloud/plugins/agent_accounts).
 
 ## Git
-MinGit lleva GCM de sistema (diálogo fantasma). Global config arreglada. Fallback infalible si algo pide credenciales:
+MinGit lleva GCM de sistema (diálogo fantasma). Global config arreglada (`helper =` vacío + `!gh auth git-credential`). Fallback infalible:
 ```powershell
 $tok = & gh auth token; $b64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("ikermiranda98:$tok"))
 git -c credential.helper= -c "http.extraheader=AUTHORIZATION: basic $b64" push
 ```
 
 ## Toolchain
-- `cargo 1.100.0` + `rustc 1.100.0` ✅ instalados (2026-11-17 22:15).
-- **VS Build Tools MSVC AÚN instalando** (Windows SDK desde 20:38; shell bg `sh_1eaed3ada001FtsBXX1YfJ5VV2`, log `C:\Users\WDAGUtilityAccount\tools\toolchain-setup.log`). Sin `cl.exe`/`link.exe`, el check fallará en deps nativas.
+- `cargo 1.100.0` + `rustc 1.100.0` ✅ · MSVC 14.44 con `link.exe` ✅ (existe, sin registrar aún).
+- **Windows SDK AÚN instalando** (desde 20:38; va por el paquete ~24; falta `C:\Program Files (x86)\Windows Kits\10\Lib\...\kernel32.lib`).
+- **Trampa:** sin el SDK completo, `cargo check` falla en build scripts con `linker link.exe not found` aunque link.exe exista.
+- Validación sin enlazador disponible: `rustfmt --emit stdout <fichero>` parsea sintaxis; `cargo metadata --no-deps` valida manifiestos.
 
 ## Estado actual
 | Qué | Estado |
 |---|---|
-| Quitas ligeras | ✅ (apps + preview-label) |
-| `cargo check --workspace` | 🔄 primer intento lanzado (bg) |
-| Contratos | 📝 borrador v0.1 en `SPECS/CONTRACTS.md` — se congela con check verde |
+| Quitas ligeras | ✅ (solo apps legacy) |
+| `cargo check --workspace` | ⛔ bloqueado por Windows SDK |
+| Manifiestos | ✅ `cargo metadata --no-deps` exit 0 |
+| Contratos proto trading/warp | ✅ escritos y corregidos contra el schema (v0.3) |
+| Constantes RPC | ✅ 18 trading + 3 warp en `crates/rpc/src/lib.rs` |
+| Brazos engine RPC | ✅ 20 métodos + 3 WARP en `engine/rpc.rs` |
+| Crate `crates/trading` | ✅ mock vivo cada 2 s + acciones simuladas interactivas |
+| Sintaxis | ✅ rustfmt OK en los 7 ficheros tocados (sin commitear aún) |
 | Specs | ✅ 12 en repo |
-| GitHub | ✅ baseline+specs (falta push del estado quitas-lite) |
 
 ## Pendientes del USUARIO
-1. **~23:00 TWS re-login** tras su reinicio (credenciales solo en chat). TWS API ✅ en 7497 paper.
+1. **~23:00 TWS re-login** tras su reinicio (credenciales solo en chat). TWS API ✅ en 7497 paper; 7496 cerrado.
 2. MT5: más adelante ☑ Herramientas→Opciones→Asistentes Expertos→Permitir trading automático.
-3. Aviso cupo free: si un modelo muere con "Free usage limit reached", cambiar de modelo (big-pickle/GLM), decir «sigue» — BOARD lo cubre.
+3. Aviso cupo free: si un modelo muere con "Free usage limit reached", cambiar de modelo, decir «sigue» — BOARD lo cubre.
 
 ## Cola del orquestador
-1. `cargo check --workspace` verde → commit `fase 0: quitas ligeras` + push.
-2. Contratos: `crates/proto/src/trading.rs` + `warp.rs` + constantes en `crates/rpc/src/lib.rs` + mock en `crates/trading/src/mock.rs` + match arms `WatchTradingSnapshot` → check verde → congelar CONTRACTS.md.
-3. Lanzar lanes como subagentes con modelo que tenga cupo: A (motor), B×2 (UI), C (WARP), D (TWS). Briefs autocontenidos en `BRIEFS/`. Si el cupo free sigue muerto: construir yo las piezas críticas en orden A1→A2→D1→B1.
-4. Wiring RPC/MCP: SOLO orquestador. Commits: SOLO orquestador.
-5. TWS solo paper (7497). PROHIBIDO live (7496). Puerta de dinero SIEMPRE con el usuario.
+1. Al terminar el SDK: `cargo check --workspace` → iterar a verde → commit `fase 0: contratos + mock interactivo` → push → congelar CONTRACTS.md v1.
+2. Lane A (motor real) en orden A1→A2; D1 (cliente TWS); luego B (dashboard GPUI sobre el mock ya vivo).
+3. Wiring RPC/MCP: SOLO orquestador. Commits: SOLO orquestador.
+4. TWS solo paper (7497). PROHIBIDO live (7496). Puerta de dinero SIEMPRE con el usuario.
 
 ## Reglas invariables
 - Solo renombrado visible a "Aurea"; interno `zeron-*`/`ZERON_*` intacto. `crates/harness/src/opencode/` sagrado.
@@ -56,9 +62,10 @@ git -c credential.helper= -c "http.extraheader=AUTHORIZATION: basic $b64" push
 
 ## Bitácora
 - 20:09 fork + commit base `f870dfb`. MinGit + gh portables. BRIEFS completos.
-- 21:00-21:30 gh auth OK (2 device flows) · repo `aurea` creado · TWS API habilitada (7497).
-- 21:35 Lane F: 12 specs + hallazgos (8 tablas, patch @stoqey splice-bug, magic MT5). PLAN corregido.
+- 21:00-21:30 gh auth OK · repo `aurea` creado · TWS API habilitada (7497).
+- 21:35 Lane F: 12 specs + hallazgos (8 tablas, patch @stoqey splice-bug, magic MT5).
 - 21:45 baseline en GitHub (94 MiB, 3 commits). Quitas 1ª murió (cupo DeepSeek).
 - 22:15 quitas 2ª murió (cupo GLM) — había borrado 62 ficheros engine y 137 harness.
 - 22:20 DECISIÓN: quitas ligeras; restore engine/harness/preview al baseline; apps fuera. cargo/rustc YA instalados.
-- 22:30 primer `cargo check --workspace` lanzado. Contratos v0.1 escritos.
+- 22:30 primer `cargo check` (falla por `link.exe`); restore preview-label + Cargo.toml baseline (`e5cd907`).
+- 21:30 (reloj VM) barrido completo del schema: corregidos `Link.connected`, `mt5_login` número, `IbkrPort.open`, `Programs`, `PoolSelectResult.systems`, `TaskAddInput` (`systemIDs`/`atTime` "HH:MM"). Proto v0.3 + 20 brazos RPC + mock interactivo (start/stop/close/close-all/panic/tasks/links/detect/pool). rustfmt OK. Check pendiente del SDK.
