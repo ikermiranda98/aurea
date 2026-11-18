@@ -13751,6 +13751,7 @@ dependencies = [
  "zeron-sync",
  "zeron-term-link",
  "zeron-theme",
+ "zeron-trading",
  "zeron-update",
  "zeron-visual",
  "zip",
@@ -13929,6 +13930,7 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
  "uuid",
 ]
 
@@ -14068,6 +14070,27 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "zeron-trading"
+version = "0.3.7"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zeron-proto",
+ "zeron-tws",
+]
+
+[[package]]
+name = "zeron-tws"
+version = "0.3.7"
+dependencies = [
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -14245,6 +14268,16 @@ dependencies = [
  "zeron-orb",
  "zeron-proto",
  "zeron-rpc",
+]
+
+[[package]]
+name = "zeron-warp"
+version = "0.3.7"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -405,7 +405,7 @@ impl TradingSurface {
 
     // ------------------------------------------------------------------- body
 
-    fn body(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn body(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(snapshot) = self.snapshot.clone() else {
             let (title, detail, color) = match &self.phase {
                 Phase::Connecting => (
@@ -449,11 +449,13 @@ impl TradingSurface {
                                 .text_color(theme.text_faint)
                                 .child(SharedString::from(detail)),
                         ),
-                );
+                )
+                .into_any_element();
         };
 
         let now = now_ms();
         div()
+            .id("trading-surface-scroll")
             .flex_1()
             .w_full()
             .min_h(px(0.0))
@@ -467,6 +469,7 @@ impl TradingSurface {
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .items_start()
                     .gap(px(14.0))
                     .child(
@@ -492,6 +495,7 @@ impl TradingSurface {
                     ),
             )
             .child(self.logs_card(&snapshot, theme, now))
+            .into_any_element()
     }
 
     fn kpi_strip(&self, snapshot: &Snapshot, theme: &Theme) -> Div {
@@ -505,6 +509,7 @@ impl TradingSurface {
         div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .gap(px(10.0))
             .child(self.kpi_card(theme, "EQUITY", model::money(kpis.equity), theme.text))
             .child(self.kpi_card(
@@ -785,6 +790,10 @@ impl TradingSurface {
     fn links_card(&self, snapshot: &Snapshot, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let links = snapshot.links.clone().unwrap_or_default();
         let connected = links.iter().filter(|link| link.connected).count();
+        // The demo fixture never enumerates accounts (`accounts: None`); a live
+        // TWS paper link always does. That is what tells the button which way
+        // the surface is running.
+        let live = snapshot.accounts.is_some();
         let mut rows: Vec<Div> = Vec::with_capacity(links.len());
         if links.is_empty() {
             rows.push(empty_row(theme, "Sin conexiones registradas."));
@@ -804,7 +813,7 @@ impl TradingSurface {
             .border_color(theme.border)
             .child(
                 button(
-                    ("trading-link-add-tws", 0),
+                    "trading-link-add-tws",
                     "Añadir TWS paper",
                     ButtonTone::Ghost,
                     theme,
@@ -826,7 +835,7 @@ impl TradingSurface {
             )
             .child(
                 button(
-                    ("trading-link-add-mt5", 1),
+                    "trading-link-add-mt5",
                     "Añadir MT5",
                     ButtonTone::Ghost,
                     theme,
@@ -871,9 +880,34 @@ impl TradingSurface {
                 })),
             )
             .child(div().flex_1())
+            .child(if live {
+                button(
+                    "trading-disconnect-tws",
+                    "Desconectar TWS",
+                    ButtonTone::Ghost,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.notice = Some("Cerrando la conexión con TWS…".into());
+                    this.call(methods::TRADING_DISCONNECT, json!({}), cx);
+                    cx.notify();
+                }))
+            } else {
+                button(
+                    "trading-connect-tws",
+                    "Conectar TWS paper",
+                    ButtonTone::Primary,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.notice = Some("Conectando con TWS paper en 127.0.0.1:7497…".into());
+                    this.call(methods::TRADING_CONNECT, json!({}), cx);
+                    cx.notify();
+                }))
+            })
             .child(
                 button(
-                    ("trading-detect-ports", 2),
+                    "trading-detect-ports",
                     "Detectar puertos",
                     ButtonTone::Ghost,
                     theme,

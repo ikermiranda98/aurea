@@ -4,8 +4,12 @@
 //! watch channel the RPC layer streams) plus [`mock`], the fixture source the
 //! dashboard consumes until the real engine (lane A) lands.
 
+pub mod ibkr;
 pub mod mock;
 pub mod pool;
+pub mod service;
+
+pub use service::TradingService;
 
 /// Shared protocol types re-exported for convenience.
 pub use zeron_proto::trading;

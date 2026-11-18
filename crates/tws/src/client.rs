@@ -99,7 +99,16 @@ pub enum IbEvent {
 pub struct IbClient {
     state: Arc<AtomicBool>,
     disconnect_requested: Arc<AtomicBool>,
-    control_tx: mpsc::Sender<()>,
+    control_tx: mpsc::UnboundedSender<LinkCommand>,
+}
+
+/// What the owner asks of the link task between reads.
+#[derive(Debug)]
+enum LinkCommand {
+    /// Write these fields as one framed message (see [`crate::requests`]).
+    Send(Vec<String>),
+    /// Stop for good: the task reports `Disconnected { requested: true }`.
+    Disconnect,
 }
 
 impl IbClient {
@@ -117,7 +126,7 @@ impl IbClient {
         config: IbClientConfig,
     ) -> Result<(Self, mpsc::UnboundedReceiver<IbEvent>), std::io::Error> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let (control_tx, control_rx) = mpsc::channel(1);
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
         let state = Arc::new(AtomicBool::new(false));
         let disconnect_requested = Arc::new(AtomicBool::new(false));
 
@@ -152,7 +161,17 @@ impl IbClient {
             return;
         }
         self.state.store(false, Ordering::Release);
-        let _ = self.control_tx.send(()).await;
+        self.control_tx.send(LinkCommand::Disconnect).ok();
+    }
+
+    /// Queues one message for the link (see [`crate::requests`]).
+    ///
+    /// Returns `false` when the task is gone (the socket died for good, or the
+    /// client id was refused). A message sent before TWS reports its server
+    /// version is dropped on purpose: no request is valid before `START_API`,
+    /// and the owner re-subscribes on every [`IbEvent::Connected`] anyway.
+    pub fn request(&self, fields: Vec<String>) -> bool {
+        self.control_tx.send(LinkCommand::Send(fields)).is_ok()
     }
 
     /// Current link state as observed by this handle.
@@ -235,7 +254,7 @@ async fn session(
     stream: &mut TcpStream,
     config: &IbClientConfig,
     events: &mpsc::UnboundedSender<IbEvent>,
-    control_rx: &mut mpsc::Receiver<()>,
+    control_rx: &mut mpsc::UnboundedReceiver<LinkCommand>,
     state: &Arc<AtomicBool>,
     disconnect_requested: &Arc<AtomicBool>,
 ) -> SessionOutcome {
@@ -253,12 +272,39 @@ async fn session(
             biased;
 
             control = control_rx.recv() => {
-                return match control {
-                    Some(()) if disconnect_requested.load(Ordering::Acquire) => {
-                        SessionOutcome::Requested
+                match control {
+                    Some(LinkCommand::Send(fields)) => {
+                        // A queued request must not outlive a shutdown order.
+                        if disconnect_requested.load(Ordering::Acquire) {
+                            return SessionOutcome::Requested;
+                        }
+                        // Before the server-version frame answered with
+                        // START_API no request is valid; the owner resends
+                        // what it needs on the next `Connected`.
+                        if !started {
+                            continue;
+                        }
+                        let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
+                        if stream
+                            .write_all(&crate::codec::encode_message(&refs))
+                            .await
+                            .is_err()
+                        {
+                            return SessionOutcome::Dropped;
+                        }
+                        // A write is activity enough; TWS may stay silent
+                        // while nothing it watches changes.
+                        watchdog_at = tokio::time::Instant::now()
+                            + config.connection_watchdog_interval;
                     }
-                    _ => SessionOutcome::Stop,
-                };
+                    Some(LinkCommand::Disconnect)
+                        if disconnect_requested.load(Ordering::Acquire) =>
+                    {
+                        return SessionOutcome::Requested;
+                    }
+                    // `None` means every handle was dropped: stop for good.
+                    Some(LinkCommand::Disconnect) | None => return SessionOutcome::Stop,
+                }
             }
 
             read = stream.read(&mut buf) => {
@@ -343,7 +389,7 @@ async fn run(
     mut stream: TcpStream,
     config: IbClientConfig,
     events: mpsc::UnboundedSender<IbEvent>,
-    mut control_rx: mpsc::Receiver<()>,
+    mut control_rx: mpsc::UnboundedReceiver<LinkCommand>,
     state: Arc<AtomicBool>,
     disconnect_requested: Arc<AtomicBool>,
 ) {
@@ -379,7 +425,12 @@ async fn run(
 
         let interrupted = tokio::select! {
             _ = tokio::time::sleep(config.reconnect_interval) => false,
-            _ = control_rx.recv() => true,
+            command = control_rx.recv() => match command {
+                // A request for a link that is not up yet: the owner asks
+                // again on the next `Connected`, so it is dropped here.
+                Some(LinkCommand::Send(_)) => false,
+                Some(LinkCommand::Disconnect) | None => true,
+            },
         };
         if interrupted || disconnect_requested.load(Ordering::Acquire) {
             let _ = events.send(IbEvent::Disconnected { requested: true });
@@ -407,7 +458,10 @@ async fn run(
             }
             let interrupted = tokio::select! {
                 _ = tokio::time::sleep(config.reconnect_interval) => false,
-                _ = control_rx.recv() => true,
+                command = control_rx.recv() => match command {
+                    Some(LinkCommand::Send(_)) => false,
+                    Some(LinkCommand::Disconnect) | None => true,
+                },
             };
             if interrupted || disconnect_requested.load(Ordering::Acquire) {
                 let _ = events.send(IbEvent::Disconnected { requested: true });
@@ -525,8 +579,8 @@ mod tests {
     }
 
     /// Reads one complete framed message from the client side of a fake TWS.
-    async fn read_frame(socket: &mut TcpStream) -> Vec<String> {
-        let mut decoder = Decoder::new();
+    /// The decoder is shared across calls: one TCP read can carry two frames.
+    async fn read_frame(socket: &mut TcpStream, decoder: &mut Decoder) -> Vec<String> {
         let mut buf = [0u8; 256];
         let deadline = tokio::time::Instant::now() + WAIT;
         loop {
@@ -566,8 +620,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn requests_are_framed_on_the_link_after_start_api() {
+        let mut tws = fake_tws().await;
+        let (client, mut events) = IbClient::connect(config(tws.port)).await.unwrap();
+        let mut socket = tws.sockets.recv().await.unwrap();
+        let mut decoder = Decoder::new();
+        // START_API first, exactly once, before any owner request.
+        assert_eq!(
+            read_frame(&mut socket, &mut decoder).await,
+            vec!["71", "2", "4242", ""]
+        );
+        collect_until(
+            &mut events,
+            |event| matches!(event, IbEvent::Connected { .. }),
+            WAIT,
+        )
+        .await;
+
+        // Each request is one length-prefixed message, in order.
+        assert!(client.request(crate::requests::req_managed_accounts()));
+        assert!(client.request(crate::requests::req_positions()));
+        assert_eq!(
+            read_frame(&mut socket, &mut decoder).await,
+            vec!["17", "1"]
+        );
+        assert_eq!(
+            read_frame(&mut socket, &mut decoder).await,
+            vec!["61", "1"]
+        );
+        client.disconnect().await;
+    }
+
+    #[tokio::test]
     async fn handshake_is_written_and_connected_comes_after_the_window() {
-        let tws = fake_tws().await;
+        let mut tws = fake_tws().await;
         let (client, mut events) = IbClient::connect(config(tws.port)).await.unwrap();
 
         let handshake = tokio::time::timeout(WAIT, tws.handshakes.recv())
@@ -582,7 +668,8 @@ mod tests {
         assert_eq!(&handshake[8..], b"v100..193");
 
         let mut socket = tws.sockets.recv().await.unwrap();
-        let start = read_frame(&mut socket).await;
+        let mut decoder = Decoder::new();
+        let start = read_frame(&mut socket, &mut decoder).await;
         assert_eq!(start, vec!["71", "2", "4242", ""]);
 
         let seen = collect_until(
@@ -614,13 +701,14 @@ mod tests {
 
     #[tokio::test]
     async fn client_id_in_use_is_terminal_without_connected_or_retry() {
-        let tws = fake_tws().await;
+        let mut tws = fake_tws().await;
         let mut cfg = config(tws.port);
         cfg.stability_window = Duration::from_millis(500);
         let (client, mut events) = IbClient::connect(cfg).await.unwrap();
 
         let mut socket = tws.sockets.recv().await.unwrap();
-        let start = read_frame(&mut socket).await;
+        let mut decoder = Decoder::new();
+        let start = read_frame(&mut socket, &mut decoder).await;
         assert_eq!(start, vec!["71", "2", "4242", ""]);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -656,7 +744,7 @@ mod tests {
 
     #[tokio::test]
     async fn unexpected_drop_reconnects_and_reports_a_second_connected() {
-        let tws = fake_tws().await;
+        let mut tws = fake_tws().await;
         let (client, mut events) = IbClient::connect(config(tws.port)).await.unwrap();
 
         let first = collect_until(
@@ -666,7 +754,7 @@ mod tests {
         )
         .await;
         assert!(matches!(first.last(), Some(IbEvent::Connected { .. })));
-        let mut socket = tws.sockets.recv().await.unwrap();
+        let socket = tws.sockets.recv().await.unwrap();
         drop(socket); // the broker vanished after the link was established
 
         let seen = collect_until(

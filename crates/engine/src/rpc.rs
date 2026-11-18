@@ -907,6 +907,8 @@ pub struct EngineRpc {
     viewport_focus: crate::desktop_notify::ViewportFocus,
     /// The plugins service (absent in bare test assemblies).
     plugins: Option<crate::plugins::Plugins>,
+    /// The trading surface's source (demo fixture or a live TWS paper link).
+    trading: zeron_trading::TradingService,
     engine_info: EngineInfo,
 }
 
@@ -926,6 +928,7 @@ impl EngineRpc {
         uploads: Uploads,
         agent_accounts: AgentAccounts,
         workspace_scope: WorkspaceScope,
+        trading: zeron_trading::TradingService,
     ) -> Self {
         sessions.track_terminal_activity(terminals.clone(), workspace.clone());
         let engine_info = EngineInfo {
@@ -969,6 +972,7 @@ impl EngineRpc {
             viewport_focus: Default::default(),
             plugins: None,
             engine_info,
+            trading,
         }
     }
 
@@ -976,6 +980,18 @@ impl EngineRpc {
     pub fn with_plugins(mut self, plugins: crate::plugins::Plugins) -> Self {
         self.plugins = Some(plugins);
         self
+    }
+
+    /// Actions that only the demo fixture can honour (systems, tasks, links and
+    /// order entry). A live TWS link refuses them instead of reporting success
+    /// for a real account nothing acted on.
+    fn require_demo_trading(&self, what: &str) -> Result<(), RpcError> {
+        if self.trading.live() {
+            return Err(RpcError::Failed(format!(
+                "{what} aún no está disponible con TWS en vivo (llega con D3)."
+            )));
+        }
+        Ok(())
     }
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
@@ -4210,11 +4226,12 @@ impl RpcService for EngineRpc {
                 );
                 Ok(RpcReply::Stream(Box::pin(stream)))
             }
-            methods::WATCH_TRADING_SNAPSHOT => Ok(RpcReply::Stream(watch_stream(
-                zeron_trading::mock_watch(),
-            ))),
-            methods::TRADING_SNAPSHOT => RpcReply::value(&zeron_trading::snapshot()),
+            methods::WATCH_TRADING_SNAPSHOT => {
+                Ok(RpcReply::Stream(watch_stream(self.trading.watch())))
+            }
+            methods::TRADING_SNAPSHOT => RpcReply::value(&self.trading.snapshot()),
             methods::TRADING_SYSTEM_START => {
+                self.require_demo_trading("Arrancar un sistema")?;
                 let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
                 match zeron_trading::mock::start_system(&p.system_id) {
                     Some(system) => RpcReply::value(&system),
@@ -4227,6 +4244,7 @@ impl RpcService for EngineRpc {
                 }
             }
             methods::TRADING_SYSTEM_STOP => {
+                self.require_demo_trading("Parar un sistema")?;
                 let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
                 match zeron_trading::mock::stop_system(&p.system_id) {
                     Some(system) => RpcReply::value(&system),
@@ -4238,8 +4256,17 @@ impl RpcService for EngineRpc {
                     }
                 }
             }
-            methods::TRADING_TASK_LIST => RpcReply::value(&zeron_trading::task_list()),
+            methods::TRADING_TASK_LIST => {
+                // A live link has no bot folders yet (lane A3): an empty list is
+                // the honest answer, not the fixture's demo tasks.
+                if self.trading.live() {
+                    RpcReply::value(&Vec::<zeron_proto::trading::Task>::new())
+                } else {
+                    RpcReply::value(&zeron_trading::task_list())
+                }
+            }
             methods::TRADING_TASK_ADD => {
+                self.require_demo_trading("Programar una tarea")?;
                 let p: zeron_proto::trading::TaskAddInput = parse_params(params)?;
                 match zeron_trading::mock::task_add(&p) {
                     Ok(task) => RpcReply::value(&task),
@@ -4247,6 +4274,7 @@ impl RpcService for EngineRpc {
                 }
             }
             methods::TRADING_TASK_CANCEL => {
+                self.require_demo_trading("Cancelar una tarea")?;
                 let p: zeron_proto::trading::TaskIdParams = parse_params(params)?;
                 match zeron_trading::mock::task_cancel(&p.task_id) {
                     Ok(task) => RpcReply::value(&task),
@@ -4254,33 +4282,42 @@ impl RpcService for EngineRpc {
                 }
             }
             methods::TRADING_POSITION_CLOSE => {
+                self.require_demo_trading("Cerrar una posición")?;
                 let p: zeron_proto::trading::ClosePositionParams = parse_params(params)?;
                 RpcReply::value(&zeron_trading::mock::close_position(&p.symbol))
             }
             methods::TRADING_POSITIONS_CLOSE_ALL => {
+                self.require_demo_trading("Cerrar todas las posiciones")?;
                 let _ = params;
                 RpcReply::value(&zeron_trading::mock::close_all_positions())
             }
             methods::TRADING_PANIC => {
+                self.require_demo_trading("El botón de pánico")?;
                 let _ = params;
                 RpcReply::value(&zeron_trading::mock::panic())
             }
             methods::TRADING_CONNECT => {
-                let _ = params;
-                RpcReply::value(&zeron_trading::mock::connect())
+                let account = self
+                    .trading
+                    .connect()
+                    .await
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&account)
             }
             methods::TRADING_DISCONNECT => {
                 let _ = params;
-                RpcReply::value(&zeron_trading::mock::disconnect())
+                self.trading.disconnect().await;
+                RpcReply::value(&None::<zeron_proto::trading::Account>)
             }
             methods::TRADING_ACCOUNT_SELECT => {
                 let p: zeron_proto::trading::AccountIdParams = parse_params(params)?;
-                match zeron_trading::mock::account_select(&p.account_id) {
+                match self.trading.select(&p.account_id) {
                     Ok(account) => RpcReply::value(&account),
                     Err(error) => return Err(RpcError::Failed(error.to_string())),
                 }
             }
             methods::TRADING_LINK_ADD => {
+                self.require_demo_trading("Añadir una conexión")?;
                 let p: zeron_proto::trading::LinkAddInput = parse_params(params)?;
                 match zeron_trading::mock::link_add(&p) {
                     Ok(link) => RpcReply::value(&link),
@@ -4288,6 +4325,7 @@ impl RpcService for EngineRpc {
                 }
             }
             methods::TRADING_LINK_REMOVE => {
+                self.require_demo_trading("Quitar una conexión")?;
                 let p: zeron_proto::trading::LinkIdParams = parse_params(params)?;
                 match zeron_trading::mock::link_remove(&p.link_id) {
                     Ok(links) => RpcReply::value(&links),
@@ -4302,10 +4340,9 @@ impl RpcService for EngineRpc {
             }
             methods::TRADING_IBKR_DETECT => {
                 let p: zeron_proto::trading::IbkrDetectParams = parse_params(params)?;
-                RpcReply::value(&zeron_trading::mock::ibkr_detect(
-                    p.host.as_deref(),
-                    p.port,
-                ))
+                RpcReply::value(
+                    &zeron_trading::TradingService::detect(p.host.as_deref(), p.port).await,
+                )
             }
             methods::TRADING_POOL_SELECT => {
                 let p: zeron_proto::trading::PoolSelectParams = parse_params(params)?;

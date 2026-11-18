@@ -196,6 +196,9 @@ pub struct EngineCore {
     pub agent_accounts: AgentAccounts,
     pub harness_updates: harness_updates::HarnessUpdateCoordinator,
     pub device_id: String,
+    /// The trading surface: the demo fixture until `TradingConnect` opens a
+    /// TWS paper link (see [`zeron_trading::service`]).
+    pub trading: zeron_trading::TradingService,
     /// Which app windows are focused (desktop banners hold back while one is).
     pub viewport_focus: desktop_notify::ViewportFocus,
     /// Local→synced profile import (account-scoped runtimes only).
@@ -515,6 +518,7 @@ impl EngineCore {
             updater_wake: std::sync::Mutex::new(None),
             cloud: std::sync::Mutex::new(None),
             viewport_focus,
+            trading: zeron_trading::TradingService::new(),
             _agent_ledger: agent_ledger,
             _instance_lock: lock,
         })
@@ -669,6 +673,7 @@ impl EngineCore {
             self.uploads.clone(),
             self.agent_accounts.clone(),
             self.workspace_scope,
+            self.trading.clone(),
         )
         .with_auth(self.auth())
         .with_previews(self.previews.clone())
