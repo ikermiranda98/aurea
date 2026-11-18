@@ -4408,8 +4408,23 @@ impl RpcService for EngineRpc {
                 }
             }
             methods::TRADING_POSITION_CLOSE => {
-                self.require_demo_trading("Cerrar una posición")?;
                 let p: zeron_proto::trading::ClosePositionParams = parse_params(params)?;
+                if self.trading.live() {
+                    if let Some(engine) = &self.trading_engine {
+                        let store = {
+                            let guard = engine.lock().unwrap();
+                            guard.store()
+                        };
+                        let result = zeron_trading::close::close_position(
+                            &p.symbol,
+                            p.request_id.as_deref(),
+                            &store,
+                            &self.trading,
+                        ).await;
+                        return RpcReply::value(&result);
+                    }
+                }
+                self.require_demo_trading("Cerrar una posición")?;
                 RpcReply::value(&zeron_trading::mock::close_position(&p.symbol))
             }
             methods::TRADING_POSITIONS_CLOSE_ALL => {

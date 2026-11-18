@@ -104,6 +104,10 @@ impl TradingEngine {
         self.state.lock().unwrap().snapshot(now_ms())
     }
 
+    pub fn store(&self) -> Store {
+        self.store.clone()
+    }
+
     pub fn watch(&self) -> SnapshotWatch {
         self.watch.subscribe()
     }
