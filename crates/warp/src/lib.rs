@@ -7,6 +7,7 @@
 //! clock), so tests exercise it whole without a network or a service.
 
 pub mod bucket;
+pub mod egress;
 pub mod ghost;
 pub mod history;
 pub mod lock;
@@ -17,7 +18,8 @@ pub mod rutas;
 pub mod shell;
 
 pub use bucket::cubo;
-pub use ghost::{Estado, EstadoWarp, Egress, Ghost, MAX_INTENTOS, Rotacion, monitor_command};
+pub use egress::{PROXY_WARP, Puente, PuenteEgress, entorno};
+pub use ghost::{Estado, EstadoWarp, Egress, Ghost, MAX_INTENTOS, Rotacion, Traza, monitor_command};
 pub use history::GhostRun;
 pub use lock::{Cerrojo, librar};
 pub use memory::{ajustar_memoria, dia_girado, podar_eventos, recordado};

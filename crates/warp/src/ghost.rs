@@ -100,13 +100,20 @@ pub trait Egress: Send + Sync {
     async fn apuntar(&self, direcciones: &[String]) -> Option<String>;
     /// Hands the machine back its own address.
     async fn soltar(&self);
+    /// The exit the *app's* traffic leaves by, when this transport knows better
+    /// than the machine's own `curl`. `None` keeps the pre-C2 trace: in WARP's
+    /// proxy mode the machine's curl leaves by the router and reports
+    /// `warp=off`, so the ring must ask the transport it mounted.
+    async fn traza(&self) -> Option<Traza> {
+        None
+    }
 }
 
 /// One shield trace's exit facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Traza {
-    ip: String,
-    warp: Option<String>,
+pub struct Traza {
+    pub ip: String,
+    pub warp: Option<String>,
 }
 
 /// The ring, over one set of shared files.
@@ -553,8 +560,14 @@ impl Ghost {
     }
 
     /// The shield's own trace: one curl fired until an `ip=` shows — exactly the
-    /// bat's 20 shots with the 1 s breath between them.
+    /// bat's 20 shots with the 1 s breath between them. A mounted transport
+    /// answers first: in proxy mode the machine's curl is not the app's path.
     async fn sondear(&self) -> Option<Traza> {
+        if let Some(egress) = &self.egress {
+            if let Some(traza) = egress.traza().await {
+                return Some(traza);
+            }
+        }
         for _ in 0..INTENTOS_TRAZA {
             let salida = self
                 .mundo
