@@ -560,6 +560,58 @@ async fn sign_out_closes_cached_peer_links() {
     );
 }
 
+/// Every successful dial in the process broadcasts `online` on a four-slot
+/// channel, so a busy process outruns a watcher parked on it. Falling behind
+/// must not retire the watcher: when the token was cleared after a lagged
+/// read, the cached links used to stay open until a liveness deadline.
+#[tokio::test]
+async fn a_watcher_that_lags_the_online_channel_still_closes_on_sign_out() {
+    let relay = FakeRelay::start().await;
+    let _host = HostRelay::spawn(
+        relay_config(&relay.edge_url(), 100),
+        TestService::new("host-a"),
+        noop_nudge(),
+    );
+    relay.wait_host_connected().await;
+
+    let token = Arc::new(RecoveringToken::new(Some("test-user")));
+    let links = LinkCache::new(LinkCacheConfig::new(relay.edge_url(), token.clone()));
+    let client = links.client("dev-a").await.expect("client dials");
+    client
+        .call("Echo", serde_json::json!({ "before": "lag" }))
+        .await
+        .expect("link is live before the lag");
+
+    // No await between the sends: the watcher cannot drain them, so its next
+    // read reports `Lagged` instead of an event.
+    for _ in 0..8 {
+        zeron_sync::wake::notify_online();
+    }
+    // The watcher takes the lagged read here (nothing else is ready).
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    token.clear();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if client
+                .call("Echo", serde_json::json!({ "after": "lag" }))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a lagged online read retired the sign-out watcher");
+    assert!(
+        links.client("dev-a").await.is_err(),
+        "signed-out cache must not redial"
+    );
+}
+
 #[tokio::test]
 async fn relay_serves_multiple_clients_end_to_end() {
     let relay = FakeRelay::start().await;

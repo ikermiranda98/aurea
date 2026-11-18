@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::{RpcClient, RpcError, RpcService, serve_connection};
@@ -1090,23 +1090,34 @@ impl LinkCache {
         // Skipped outside a runtime (sync unit tests).
         if tokio::runtime::Handle::try_current().is_ok() {
             let weak = Arc::downgrade(&cache);
+            // Subscribed here, before the first poll: a sign-out that lands between
+            // `new` and the task's first turn bumps the token epoch, and a receiver
+            // created afterwards would mark that epoch as already seen — leaving the
+            // cached links open and the caller to find out from a liveness deadline.
+            let mut wake = zeron_sync::wake::subscribe();
+            let mut online = zeron_sync::wake::subscribe_online();
+            let token_changes = cache.config.token.subscribe();
             tokio::spawn(async move {
-                let mut wake = zeron_sync::wake::subscribe();
-                let mut online = zeron_sync::wake::subscribe_online();
-                let mut token_changes = weak
-                    .upgrade()
-                    .and_then(|cache| cache.config.token.subscribe());
+                let mut token_changes = token_changes;
                 loop {
                     tokio::select! {
                         result = wake.recv() => {
-                            if result.is_err() { return; }
+                            // Every dial in this process broadcasts `online`, and the
+                            // channel holds four: a busy process can lag this
+                            // receiver. Falling behind is not "the process went
+                            // away" — the events still happened, so act on them.
+                            if matches!(result, Err(broadcast::error::RecvError::Closed)) {
+                                return;
+                            }
                             let Some(cache) = weak.upgrade() else { return };
                             lock(&cache.links).clear();
                             lock(&cache.dial_state).clear();
                             tracing::info!("peer: links + cooldowns cleared after wake");
                         }
                         result = online.recv() => {
-                            if result.is_err() { return; }
+                            if matches!(result, Err(broadcast::error::RecvError::Closed)) {
+                                return;
+                            }
                             let Some(cache) = weak.upgrade() else { return };
                             lock(&cache.dial_state).clear();
                         }
