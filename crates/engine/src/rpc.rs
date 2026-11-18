@@ -4303,17 +4303,21 @@ impl RpcService for EngineRpc {
                 Ok(RpcReply::Stream(Box::pin(stream)))
             }
             methods::WATCH_TRADING_SNAPSHOT => {
+                // The pool's half and the broker's half, merged: the engine's
+                // state alone never sees the TWS rows (`zeron_trading::merge`).
                 if let Some(engine) = &self.trading_engine {
-                    let guard = engine.lock().unwrap();
-                    Ok(RpcReply::Stream(watch_stream(guard.watch())))
+                    let engine_watch = engine.lock().unwrap().watch();
+                    Ok(RpcReply::Stream(watch_stream(
+                        self.trading.watch_merged(engine_watch),
+                    )))
                 } else {
                     Ok(RpcReply::Stream(watch_stream(self.trading.watch())))
                 }
             }
             methods::TRADING_SNAPSHOT => {
                 if let Some(engine) = &self.trading_engine {
-                    let guard = engine.lock().unwrap();
-                    RpcReply::value(&guard.snapshot())
+                    let engine_half = engine.lock().unwrap().snapshot();
+                    RpcReply::value(&self.trading.merged_with(engine_half))
                 } else {
                     RpcReply::value(&self.trading.snapshot())
                 }

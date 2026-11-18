@@ -97,6 +97,7 @@ mod sidebar_sections;
 mod search_warm;
 pub(crate) mod spaces;
 mod thread_search;
+mod trading_gate;
 use side_chats::SideChatTab;
 mod tabs;
 use tabs::NewSessionTarget;
@@ -2219,6 +2220,8 @@ pub struct Shell {
     nav: NavHistory,
     /// The trading desk, made on its first render.
     trading_page: Option<Entity<crate::trading::TradingSurface>>,
+    /// B7: the close gate's state for this window (`shell/trading_gate.rs`).
+    trading_gate: trading_gate::TradingGate,
     pull_requests_page: Option<Entity<PullRequestsPage>>,
     /// Opened pull requests, as tabs in a pane beside the board.
     pull_request_pane: pull_request_pane::PullRequestPane,
@@ -2801,6 +2804,7 @@ impl Shell {
             settings_search: None,
             nav,
             trading_page: None,
+            trading_gate: Default::default(),
             pull_requests_page: None,
             pull_request_pane: Default::default(),
             pending_pull_request: None,
@@ -4979,7 +4983,13 @@ impl Shell {
         self.prepare_exit(PendingExit::Quit, cx)
     }
 
+    /// Unsaved files first, then the trading close gate (B7): an exit over
+    /// running bots or open positions asks before the desk goes away.
     fn prepare_exit(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
+        self.prepare_exit_files(action.clone(), cx) && self.trading_gate_allows(action, cx)
+    }
+
+    fn prepare_exit_files(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
         let surfaces = self.file_surfaces.values().cloned().collect::<Vec<_>>();
         if surfaces
             .iter()
@@ -11615,6 +11625,9 @@ impl Shell {
         }
         if let Some(update) = self.render_update_prompt(viewport, cx) {
             overlays.push(update);
+        }
+        if let Some(gate) = self.render_trading_gate(viewport, cx) {
+            overlays.push(gate);
         }
 
         overlays

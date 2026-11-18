@@ -5,6 +5,7 @@
 //! (Spanish number formatting, KPI derivation, orderings) and is unit-tested
 //! without a window.
 
+pub mod close_gate;
 pub mod model;
 pub mod surface;
 

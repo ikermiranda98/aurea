@@ -9,6 +9,7 @@ pub mod close;
 pub mod engine;
 pub mod ibkr;
 pub mod lifecycle;
+pub mod merge;
 pub mod mock;
 pub mod mt5;
 pub mod pool;
