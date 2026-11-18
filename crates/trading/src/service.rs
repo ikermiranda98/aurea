@@ -9,8 +9,12 @@
 //!
 //! * `positions`/`open_positions` come from the [`IbkrLedger`] built by
 //!   [`zeron_tws::inbound`], never from the fixture;
-//! * `closable_positions` stays empty because order entry is lane D3; the
-//!   surface must not offer a close it cannot place;
+//! * `closable_positions` is the engine account's rows only (lane D4): a
+//!   close is always placed on that account, never on a sibling the login
+//!   also manages;
+//! * the shown account is remembered in `trading_meta.cuenta_activa` when a
+//!   [`Store`] is attached, and forgotten once a connected login stops
+//!   naming it (`revalidarCuentaActiva`, `trading.ts:1036-1051`);
 //! * [`TradingService::disconnect`] goes back to the demo snapshot, so a dev
 //!   machine without TWS keeps the dashboard it had.
 //!
@@ -29,6 +33,7 @@ use zeron_tws::inbound::{self, IbInbound};
 use zeron_tws::requests;
 
 use crate::ibkr::IbkrLedger;
+use crate::store::Store;
 use crate::{SnapshotWatch, mock};
 
 /// The IB Gateway/TWS live API port. Aurea never trades live: it is refused at
@@ -44,6 +49,8 @@ const EQUITY_SAMPLE_MS: i64 = 15_000;
 const MAX_LOGS: usize = 200;
 /// `reqId` for the account-summary burst (TWS only needs it to be unique).
 const SUMMARY_REQ_ID: i64 = 9001;
+/// `trading_meta` key of the account the dashboard shows (`trading.ts:931`).
+pub const ACTIVE_ACCOUNT_META: &str = "cuenta_activa";
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
@@ -96,6 +103,8 @@ struct Inner {
     snapshot: watch::Sender<Snapshot>,
     client: Mutex<Option<IbClient>>,
     connecting: AsyncMutex<()>,
+    /// Where the active account is persisted; `None` keeps it in memory.
+    store: Mutex<Option<Store>>,
 }
 
 impl Default for TradingService {
@@ -113,6 +122,7 @@ impl TradingService {
             snapshot,
             client: Mutex::new(None),
             connecting: AsyncMutex::new(()),
+            store: Mutex::new(None),
         });
         // The demo fixture ticks every 2 s; keep forwarding it while no live
         // link owns the snapshot. Without a runtime (unit tests, a CLI probe)
@@ -134,6 +144,28 @@ impl TradingService {
             });
         }
         Self { inner }
+    }
+
+    /// A service that persists the active account in `store`'s `trading_meta`.
+    pub fn with_store(store: Store) -> Self {
+        let service = Self::new();
+        *lock(&service.inner.store) = Some(store);
+        service
+    }
+
+    /// The persisted active account, if a store is attached and holds one.
+    pub fn remembered_account(&self) -> Option<String> {
+        self.inner.remembered()
+    }
+
+    /// Open positions on the login's accounts other than the engine's: what a
+    /// panic cannot sweep and must name (`leftover_symbols`).
+    pub fn leftover_positions(&self) -> Vec<zeron_proto::trading::Position> {
+        let state = lock(&self.inner.state);
+        if !state.live {
+            return Vec::new();
+        }
+        state.ledger.foreign_positions()
     }
 
     /// The snapshot stream `WatchTradingSnapshot` forwards.
@@ -197,12 +229,14 @@ impl TradingService {
                         link.0, link.1
                     ),
                 })?;
+        let remembered = self.inner.remembered();
         {
             let mut state = lock(&self.inner.state);
             state.live = true;
             state.client_in_use = None;
             state.link = Some(link);
             state.ledger = IbkrLedger::default();
+            state.ledger.prefer(remembered);
             state.equity.clear();
             state.last_sample = 0;
             state.logs.clear();
@@ -238,6 +272,7 @@ impl TradingService {
         if !self.live() {
             return mock::account_select(account);
         }
+        let selected = account.to_string();
         let mut state = lock(&self.inner.state);
         if !state.ledger.select(account) {
             return Err(TradingError::InvalidRequest {
@@ -246,6 +281,7 @@ impl TradingService {
         }
         let account = state.ledger.account();
         drop(state);
+        self.inner.remember(Some(selected));
         self.inner.publish();
         Ok(account)
     }
@@ -290,6 +326,23 @@ async fn probe(host: &str, port: u16) -> bool {
 impl Inner {
     fn client_handle(&self) -> Option<IbClient> {
         lock(&self.client).clone()
+    }
+
+    fn remembered(&self) -> Option<String> {
+        let store = lock(&self.store).clone()?;
+        store.meta_get(ACTIVE_ACCOUNT_META).ok().flatten()
+    }
+
+    /// Persists (or, with `None`, forgets) the active account. A store error
+    /// only costs the memory across restarts; the selection itself stands.
+    fn remember(&self, account: Option<String>) {
+        let Some(store) = lock(&self.store).clone() else {
+            return;
+        };
+        let _ = match account {
+            Some(account) => store.meta_set(ACTIVE_ACCOUNT_META, &account),
+            None => store.meta_remove(ACTIVE_ACCOUNT_META),
+        };
     }
 
     fn request(&self, fields: Vec<String>) {
@@ -377,7 +430,20 @@ impl Inner {
                         IbInbound::ManagedAccounts { accounts } => Some(accounts.clone()),
                         _ => None,
                     };
+                    // The login is up and has named its accounts: a remembered
+                    // account it does not manage is gone for good.
+                    let stale = discovered.is_some()
+                        && state
+                            .ledger
+                            .preferred()
+                            .is_some_and(|account| !state.ledger.manages(account));
+                    if stale {
+                        state.ledger.prefer(None);
+                    }
                     drop(state);
+                    if stale {
+                        self.remember(None);
+                    }
                     if let Some(accounts) = discovered {
                         self.subscribe_accounts(&accounts);
                     }
@@ -454,26 +520,30 @@ impl State {
             Some((host, port)) => (host.clone(), *port, self.ledger.connected()),
             None => (String::new(), PAPER_PORT, false),
         };
+        let link_id = format!("{host}:{port}");
+        let with_link = |mut account: Account| {
+            account.link = Some(link_id.clone());
+            account
+        };
         Snapshot {
             version: env!("CARGO_PKG_VERSION").into(),
             connected: self.ledger.connected(),
             client_in_use: self.client_in_use.map(i64::from),
-            account: self.ledger.account(),
+            account: self.ledger.account().map(with_link),
             // Systems, tasks and trades belong to the bots' folders (lane A3+);
             // a live link does not invent them.
             systems: Vec::new(),
             positions,
             open_positions: Some(self.ledger.open_positions()),
-            // Order entry is D3: nothing can be closed from here yet, and the
-            // surface must not pretend otherwise.
-            closable_positions: Some(Vec::new()),
+            // Only the engine account's rows: a close is placed there.
+            closable_positions: Some(self.ledger.closable_positions()),
             logs: self.logs.clone(),
             tasks: Vec::new(),
             trades: None,
             equity: Some(self.equity.clone()),
-            accounts: Some(self.ledger.accounts()),
+            accounts: Some(self.ledger.accounts().into_iter().map(with_link).collect()),
             links: Some(vec![Link {
-                id: format!("{host}:{port}"),
+                id: link_id.clone(),
                 host: Some(host),
                 port: Some(port),
                 label: Some("TWS paper".into()),
@@ -670,8 +740,12 @@ mod tests {
         assert_eq!(account.pnl_day, Some(125.5));
         assert_eq!(snapshot.accounts.as_ref().map(Vec::len), Some(1));
         assert_eq!(snapshot.open_positions.as_ref().map(Vec::len), Some(1));
-        // Order entry is D3: a live position is shown, never offered for close.
-        assert_eq!(snapshot.closable_positions.as_ref().map(Vec::len), Some(0));
+        // The one account is the engine's: its position is closable.
+        assert_eq!(snapshot.closable_positions.as_ref().map(Vec::len), Some(1));
+        assert_eq!(
+            snapshot.accounts.as_ref().and_then(|a| a[0].link.clone()),
+            Some(format!("127.0.0.1:{}", tws.port))
+        );
         assert_eq!(
             snapshot.links.as_ref().map(|links| links[0].id.clone()),
             Some(format!("127.0.0.1:{}", tws.port))
@@ -757,6 +831,74 @@ mod tests {
         assert_eq!(snapshot.open_positions.as_ref().map(Vec::len), Some(2));
         assert!(service.select("Z").is_err());
 
+        service.disconnect().await;
+    }
+
+    /// Writes the managed-accounts frame and one position per account.
+    async fn two_accounts(socket: &mut TcpStream, accounts: &str) {
+        let frames: Vec<Vec<&str>> = vec![
+            vec!["15", "1", accounts],
+            vec![
+                "61", "3", "A", "83626", "EURUSD", "CASH", "", "", "", "", "IDEALPRO", "USD",
+                "EURUSD", "", "1000", "1.05",
+            ],
+            vec![
+                "61", "3", "B", "711712", "MNQZ6", "FUT", "20261218", "", "", "2", "GLOBEX", "USD",
+                "MNQZ6", "MNQ", "1", "37000",
+            ],
+        ];
+        for frame in frames {
+            socket.write_all(&encode_message(&frame)).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn the_active_account_survives_a_reconnect_and_scopes_what_is_closable() {
+        let store = Store::open_in_memory().unwrap();
+        let mut tws = fake_tws().await;
+        let service = TradingService::with_store(store.clone());
+
+        service.connect_to(fast(tws.port)).await.unwrap();
+        let mut socket = tws.sockets.recv().await.unwrap();
+        two_accounts(&mut socket, "A,B").await;
+        wait_until(|| service.snapshot().open_positions.is_some_and(|rows| rows.len() == 2)).await;
+        service.select("B").unwrap();
+        assert_eq!(store.meta_get(ACTIVE_ACCOUNT_META).unwrap().as_deref(), Some("B"));
+
+        // Closable is the engine account only; the sibling's row is a leftover.
+        let snapshot = service.snapshot();
+        let closable: Vec<_> = snapshot.closable_positions.unwrap().into_iter().map(|p| p.symbol).collect();
+        assert_eq!(closable, vec!["MNQZ6"]);
+        let leftovers: Vec<_> = service.leftover_positions().into_iter().map(|p| p.symbol).collect();
+        assert_eq!(leftovers, vec!["EURUSD"]);
+        service.disconnect().await;
+        assert!(service.leftover_positions().is_empty());
+
+        // A fresh service on the same store shows B as soon as TWS names it.
+        let again = TradingService::with_store(store.clone());
+        again.connect_to(fast(tws.port)).await.unwrap();
+        let mut socket = tws.sockets.recv().await.unwrap();
+        two_accounts(&mut socket, "A,B").await;
+        wait_until(|| again.snapshot().open_positions.is_some_and(|rows| rows.len() == 2)).await;
+        assert_eq!(again.snapshot().account.map(|a| a.id).as_deref(), Some("B"));
+        assert_eq!(again.snapshot().positions[0].symbol, "MNQZ6");
+        again.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn a_remembered_account_the_login_no_longer_names_is_forgotten() {
+        let store = Store::open_in_memory().unwrap();
+        store.meta_set(ACTIVE_ACCOUNT_META, "GONE").unwrap();
+        let mut tws = fake_tws().await;
+        let service = TradingService::with_store(store.clone());
+        assert_eq!(service.remembered_account().as_deref(), Some("GONE"));
+
+        service.connect_to(fast(tws.port)).await.unwrap();
+        let mut socket = tws.sockets.recv().await.unwrap();
+        two_accounts(&mut socket, "A,B").await;
+        wait_until(|| service.snapshot().open_positions.is_some_and(|rows| rows.len() == 2)).await;
+        assert_eq!(service.snapshot().account.map(|a| a.id).as_deref(), Some("A"));
+        assert_eq!(store.meta_get(ACTIVE_ACCOUNT_META).unwrap(), None);
         service.disconnect().await;
     }
 }

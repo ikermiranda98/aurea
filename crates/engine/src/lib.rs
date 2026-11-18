@@ -488,6 +488,13 @@ impl EngineCore {
             repos.clone(),
         ));
         let diff_sync = CheckoutDiffSync::start(repos.clone(), workspace.clone(), &device_id, edge);
+        let trading_engine = {
+            let dir = std::env::var("TRADING_SYSTEMS_DIR").ok().map(std::path::PathBuf::from);
+            let db_path = std::env::var("TRADING_DB_PATH").ok().map(std::path::PathBuf::from);
+            zeron_trading::TradingEngine::new(dir, db_path)
+                .ok()
+                .map(|e| std::sync::Arc::new(std::sync::Mutex::new(e)))
+        };
         // Turn starts snapshot the checkout tree — the "Latest turn" diff base.
         let turn_diff = diff_sync.clone();
         sessions.set_turn_listener(Arc::new(move |chat_id, cwd| {
@@ -522,14 +529,15 @@ impl EngineCore {
             updater_wake: std::sync::Mutex::new(None),
             cloud: std::sync::Mutex::new(None),
             viewport_focus,
-            trading: zeron_trading::TradingService::new(),
-            trading_engine: (|| {
-                let dir = std::env::var("TRADING_SYSTEMS_DIR").ok().map(std::path::PathBuf::from);
-                let db_path = std::env::var("TRADING_DB_PATH").ok().map(std::path::PathBuf::from);
-                zeron_trading::TradingEngine::new(dir, db_path)
-                    .ok()
-                    .map(|e| std::sync::Arc::new(std::sync::Mutex::new(e)))
-            })(),
+            // The service shares the engine's store so the active account
+            // (`trading_meta.cuenta_activa`, lane D4) survives a restart.
+            trading: match &trading_engine {
+                Some(engine) => zeron_trading::TradingService::with_store(
+                    engine.lock().unwrap_or_else(|p| p.into_inner()).store(),
+                ),
+                None => zeron_trading::TradingService::new(),
+            },
+            trading_engine,
             _agent_ledger: agent_ledger,
             _instance_lock: lock,
         })

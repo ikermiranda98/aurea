@@ -129,6 +129,23 @@ impl IbkrLedger {
         }
     }
 
+    /// Remembers `account` as the one to show before TWS has named any
+    /// account (the persisted `cuenta_activa`). [`IbkrLedger::shown`] ignores
+    /// it while the login does not manage it, so a stale value is harmless.
+    pub fn prefer(&mut self, account: Option<String>) {
+        self.selected = account;
+    }
+
+    /// The selection as stored, whether or not the login manages it.
+    pub fn preferred(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
+
+    /// `true` while the login manages `account`.
+    pub fn manages(&self, account: &str) -> bool {
+        self.accounts.iter().any(|known| known == account)
+    }
+
     /// Shows `account` if this login manages it. Returns whether it was there.
     pub fn select(&mut self, account: &str) -> bool {
         if !self.accounts.iter().any(|known| known == account) {
@@ -150,6 +167,24 @@ impl IbkrLedger {
     pub fn open_positions(&self) -> Vec<Position> {
         self.positions
             .keys()
+            .flat_map(|account| self.positions_of(account))
+            .collect()
+    }
+
+    /// What the engine may close: the engine account's positions only
+    /// (`cerrables()` in `trading.ts:4384-4389`). On one login every account
+    /// belongs to the primary link, so the engine account is the shown one.
+    pub fn closable_positions(&self) -> Vec<Position> {
+        self.positions()
+    }
+
+    /// Open positions on the login's *other* accounts: what a panic leaves
+    /// behind and names as leftovers (`sobrantes`, `trading.ts:3697-3746`).
+    pub fn foreign_positions(&self) -> Vec<Position> {
+        let shown = self.shown();
+        self.positions
+            .keys()
+            .filter(|account| Some(account.as_str()) != shown)
             .flat_map(|account| self.positions_of(account))
             .collect()
     }
@@ -428,6 +463,50 @@ mod tests {
         // A stale selection never wins over the login it does not belong to.
         assert!(!ledger.select("Z"));
         assert_eq!(ledger.shown(), Some("B"));
+    }
+
+    /// E1 of `trading-engine.test.ts:728-819`: `positions` of A, open of A+B,
+    /// closable only A; the panic's leftovers are B's.
+    #[test]
+    fn closable_rows_are_the_engine_account_s_and_leftovers_the_rest() {
+        let mut ledger = IbkrLedger::default();
+        ledger.apply(&decode(&fields(&["15", "1", "A,B"])), 0);
+        ledger.apply(
+            &decode(&fields(&[
+                "61", "3", "A", "83626", "EURUSD", "CASH", "", "", "", "", "IDEALPRO", "USD",
+                "EURUSD", "", "1000", "1.05",
+            ])),
+            0,
+        );
+        ledger.apply(
+            &decode(&fields(&[
+                "61", "3", "B", "711712", "MNQZ6", "FUT", "20261218", "", "", "2", "GLOBEX", "USD",
+                "MNQZ6", "MNQ", "1", "37000",
+            ])),
+            0,
+        );
+        let closable: Vec<_> = ledger.closable_positions().into_iter().map(|p| p.symbol).collect();
+        assert_eq!(closable, vec!["EURUSD"]);
+        let leftovers: Vec<_> = ledger.foreign_positions().into_iter().map(|p| p.symbol).collect();
+        assert_eq!(leftovers, vec!["MNQZ6"]);
+        assert_eq!(ledger.open_positions().len(), 2);
+    }
+
+    #[test]
+    fn a_preferred_account_waits_for_the_login_to_name_it() {
+        let mut ledger = IbkrLedger::default();
+        ledger.prefer(Some("B".into()));
+        assert_eq!(ledger.shown(), None);
+        ledger.apply(&decode(&fields(&["15", "1", "A,B"])), 0);
+        assert_eq!(ledger.shown(), Some("B"));
+
+        // A remembered account the login does not manage falls back to the first.
+        let mut ledger = IbkrLedger::default();
+        ledger.prefer(Some("Z".into()));
+        ledger.apply(&decode(&fields(&["15", "1", "A"])), 0);
+        assert_eq!(ledger.shown(), Some("A"));
+        assert_eq!(ledger.preferred(), Some("Z"));
+        assert!(!ledger.manages("Z"));
     }
 
     #[test]

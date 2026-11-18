@@ -247,20 +247,18 @@ where
         }
     }
 
-    // Determine position + account from service snapshot.
+    // Determine position + account from service snapshot. Only the engine
+    // account's rows are closable (D4): a symbol held on a sibling account
+    // must not be closed with the engine account's id, so it reads as flat.
     let snapshot = tws_service.snapshot();
     let account_id = snapshot.account.map(|a| a.id).unwrap_or_default();
     let position = snapshot
-        .positions
+        .closable_positions
+        .as_ref()
+        .unwrap_or(&snapshot.positions)
         .iter()
         .find(|p| p.symbol == symbol)
-        .cloned()
-        .or_else(|| {
-            snapshot
-                .open_positions
-                .as_ref()
-                .and_then(|v| v.iter().find(|p| p.symbol == symbol).cloned())
-        });
+        .cloned();
 
     // Claim.
     let lock_key = symbol.to_string();
@@ -609,11 +607,12 @@ where
     };
     let close = close_all_positions(close_req, store, tws_service).await;
 
-    // leftover symbols still open
-    let final_snap = tws_service.snapshot();
+    // Leftovers: what the panic may not sweep — open rows on the login's
+    // other accounts (`sobrantes`, `trading.ts:3697-3746`). The engine
+    // account's own survivors are already counted by `close`.
     let mut leftover: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for p in &final_snap.positions {
+    for p in &tws_service.leftover_positions() {
         if seen.insert(p.symbol.clone()) {
             leftover.push(p.symbol.clone());
         }
