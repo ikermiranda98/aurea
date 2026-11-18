@@ -66,7 +66,7 @@ fn no_tws(symbol: &str) -> PositionCloseResult {
         ok: false,
         message: format!("TWS not connected for {symbol}."),
         message_key: Some("trading.close.no_tws".into()),
-        message_params: None,
+        message_params: Some(crate::claims::symbol_params(symbol)),
     }
 }
 
@@ -75,7 +75,7 @@ fn no_size(symbol: &str) -> PositionCloseResult {
         ok: false,
         message: format!("No size to close for {symbol}."),
         message_key: Some("trading.close.no_size".into()),
-        message_params: None,
+        message_params: Some(crate::claims::symbol_params(symbol)),
     }
 }
 
@@ -88,7 +88,7 @@ fn no_contract(symbol: &str) -> PositionCloseResult {
         ok: false,
         message: format!("No contract for {symbol}."),
         message_key: Some("trading.close.no_contract".into()),
-        message_params: None,
+        message_params: Some(crate::claims::symbol_params(symbol)),
     }
 }
 
@@ -456,17 +456,24 @@ where
     } else {
         format!("{} failed, {} still open.", fallos, saltadas)
     };
+    // Aurea's own keys (`trading.close.all_ok` / `all_failed`): Openbot's
+    // `all_requested`/`all_partial` interpolate pre-rendered sub-phrases
+    // (`planos`, `restantes`) this port does not build.
     let message_key = if all_closed {
-        Some("trading.close.all_requested".into())
+        Some("trading.close.all_ok".into())
     } else {
-        Some("trading.close.all_partial".into())
+        Some("trading.close.all_failed".into())
     };
+    let mut params = serde_json::Map::new();
+    params.insert("count".into(), serde_json::Value::from(processed.len() as i64));
+    params.insert("failed".into(), serde_json::Value::from(fallos as i64));
+    params.insert("open".into(), serde_json::Value::from(saltadas as i64));
 
     let verdict = PositionCloseResult {
         ok: all_closed,
         message,
         message_key,
-        message_params: None,
+        message_params: Some(params),
     };
 
     let _ = store.with_conn_mut(|conn| claims::finalizar_cierre(conn, &clave, now_ms(), &verdict));

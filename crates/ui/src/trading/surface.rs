@@ -10,11 +10,12 @@ use gpui::{
 };
 use serde_json::json;
 use zeron_proto::trading::{
-    Broker, IbkrPort, Link, LogLevel, Mt5Detected, Position, PositionSide, Snapshot, System,
-    Task as TradingTask, TaskKind, TaskStatus,
+    Broker, IbkrPort, Link, LogLevel, Mt5Detected, PanicResult, Position, PositionCloseResult,
+    PositionSide, Snapshot, System, Task as TradingTask, TaskKind, TaskStatus,
 };
 use zeron_rpc::methods;
 
+use super::i18n;
 use super::model::{self, Confirm, Phase};
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
@@ -162,6 +163,22 @@ impl TradingSurface {
         cx.notify();
     }
 
+    /// A close verdict, in Spanish: a success reads as a notice, a refusal
+    /// or a failure lands in the error strip.
+    fn show_close_verdict(&mut self, value: serde_json::Value, _cx: &mut Context<Self>) {
+        match serde_json::from_value::<PositionCloseResult>(value) {
+            Ok(result) => {
+                let line = i18n::verdict_text(&result);
+                if result.ok {
+                    self.notice = Some(line.into());
+                } else {
+                    self.error = Some(line.into());
+                }
+            }
+            Err(error) => self.error = Some(format!("Respuesta de cierre inválida: {error}").into()),
+        }
+    }
+
     fn confirm_current(&mut self, cx: &mut Context<Self>) {
         let Some(confirm) = self.confirm.take() else {
             return;
@@ -169,21 +186,40 @@ impl TradingSurface {
         match confirm {
             Confirm::Close(symbol) => {
                 let request_id = format!("ui:{}", uuid::Uuid::new_v4());
-                self.call(
+                self.call_with(
                     methods::TRADING_POSITION_CLOSE,
                     json!({ "symbol": symbol, "requestId": request_id }),
                     cx,
+                    Self::show_close_verdict,
                 );
             }
             Confirm::CloseAll => {
                 let request_id = format!("ui:{}", uuid::Uuid::new_v4());
-                self.call(
+                self.call_with(
                     methods::TRADING_POSITIONS_CLOSE_ALL,
                     json!({ "requestId": request_id }),
                     cx,
+                    Self::show_close_verdict,
                 );
             }
-            Confirm::Panic => self.call(methods::TRADING_PANIC, json!({}), cx),
+            Confirm::Panic => self.call_with(
+                methods::TRADING_PANIC,
+                json!({}),
+                cx,
+                |this, value, _cx| match serde_json::from_value::<PanicResult>(value) {
+                    Ok(result) => {
+                        let line = i18n::panic_text(&result);
+                        if result.close.ok {
+                            this.notice = Some(line.into());
+                        } else {
+                            this.error = Some(line.into());
+                        }
+                    }
+                    Err(error) => {
+                        this.error = Some(format!("Respuesta de pánico inválida: {error}").into())
+                    }
+                },
+            ),
             Confirm::Stop(system) => self.call(
                 methods::TRADING_SYSTEM_STOP,
                 json!({ "systemId": system }),
@@ -1196,7 +1232,7 @@ impl TradingSurface {
                                 } else {
                                     theme.text_muted
                                 })
-                                .child(SharedString::from(log.message.clone())),
+                                .child(SharedString::from(i18n::log_text(log))),
                         )
                         .child(
                             div()

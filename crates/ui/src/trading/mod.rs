@@ -6,6 +6,8 @@
 //! without a window.
 
 pub mod close_gate;
+pub mod i18n;
+mod i18n_es;
 pub mod model;
 pub mod surface;
 

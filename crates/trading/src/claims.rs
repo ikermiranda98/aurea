@@ -62,6 +62,13 @@ pub enum Reclamo {
 // Verdict constructors
 // ---------------------------------------------------------------------------
 
+/// `{ "symbol": … }`: the one param every per-position template interpolates.
+pub fn symbol_params(symbol: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut params = serde_json::Map::new();
+    params.insert("symbol".into(), serde_json::Value::String(symbol.to_string()));
+    params
+}
+
 pub fn vestigio(symbol: &str) -> PositionCloseResult {
     PositionCloseResult {
         ok: false,
@@ -70,7 +77,7 @@ pub fn vestigio(symbol: &str) -> PositionCloseResult {
             symbol
         ),
         message_key: Some("trading.close.vestigio".into()),
-        message_params: None,
+        message_params: Some(crate::claims::symbol_params(symbol)),
     }
 }
 
@@ -79,25 +86,25 @@ pub fn interrumpido(symbol: &str) -> PositionCloseResult {
         ok: false,
         message: format!("The close of {} was interrupted.", symbol),
         message_key: Some("trading.close.interrupted".into()),
-        message_params: None,
+        message_params: Some(crate::claims::symbol_params(symbol)),
     }
 }
 
-pub fn ocupado(_symbol: &str) -> PositionCloseResult {
+pub fn ocupado(symbol: &str) -> PositionCloseResult {
     PositionCloseResult {
         ok: false,
         message: "A close is already running…".to_string(),
         message_key: Some("trading.close.busy".into()),
-        message_params: None,
+        message_params: Some(crate::claims::symbol_params(symbol)),
     }
 }
 
-pub fn db_caida(_symbol: &str) -> PositionCloseResult {
+pub fn db_caida(symbol: &str) -> PositionCloseResult {
     PositionCloseResult {
         ok: false,
         message: "the database is unavailable, so the close was not sent".to_string(),
         message_key: Some("trading.close.unverified".into()),
-        message_params: None,
+        message_params: Some(crate::claims::symbol_params(symbol)),
     }
 }
 
