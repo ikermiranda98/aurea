@@ -909,6 +909,8 @@ pub struct EngineRpc {
     plugins: Option<crate::plugins::Plugins>,
     /// The trading surface's source (demo fixture or a live TWS paper link).
     trading: zeron_trading::TradingService,
+    /// The real trading engine (pool + store + state + tasks), when assembled.
+    trading_engine: Option<std::sync::Arc<std::sync::Mutex<zeron_trading::TradingEngine>>>,
     /// The WARP ring (lanes C1/C2): this machine's `warp-cli`, shared files and
     /// the mounted egress. Absent in bare schemes, where the surface degrades.
     warp: Option<std::sync::Arc<zeron_warp::Ghost>>,
@@ -932,6 +934,7 @@ impl EngineRpc {
         agent_accounts: AgentAccounts,
         workspace_scope: WorkspaceScope,
         trading: zeron_trading::TradingService,
+        trading_engine: Option<std::sync::Arc<std::sync::Mutex<zeron_trading::TradingEngine>>>,
     ) -> Self {
         sessions.track_terminal_activity(terminals.clone(), workspace.clone());
         let engine_info = EngineInfo {
@@ -976,6 +979,7 @@ impl EngineRpc {
             plugins: None,
             engine_info,
             trading,
+            trading_engine,
             warp: None,
         }
     }
@@ -4299,10 +4303,32 @@ impl RpcService for EngineRpc {
                 Ok(RpcReply::Stream(Box::pin(stream)))
             }
             methods::WATCH_TRADING_SNAPSHOT => {
-                Ok(RpcReply::Stream(watch_stream(self.trading.watch())))
+                if let Some(engine) = &self.trading_engine {
+                    let guard = engine.lock().unwrap();
+                    Ok(RpcReply::Stream(watch_stream(guard.watch())))
+                } else {
+                    Ok(RpcReply::Stream(watch_stream(self.trading.watch())))
+                }
             }
-            methods::TRADING_SNAPSHOT => RpcReply::value(&self.trading.snapshot()),
+            methods::TRADING_SNAPSHOT => {
+                if let Some(engine) = &self.trading_engine {
+                    let guard = engine.lock().unwrap();
+                    RpcReply::value(&guard.snapshot())
+                } else {
+                    RpcReply::value(&self.trading.snapshot())
+                }
+            }
             methods::TRADING_SYSTEM_START => {
+                if let Some(engine) = &self.trading_engine {
+                    let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
+                    let mut guard = engine.lock().unwrap();
+                    guard.start_system(&p.system_id).map_err(|e| RpcError::Failed(e.to_string()))?;
+                    // Return the system from snapshot.
+                    let snap = guard.snapshot();
+                    let system = snap.systems.into_iter().find(|s| s.id == p.system_id)
+                        .ok_or_else(|| RpcError::Failed(format!("System not found: {}", p.system_id)))?;
+                    return RpcReply::value(&system);
+                }
                 self.require_demo_trading("Arrancar un sistema")?;
                 let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
                 match zeron_trading::mock::start_system(&p.system_id) {
@@ -4316,6 +4342,15 @@ impl RpcService for EngineRpc {
                 }
             }
             methods::TRADING_SYSTEM_STOP => {
+                if let Some(engine) = &self.trading_engine {
+                    let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
+                    let mut guard = engine.lock().unwrap();
+                    guard.stop_system(&p.system_id).map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let snap = guard.snapshot();
+                    let system = snap.systems.into_iter().find(|s| s.id == p.system_id)
+                        .ok_or_else(|| RpcError::Failed(format!("System not found: {}", p.system_id)))?;
+                    return RpcReply::value(&system);
+                }
                 self.require_demo_trading("Parar un sistema")?;
                 let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
                 match zeron_trading::mock::stop_system(&p.system_id) {
@@ -4329,28 +4364,47 @@ impl RpcService for EngineRpc {
                 }
             }
             methods::TRADING_TASK_LIST => {
-                // A live link has no bot folders yet (lane A3): an empty list is
-                // the honest answer, not the fixture's demo tasks.
-                if self.trading.live() {
+                if let Some(engine) = &self.trading_engine {
+                    let guard = engine.lock().unwrap();
+                    RpcReply::value(&guard.task_list())
+                } else if self.trading.live() {
                     RpcReply::value(&Vec::<zeron_proto::trading::Task>::new())
                 } else {
                     RpcReply::value(&zeron_trading::task_list())
                 }
             }
             methods::TRADING_TASK_ADD => {
-                self.require_demo_trading("Programar una tarea")?;
-                let p: zeron_proto::trading::TaskAddInput = parse_params(params)?;
-                match zeron_trading::mock::task_add(&p) {
-                    Ok(task) => RpcReply::value(&task),
-                    Err(error) => return Err(RpcError::Failed(error.to_string())),
+                if let Some(engine) = &self.trading_engine {
+                    let p: zeron_proto::trading::TaskAddInput = parse_params(params)?;
+                    let mut guard = engine.lock().unwrap();
+                    match guard.task_add(&p) {
+                        Ok(task) => RpcReply::value(&task),
+                        Err(error) => return Err(RpcError::Failed(error.to_string())),
+                    }
+                } else {
+                    self.require_demo_trading("Programar una tarea")?;
+                    let p: zeron_proto::trading::TaskAddInput = parse_params(params)?;
+                    match zeron_trading::mock::task_add(&p) {
+                        Ok(task) => RpcReply::value(&task),
+                        Err(error) => return Err(RpcError::Failed(error.to_string())),
+                    }
                 }
             }
             methods::TRADING_TASK_CANCEL => {
-                self.require_demo_trading("Cancelar una tarea")?;
-                let p: zeron_proto::trading::TaskIdParams = parse_params(params)?;
-                match zeron_trading::mock::task_cancel(&p.task_id) {
-                    Ok(task) => RpcReply::value(&task),
-                    Err(error) => return Err(RpcError::Failed(error.to_string())),
+                if let Some(engine) = &self.trading_engine {
+                    let p: zeron_proto::trading::TaskIdParams = parse_params(params)?;
+                    let mut guard = engine.lock().unwrap();
+                    match guard.task_cancel(&p.task_id) {
+                        Ok(task) => RpcReply::value(&task),
+                        Err(error) => return Err(RpcError::Failed(error.to_string())),
+                    }
+                } else {
+                    self.require_demo_trading("Cancelar una tarea")?;
+                    let p: zeron_proto::trading::TaskIdParams = parse_params(params)?;
+                    match zeron_trading::mock::task_cancel(&p.task_id) {
+                        Ok(task) => RpcReply::value(&task),
+                        Err(error) => return Err(RpcError::Failed(error.to_string())),
+                    }
                 }
             }
             methods::TRADING_POSITION_CLOSE => {
@@ -4418,9 +4472,17 @@ impl RpcService for EngineRpc {
             }
             methods::TRADING_POOL_SELECT => {
                 let p: zeron_proto::trading::PoolSelectParams = parse_params(params)?;
-                match zeron_trading::mock::pool_select(&p.dir) {
-                    Ok(result) => RpcReply::value(&result),
-                    Err(error) => return Err(RpcError::Failed(error.to_string())),
+                if let Some(engine) = &self.trading_engine {
+                    let mut guard = engine.lock().unwrap();
+                    match guard.pool_select(&p.dir) {
+                        Ok(result) => RpcReply::value(&result),
+                        Err(error) => return Err(RpcError::Failed(error.to_string())),
+                    }
+                } else {
+                    match zeron_trading::mock::pool_select(&p.dir) {
+                        Ok(result) => RpcReply::value(&result),
+                        Err(error) => return Err(RpcError::Failed(error.to_string())),
+                    }
                 }
             }
             // WARP ring (lane C3): the machine's own status, a manual rotation
