@@ -246,6 +246,10 @@ impl TradingSurface {
                     .child(version),
             )
             .child(div().flex_1())
+            // The header shares the titlebar row: on Windows the native
+            // caption cluster (3 × 36px) sits over its right edge, so the
+            // actions stop short of it.
+            .pr(px(HEADER_RIGHT_PADDING))
             .child(
                 button("trading-close-all", "Cerrar todo", ButtonTone::Ghost, theme).on_click(
                     cx.listener(|this, _, _, cx| this.ask(Confirm::CloseAll, cx)),
@@ -803,10 +807,12 @@ impl TradingSurface {
             }
         }
         let actions = div()
+            .w_full()
             .px(px(12.0))
             .py(px(8.0))
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
             .gap(px(6.0))
             .border_t_1()
@@ -1291,6 +1297,14 @@ fn chip(label: impl Into<SharedString>, tone: Hsla) -> Div {
         .border_color(tone.opacity(0.18))
         .child(label.into())
 }
+
+/// Right inset of the desk header: the base 18px gutter plus, on Windows, the
+/// native caption buttons (minimize/maximize/close, 36px each) and a gap.
+const HEADER_RIGHT_PADDING: f32 = if cfg!(target_os = "windows") {
+    18.0 + 36.0 * 3.0 + 8.0
+} else {
+    18.0
+};
 
 fn card(theme: &Theme) -> Div {
     div()

@@ -18,7 +18,9 @@ pub mod store;
 pub mod tasks;
 
 pub use close::cerrar_una;
+pub use close::close_all_positions;
 pub use close::close_position;
+pub use close::panic;
 pub use engine::TradingEngine;
 pub use service::TradingService;
 
