@@ -6,7 +6,8 @@
 //!    `cancelled` on its own still-pending entries.
 //! 3. Evaluation (`evaluate_command`, pure): processed-id dedupe → Skip; expired TTL → Expired;
 //!    a newer interrupt supersedes an older interrupt; user prompts never supersede each other; an interrupt whose
-//!    `based_on.turn_id` is already past → Superseded; otherwise Execute.
+//!    `based_on.turn_id` is already past is Superseded — unless the turn that replaced it was asked for before the
+//!    interrupt (a steer sent in the turn it stops); otherwise Execute.
 
 use serde::{Deserialize, Serialize};
 
@@ -159,14 +160,33 @@ pub fn evaluate_command(
             return CommandDisposition::Superseded;
         }
     }
-    // An interrupt aimed at a turn that already finished is moot.
+    // An interrupt aimed at a turn that already finished is moot — but only
+    // when the chat moved on to a turn asked for *after* it. A row appended by
+    // a command that came before the stop (a steer sent in the turn it stops)
+    // is still the stop's turn, not a new one: stopping it would leave that
+    // steer running as if the stop had never been pressed.
     if kind == SessionCommandKind::Interrupt
         && let Some(based_on) = &entry.based_on
         && let Some(turn_id) = &based_on.turn_id
     {
         let is_current = cx.current_turn_id == Some(turn_id.as_str());
         if !is_current && (cx.turn_is_past)(turn_id) {
-            return CommandDisposition::Superseded;
+            let started_after = cx.current_turn_id.is_some_and(|current| {
+                cx.entries
+                    .iter()
+                    .skip_while(|other| other.id != entry.id)
+                    .skip(1)
+                    .any(|other| match &other.payload {
+                        SessionCommandPayload::Run { message_id, .. } => message_id == current,
+                        SessionCommandPayload::Steer { message_id, .. } => {
+                            message_id.as_deref() == Some(current)
+                        }
+                        _ => false,
+                    })
+            });
+            if started_after {
+                return CommandDisposition::Superseded;
+            }
         }
     }
     CommandDisposition::Execute
@@ -297,19 +317,46 @@ mod tests {
     }
 
     #[test]
-    fn interrupt_for_past_turn_is_superseded() {
+    fn interrupt_for_past_turn_is_superseded_only_by_a_later_send() {
         let mut e = entry("c1", SessionCommandPayload::Interrupt {}, 1_000);
         e.based_on = Some(CommandBasedOn {
             turn_id: Some("turn-1".into()),
             frontier: None,
         });
-        let entries = vec![e.clone()];
         let past = |id: &str| id == "turn-1";
-        let cx1 = cx(&entries, &NEVER, &past, 2_000, Some("turn-2"));
+
+        // A message the user sent after the Stop started the current turn:
+        // the Stop was for the old one and must not kill the new one.
+        let sent_after = entry(
+            "c2",
+            SessionCommandPayload::Run {
+                request: run_request(),
+                message_id: "turn-2".into(),
+            },
+            2_000,
+        );
+        let entries = vec![e.clone(), sent_after];
+        let cx1 = cx(&entries, &NEVER, &past, 3_000, Some("turn-2"));
         assert_eq!(evaluate_command(&e, &cx1), CommandDisposition::Superseded);
-        // …but if that turn is still the current one, execute.
-        let cx2 = cx(&entries, &NEVER, &past, 2_000, Some("turn-1"));
+
+        // A steer sent before the Stop wrote the row that replaced the
+        // anchor: it is the very turn the Stop stops.
+        let sent_before = entry(
+            "c0",
+            SessionCommandPayload::Run {
+                request: run_request(),
+                message_id: "turn-2".into(),
+            },
+            500,
+        );
+        let entries = vec![sent_before, e.clone()];
+        let cx2 = cx(&entries, &NEVER, &past, 3_000, Some("turn-2"));
         assert_eq!(evaluate_command(&e, &cx2), CommandDisposition::Execute);
+
+        // …but if that turn is still the current one, execute.
+        let entries = vec![e.clone()];
+        let cx3 = cx(&entries, &NEVER, &past, 2_000, Some("turn-1"));
+        assert_eq!(evaluate_command(&e, &cx3), CommandDisposition::Execute);
     }
 
     #[test]

@@ -618,7 +618,15 @@ mod tests {
             }
         };
         reach(1, "the first check probes").await;
-        assert!(detected());
+        // The probe's row write lands after the probe count moves; poll it
+        // instead of trusting a fixed settle on a loaded machine.
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !detected() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the first probe records the detected repository");
 
         // Churn that can't change the answer: the index, objects, a lock
         // file, a commit on another branch, the work tree, a rescan.

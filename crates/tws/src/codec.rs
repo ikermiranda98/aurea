@@ -108,7 +108,11 @@ impl Decoder {
             return None;
         }
 
-        let body: Vec<u8> = self.buffer.drain(..frame_len).collect();
+        let body: Vec<u8> = {
+            // Drop the four length bytes, then take exactly the announced body.
+            self.buffer.drain(..4);
+            self.buffer.drain(..length).collect()
+        };
         if std::str::from_utf8(&body).is_err() {
             self.error = Some(DecodeError::InvalidUtf8);
         }

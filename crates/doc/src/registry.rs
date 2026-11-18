@@ -92,6 +92,27 @@ impl HlcClock {
         }
         encode_hlc(self.last_ms, self.counter, device)
     }
+
+    /// Advance past a clock another device emitted, so this device's next
+    /// write still sorts after it. Clocks are compared as whole strings —
+    /// `(ms, counter, device)` — so a local write in the same millisecond with
+    /// the same counter lost to a peer whose id sorted higher. A delete made
+    /// then was ignored as older than the row it meant to tombstone, and the
+    /// row stayed listed. Incoming rows teach the clock before any local
+    /// write can compete with them.
+    fn observe(&mut self, hlc: &str) {
+        let mut parts = hlc.splitn(3, '-');
+        let (Some(ms), Some(counter)) = (parts.next(), parts.next()) else {
+            return;
+        };
+        let (Ok(ms), Ok(counter)) = (ms.parse::<i64>(), counter.parse::<u32>()) else {
+            return;
+        };
+        if ms > self.last_ms || (ms == self.last_ms && counter >= self.counter) {
+            self.last_ms = ms;
+            self.counter = counter.saturating_add(1);
+        }
+    }
 }
 
 // ── rows and ops (wire-compatible with edge/src/registry-core.ts) ───────────
@@ -823,6 +844,16 @@ impl RegistryDoc {
 
     // ── server frames ───────────────────────────────────────────────────────
 
+    /// Learn the clocks of rows written by other devices (see [`HlcClock::observe`]),
+    /// so this device's own writes can still win in the same millisecond.
+    fn observe_rows(&mut self, rows: &[RegistryRow]) {
+        for row in rows {
+            if let Some(clock) = row.max_clock() {
+                self.clock.observe(clock);
+            }
+        }
+    }
+
     /// Apply a hello `state` frame. See [`StateOutcome`] for the three shapes.
     pub fn apply_state(
         &mut self,
@@ -832,6 +863,7 @@ impl RegistryDoc {
         rows: Vec<RegistryRow>,
     ) -> StateOutcome {
         self.generation += 1;
+        self.observe_rows(&rows);
         if !full {
             for row in rows {
                 self.put_authoritative(row);
@@ -898,6 +930,7 @@ impl RegistryDoc {
     #[must_use]
     pub fn apply_rows(&mut self, seq: u64, rows: Vec<RegistryRow>) -> bool {
         self.generation += 1;
+        self.observe_rows(&rows);
         for row in rows {
             self.put_authoritative(row);
         }

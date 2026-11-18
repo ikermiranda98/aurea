@@ -1031,6 +1031,9 @@ async fn orphaned_history_steer_still_owes_the_history() {
 /// launches with its provider's subagent tools, and its Zeron server never
 /// tells it to delegate through side chats. So does a chat whose run reached
 /// its host before its row: the claimed row can't say it has no parent.
+///
+/// The fake Claude CLI is a POSIX script, so Windows cannot spawn it.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_side_chat_keeps_its_subagent_tools_when_native_subagents_are_off() {
     let dir = tempfile::tempdir().unwrap();

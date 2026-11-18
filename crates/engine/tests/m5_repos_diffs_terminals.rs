@@ -65,6 +65,10 @@ async fn git_stdout(cwd: &Path, args: &[&str]) -> String {
 async fn init_repo(dir: &Path) {
     std::fs::create_dir_all(dir).expect("repo dir");
     git(dir, &["init", "-b", "main"]).await;
+    // Windows ships `core.autocrlf=true`: the discard path restores files with
+    // `git checkout`, so the working tree would hold CRLF while these tests
+    // assert the committed bytes.
+    git(dir, &["config", "core.autocrlf", "false"]).await;
     std::fs::write(dir.join("a.txt"), "one\ntwo\n").expect("write a.txt");
     git(dir, &["add", "."]).await;
     git(dir, &["commit", "-m", "initial"]).await;
@@ -83,6 +87,17 @@ fn assemble(dir: &Path) -> EngineCore {
         None,
     )
     .expect("engine assembles")
+}
+
+/// A path as the shell reports it. The Windows ConPTY opens the shell with the
+/// plain form of the checkout (`\\?\` verbatim prefixes are stripped), so `PWD`
+/// never carries the prefix `canonicalize` returns on Windows.
+fn shell_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    match text.strip_prefix(r"\\?\") {
+        Some(plain) => plain.to_string(),
+        None => text,
+    }
 }
 
 fn decoded(events: &[TerminalEvent]) -> String {
@@ -774,6 +789,9 @@ async fn discard_working_tree_restores_tracked_staged_and_untracked_only() {
     std::fs::write(repo_dir.join("untracked.txt"), "untracked\n").expect("untracked");
     std::fs::create_dir(repo_dir.join("untracked-dir")).expect("untracked dir");
     std::fs::write(repo_dir.join("untracked-dir/file.txt"), "nested\n").expect("nested file");
+    // `:` is reserved in Windows filenames, so the pathspec-magic filename only
+    // exists on Unix.
+    #[cfg(unix)]
     std::fs::write(repo_dir.join(":(glob)*"), "literal pathspec\n").expect("magic path");
     std::fs::write(repo_dir.join("ignored.log"), "keep me\n").expect("ignored");
 
@@ -806,6 +824,7 @@ async fn discard_working_tree_restores_tracked_staged_and_untracked_only() {
     assert!(!repo_dir.join("staged-new.txt").exists());
     assert!(!repo_dir.join("untracked.txt").exists());
     assert!(!repo_dir.join("untracked-dir").exists());
+    #[cfg(unix)]
     assert!(!repo_dir.join(":(glob)*").exists());
     assert_eq!(
         std::fs::read_to_string(repo_dir.join("ignored.log")).unwrap(),
@@ -1810,6 +1829,9 @@ async fn checkout_file_diff_text_rpc_reads_pinned_commit_sources() {
 // Terminals
 // ---------------------------------------------------------------------------
 
+// `/bin/sh` and its `$((…))`/`exit N` typing only exist on Unix; the ConPTY
+// lifecycle is covered by the Windows tests in `engine::terminals`.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_e2e_replay_live_resize_exit() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -1913,14 +1935,17 @@ async fn terminal_e2e_replay_live_resize_exit() {
 async fn terminal_guards_input_size_and_cwd() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let terminals = Terminals::new();
+    // `/bin/sh` is Unix-only; elsewhere the host's default shell (PowerShell on
+    // Windows) exercises the same guards.
+    let shell = if cfg!(windows) { None } else { Some("/bin/sh") };
     assert!(
         terminals
-            .open_with_shell("/definitely/not/a/dir", 80, 24, Some("/bin/sh"))
+            .open_with_shell("/definitely/not/a/dir", 80, 24, shell)
             .is_err(),
         "bad cwd rejected"
     );
     let session = terminals
-        .open_with_shell(&tmp.path().to_string_lossy(), 80, 24, Some("/bin/sh"))
+        .open_with_shell(&tmp.path().to_string_lossy(), 80, 24, shell)
         .expect("open sh");
     let huge = BASE64.encode(vec![b'x'; 65 * 1024]);
     assert!(
@@ -2057,12 +2082,23 @@ async fn project_actions_run_in_fresh_host_resolved_terminals() {
             None,
             ProjectActionDraft {
                 name: "Environment".into(),
-                command: concat!(
-                    "printf 'ROOT=%s|WT=%s|CWD=%s\\n' ",
-                    "\"$ZERON_PROJECT_ROOT\" ",
-                    "\"${ZERON_WORKTREE_PATH-unset}\" ",
-                    "\"$PWD\""
-                )
+                // One line each: a single long line would wrap at 80 columns and
+                // could split the marker the test drains for.
+                command: (if cfg!(windows) {
+                    concat!(
+                        "$wt = if ($env:ZERON_WORKTREE_PATH) { $env:ZERON_WORKTREE_PATH } else { 'unset' }; ",
+                        "Write-Output ('ROOT=' + $env:ZERON_PROJECT_ROOT); ",
+                        "Write-Output ('WT=' + $wt); ",
+                        "Write-Output ('CWD=' + [IO.Directory]::GetCurrentDirectory())"
+                    )
+                } else {
+                    concat!(
+                        "printf 'ROOT=%s|WT=%s|CWD=%s\\n' ",
+                        "\"$ZERON_PROJECT_ROOT\" ",
+                        "\"${ZERON_WORKTREE_PATH-unset}\" ",
+                        "\"$PWD\""
+                    )
+                })
                 .into(),
                 icon: ProjectActionIcon::Debug,
                 run_on_worktree_create: false,
@@ -2091,12 +2127,15 @@ async fn project_actions_run_in_fresh_host_resolved_terminals() {
         .expect("main replay");
     let mut main_events = Vec::new();
     drain_until(&mut main_rx, &mut main_events, |events| {
-        decoded(events).contains("|WT=unset|")
+        let output = decoded(events);
+        // The three markers arrive in their own writes; CWD is the last one,
+        // so waiting only for WT would read a transcript that is still short.
+        output.contains("WT=unset") && output.contains("CWD=")
     })
     .await;
     let main_output = decoded(&main_events);
     assert!(main_output.contains(&format!("ROOT={}", canonical_repo.display())));
-    assert!(main_output.contains(&format!("CWD={}", canonical_repo.display())));
+    assert!(main_output.contains(&format!("CWD={}", shell_path(&canonical_repo))));
 
     let second = client
         .call_as::<ProjectActionRun>(
@@ -2132,12 +2171,13 @@ async fn project_actions_run_in_fresh_host_resolved_terminals() {
         .expect("worktree replay");
     let mut worktree_events = Vec::new();
     drain_until(&mut worktree_rx, &mut worktree_events, |events| {
-        decoded(events).contains(&format!("WT={}", canonical_worktree.display()))
+        let output = decoded(events);
+        output.contains(&format!("WT={}", canonical_worktree.display())) && output.contains("CWD=")
     })
     .await;
     let worktree_output = decoded(&worktree_events);
     assert!(worktree_output.contains(&format!("ROOT={}", canonical_repo.display())));
-    assert!(worktree_output.contains(&format!("CWD={}", canonical_worktree.display())));
+    assert!(worktree_output.contains(&format!("CWD={}", shell_path(&canonical_worktree))));
 
     core.workspace
         .create_space(
@@ -2356,12 +2396,24 @@ async fn rpc_dispatch_for_m5_methods() {
             None,
             ProjectActionDraft {
                 name: "Setup".into(),
-                command: concat!(
-                    "sleep 2; ",
-                    "printf 'ROOT=%s\\nWT=%s\\nCWD=%s\\n' ",
-                    "\"$ZERON_PROJECT_ROOT\" \"$ZERON_WORKTREE_PATH\" \"$PWD\" ",
-                    "| tee .zeron-setup-env"
-                )
+                // The env file lands before the output, so a reader that sees
+                // the markers can already assert on it.
+                command: (if cfg!(windows) {
+                    concat!(
+                        "Start-Sleep -Seconds 2; ",
+                        "$lines = @('ROOT=' + $env:ZERON_PROJECT_ROOT, ",
+                        "'WT=' + $env:ZERON_WORKTREE_PATH, ",
+                        "'CWD=' + [IO.Directory]::GetCurrentDirectory()); ",
+                        "$lines | Set-Content .zeron-setup-env; $lines"
+                    )
+                } else {
+                    concat!(
+                        "sleep 2; ",
+                        "printf 'ROOT=%s\\nWT=%s\\nCWD=%s\\n' ",
+                        "\"$ZERON_PROJECT_ROOT\" \"$ZERON_WORKTREE_PATH\" \"$PWD\" ",
+                        "| tee .zeron-setup-env"
+                    )
+                })
                 .into(),
                 icon: ProjectActionIcon::Configure,
                 run_on_worktree_create: true,
@@ -2464,7 +2516,7 @@ async fn rpc_dispatch_for_m5_methods() {
     let setup_output = decoded(&setup_events);
     assert!(setup_output.contains(&format!("ROOT={}", canonical_repo.display())));
     assert!(setup_output.contains(&format!("WT={}", canonical_worktree.display())));
-    assert!(setup_output.contains(&format!("CWD={}", canonical_worktree.display())));
+    assert!(setup_output.contains(&format!("CWD={}", shell_path(&canonical_worktree))));
     assert!(canonical_worktree.join(".zeron-setup-env").exists());
     core.terminals
         .close(&setup.terminal.id)
@@ -2622,12 +2674,18 @@ async fn rpc_dispatch_for_m5_methods() {
         )
         .await
         .expect("SubscribeTerminal");
+    // PowerShell is the Windows default shell: same marker, its own arithmetic,
+    // and `\r` for Enter (PSReadLine treats a bare `\n` as a continuation).
+    #[cfg(windows)]
+    let typed = "Write-Output ('rpc-t3st-' + (5+4))\r";
+    #[cfg(not(windows))]
+    let typed = "echo rpc-t3st-$((5+4))\n";
     client
         .call(
             methods::WRITE_TERMINAL,
             serde_json::json!({
                 "terminalId": terminal_id,
-                "data": BASE64.encode("echo rpc-t3st-$((5+4))\n"),
+                "data": BASE64.encode(typed),
             }),
         )
         .await

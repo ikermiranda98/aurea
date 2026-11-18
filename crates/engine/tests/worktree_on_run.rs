@@ -225,6 +225,23 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool, test_setup: b
         .await
         .expect("choose initial worktree directory");
     if test_setup {
+        // The Action runs in the host's terminal shell: PowerShell on Windows,
+        // where `printf` is not a command. `File.WriteAllText` writes the exact
+        // value (UTF-8, no BOM, no trailing newline) like the POSIX branch, and
+        // the worktree path carries non-ASCII bytes ("Worktrees con espacios 日本語").
+        let command = if cfg!(windows) {
+            concat!(
+                "[IO.File]::WriteAllText('setup-project-root', $env:ZERON_PROJECT_ROOT); ",
+                "[IO.File]::WriteAllText('setup-worktree-path', $env:ZERON_WORKTREE_PATH); ",
+                "[IO.File]::WriteAllText('setup-marker', 'setup')"
+            )
+        } else {
+            concat!(
+                "printf '%s' \"$ZERON_PROJECT_ROOT\" > setup-project-root; ",
+                "printf '%s' \"$ZERON_WORKTREE_PATH\" > setup-worktree-path; ",
+                "printf setup > setup-marker"
+            )
+        };
         client
         .call(
             zeron_rpc::methods::UPSERT_PROJECT_ACTION,
@@ -232,7 +249,7 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool, test_setup: b
                 "spaceId": "space-worktree-run",
                 "action": ProjectActionDraft {
                     name: "Setup".into(),
-                    command: "printf '%s' \"$ZERON_PROJECT_ROOT\" > setup-project-root; printf '%s' \"$ZERON_WORKTREE_PATH\" > setup-worktree-path; printf setup > setup-marker".into(),
+                    command: command.into(),
                     icon: ProjectActionIcon::Configure,
                     run_on_worktree_create: true,
                 }

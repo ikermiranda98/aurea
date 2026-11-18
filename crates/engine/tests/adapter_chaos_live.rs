@@ -11,6 +11,10 @@
 //!   began first (a steer boundary or a fresh process); no Idle→Working flip
 //!   the user did not cause; every requested sentinel present at the end.
 //! - Never stuck: every scenario settles Idle.
+//!
+//! Unix-only: the crash scenarios put the child in its own process group.
+
+#![cfg(unix)]
 //! - Every routed message is delivered (one steer boundary each).
 //! - One process for the chat's life, except after the user's Stop.
 //! - Nothing the agent started outlives a Stop.

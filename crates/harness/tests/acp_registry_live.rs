@@ -107,6 +107,7 @@ async fn live_registry_agents_install_and_answer_initialize() {
 /// in a scratch HOME (nothing of yours touched), for long enough to show
 /// what it asks for: its page, a code, its output. Never finishes a
 /// sign-in (no account), and says how far it got.
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "downloads agents and starts their sign-ins"]
 async fn live_registry_sign_ins_report_their_page() {

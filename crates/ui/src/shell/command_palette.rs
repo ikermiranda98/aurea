@@ -931,6 +931,7 @@ impl Shell {
             Command::NewProject => ShortcutId::NewProject,
             Command::Settings => return Some(crate::settings::badge_combo("mod-,")),
             Command::ArchiveThread => ShortcutId::ArchiveSession,
+            Command::Trading => return None,
             Command::Theme(_) => return None,
         };
         let combo = self.settings.keymap.get(id);
@@ -2793,6 +2794,7 @@ mod tests {
             vec![
                 Command::NewChat,
                 Command::NewProject,
+                Command::Trading,
                 Command::Settings,
                 Command::Theme(AppearanceMode::Light)
             ]

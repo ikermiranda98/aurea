@@ -771,6 +771,10 @@ async fn git_status_is_computed_on_the_checkout_host_through_the_relay() {
     host.shutdown().await;
 }
 
+// The Action command and the worktree setup marker are POSIX shell scripts
+// (`printf … > file`, `[ -n "$VAR" ]`): Windows' PowerShell does not run them,
+// and the engine's Windows shell is PowerShell by design.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn target_device_id_routes_over_the_relay() {
     let (relay_url, _relay) = fake_device_room().await;
@@ -1489,7 +1493,13 @@ async fn exercise_terminal_relay(projectless: bool) {
             methods::WRITE_TERMINAL,
             serde_json::json!({
                 "terminalId": terminal_id,
-                "data": BASE64.encode("echo r3lay-$((20+2))\n"),
+                // PSReadLine only submits on CR (LF adds a line and shows the
+                // `>>` continuation prompt); Unix shells accept either.
+                "data": BASE64.encode(if cfg!(windows) {
+                    "echo r3lay-$((20+2))\r"
+                } else {
+                    "echo r3lay-$((20+2))\n"
+                }),
                 "targetDeviceId": "device-b",
             }),
         )
@@ -2014,7 +2024,12 @@ async fn files_with_no_words_queued_on_another_device_reach_the_host() {
                 prompt.contains("See the attached image(s)."),
                 "got: {prompt}"
             );
-            assert!(prompt.contains(&on_host), "got: {prompt}");
+            // `parts` is the `Debug` rendering: Windows path separators arrive
+            // doubled, exactly as the foreign-path test below compares them.
+            assert!(
+                prompt.contains(&on_host.replace('\\', "\\\\")) || prompt.contains(&on_host),
+                "got: {prompt}"
+            );
             break;
         }
         assert!(tokio::time::Instant::now() < deadline, "B never sent it");

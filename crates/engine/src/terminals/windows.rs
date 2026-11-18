@@ -8,6 +8,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context as _;
 use portable_pty::{Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Console::{
@@ -428,9 +429,9 @@ pub(super) fn open(
         block.push(0);
     }
     block.push(0);
-    let job = Arc::new(Job::new()?);
-    let (input, writer) = pipe()?;
-    let (reader, output) = pipe()?;
+    let job = Arc::new(Job::new().context("create job object")?);
+    let (input, writer) = pipe().context("create input pipe")?;
+    let (reader, output) = pipe().context("create output pipe")?;
     let mut console = 0;
     hresult(unsafe {
         CreatePseudoConsole(
@@ -440,12 +441,14 @@ pub(super) fn open(
             0,
             &mut console,
         )
-    })?;
+    })
+    .context("create pseudo console")?;
     let console = Console(console);
     drop(input);
     drop(output);
     let jobs = [job.as_handle().as_raw_handle()];
-    let mut attrs = Attributes::for_console(&console.0, &jobs)?;
+    let mut attrs =
+        Attributes::for_console(&console.0, &jobs).context("build process attributes")?;
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -482,7 +485,12 @@ pub(super) fn open(
         )
     } == 0
     {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error()).with_context(|| {
+            format!(
+                "create process for {}",
+                String::from_utf16_lossy(&executable[..executable.len() - 1])
+            )
+        });
     }
     // SAFETY: these two handles are newly owned on successful CreateProcessW.
     let handle = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };

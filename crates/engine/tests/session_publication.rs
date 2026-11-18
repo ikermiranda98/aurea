@@ -1,5 +1,8 @@
 //! Real Codex adapter + engine persistence + ChatClient over a loopback relay.
 //! Faults are injected only in temporary profiles and the test relay.
+//!
+//! The fake Codex CLI is a POSIX script, so Windows cannot spawn it.
+#![cfg(unix)]
 use futures::{SinkExt, StreamExt, future::BoxFuture};
 use loro::{ExportMode, LoroDoc};
 use std::collections::HashMap;

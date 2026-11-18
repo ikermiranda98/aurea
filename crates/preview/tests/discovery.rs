@@ -1,5 +1,6 @@
 //! Real OS process/listener association: only servers a Zeron agent or
 //! terminal started (carrying its origin marker), each under the right checkout.
+#![cfg(unix)]
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -19,6 +20,23 @@ impl Drop for Child {
     }
 }
 const HTTP_SERVER: &str = "import http.server,socketserver; socketserver.TCPServer(('127.0.0.1',0),http.server.SimpleHTTPRequestHandler).serve_forever()";
+/// The Python that actually runs here: on Windows `python3` is often the
+/// Microsoft Store alias, which exits without running the script.
+fn python() -> &'static str {
+    for candidato in ["python3", "python"] {
+        let vale = std::process::Command::new(candidato)
+            .args(["-c", "import sys"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|estado| estado.success())
+            .unwrap_or(false);
+        if vale {
+            return candidato;
+        }
+    }
+    "python3"
+}
 fn scope(chats: &[(&str, &Path)]) -> Scope {
     Scope {
         chats: chats
@@ -40,7 +58,7 @@ fn launch(cwd: &Path, http: bool, chat: Option<&str>) -> Child {
 }
 /// A server carrying `origin` (see [`ORIGIN_ENV`]); `None` is the user's.
 fn launch_from(cwd: &Path, http: bool, origin: Option<String>) -> Child {
-    let mut command = std::process::Command::new("python3");
+    let mut command = std::process::Command::new(python());
     command.env_remove(ORIGIN_ENV);
     if let Some(origin) = origin {
         command.env(ORIGIN_ENV, origin);
@@ -175,7 +193,7 @@ async fn a_discovered_server_is_probed_once_not_every_cycle() {
         log = log.display().to_string()
     );
     let server = Child(
-        std::process::Command::new("python3")
+        std::process::Command::new(python())
             .args(["-c", &script])
             .env(ORIGIN_ENV, chat_origin(&chat))
             .current_dir(&app)
@@ -249,7 +267,7 @@ c.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK'
         connections = connections.display().to_string(),
     );
     let mut callback = Child(
-        std::process::Command::new("python3")
+        std::process::Command::new(python())
             .args([
                 "-c",
                 &script,

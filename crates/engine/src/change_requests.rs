@@ -968,7 +968,9 @@ mod tests {
         let first = stream.next().await.unwrap();
         lookup.set_source(source("feature/two"));
 
-        let second = tokio::time::timeout(Duration::from_millis(100), stream.next())
+        // Two poll intervals at 5 ms in isolation; 2 s keeps the intent
+        // ("the change is emitted") under a loaded full-workspace run.
+        let second = tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
             .unwrap()
             .unwrap();
@@ -989,7 +991,7 @@ mod tests {
         let mut stream = service.watch_checkout(PathBuf::from("/checkout"), identity());
         assert!(stream.next().await.unwrap().change_request.is_some());
 
-        let cleared = tokio::time::timeout(Duration::from_millis(100), stream.next())
+        let cleared = tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
             .unwrap()
             .unwrap();
@@ -1014,7 +1016,7 @@ mod tests {
             90
         );
 
-        let changed = tokio::time::timeout(Duration::from_millis(100), stream.next())
+        let changed = tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
             .unwrap()
             .unwrap();

@@ -776,6 +776,11 @@ struct Inner {
     order: Mutex<Vec<HarnessId>>,
     prefs_path: PathBuf,
     prefs: Mutex<Preferences>,
+    /// Serializes snapshot + temp write + rename. Writers share one temporary
+    /// path, so two unserialized persists could rename a partially written file
+    /// over the preferences (and the last rename would win regardless of what
+    /// the in-memory map holds).
+    prefs_save: Mutex<()>,
     statuses: Mutex<HashMap<HarnessId, HarnessUpdateStatus>>,
     status_tx: watch::Sender<Vec<HarnessUpdateStatus>>,
     cancellations: Mutex<HashMap<HarnessId, ActiveUpdate>>,
@@ -915,6 +920,7 @@ impl HarnessUpdateCoordinator {
                 order: Mutex::new(order),
                 prefs_path,
                 prefs: Mutex::new(prefs),
+                prefs_save: Mutex::new(()),
                 statuses: Mutex::new(statuses),
                 status_tx,
                 cancellations: Mutex::new(HashMap::new()),
@@ -2921,8 +2927,12 @@ impl HarnessUpdateCoordinator {
     }
 
     fn persist_preferences(&self) {
-        // Keep snapshot order and replacement order identical. Every writer
-        // shares this lock and temporary path, including successful updates.
+        // Snapshot, temp write and rename are one unit: every writer shares the
+        // temporary path, so an unserialized pair could replace the file with a
+        // half-written one, and the final rename would not necessarily carry
+        // the final snapshot.
+        let _save = lock(&self.inner.prefs_save);
+        // Keep snapshot order and replacement order identical under this lock.
         let prefs = lock(&self.inner.prefs);
         let json = match serde_json::to_string_pretty(&*prefs) {
             Ok(json) => json,
@@ -2932,10 +2942,24 @@ impl HarnessUpdateCoordinator {
             }
         };
         let temp = self.inner.prefs_path.with_extension("json.tmp");
-        if let Err(error) = std::fs::write(&temp, json)
-            .and_then(|()| std::fs::rename(&temp, &self.inner.prefs_path))
-        {
-            tracing::warn!(%error, "harness update preferences save failed");
+        // A reader holding the destination open (the dashboard polling it, a
+        // test checking the file mid-write) makes the rename fail on Windows
+        // with a sharing violation. Dropping the save left the file with an
+        // older snapshot than the one in memory, so retry briefly.
+        for attempt in 0..5 {
+            match std::fs::write(&temp, &json)
+                .and_then(|()| std::fs::rename(&temp, &self.inner.prefs_path))
+            {
+                Ok(()) => return,
+                Err(error) if attempt < 4 => {
+                    tracing::debug!(%error, attempt, "harness update preferences save retried");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "harness update preferences save failed");
+                    return;
+                }
+            }
         }
     }
 }

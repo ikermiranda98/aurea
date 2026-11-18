@@ -1,10 +1,9 @@
 # CONTRACTS — Contratos proto/RPC de trading de Aurea
 
-> **ESTADO: v0.3 (2026-11-17 ~21:35)** — tipos en `crates/proto/src/trading.rs` + `warp.rs`,
-> constantes en `crates/rpc/src/lib.rs`, brazos en `crates/engine/src/rpc.rs` y mock
-> interactivo en `crates/trading/`. Sintaxis validada con `rustfmt`; el `cargo check` está
-> bloqueado por el Windows SDK (ver BOARD). Se **congela** cuando el check esté verde.
-> Cambios posteriores: solo orquestador + bump de versión.
+> **ESTADO: v1 — CONGELADO (2026-11-17 ~23:40)** — tipos en `crates/proto/src/trading.rs` +
+> `warp.rs`, constantes en `crates/rpc/src/lib.rs`, brazos en `crates/engine/src/rpc.rs` y mock
+> interactivo en `crates/trading/`. **`cargo check --workspace --all-targets` verde.**
+> A partir de aquí: cualquier cambio requiere al orquestador y un bump de versión (§5).
 > Fuente de comportamiento: `SPECS/A6.md` y `packages/schema/src/trading.ts` (Openbot).
 
 ## 1. Tipos (fuente de verdad = código)
@@ -94,3 +93,4 @@ Las acciones **mutan** el fixture y republican de inmediato (el dashboard ya es 
 | v0.1 | 2026-11-17 | Borrador desde SPECS/A6 + schema TS |
 | v0.2 | 2026-11-17 | Tipos exactos del schema en `proto/trading.rs` + `warp.rs` + constantes RPC |
 | v0.3 | 2026-11-17 | Correcciones del barrido completo: `Broker::Nt`, `Link.connected`/`mt5_login` numérico, `IbkrPort.open`, `Programs` exacto, `PoolSelectResult.systems` recuento, `TaskAddInput` camelCase con `atTime` "HH:MM"; brazos RPC (20 + 3 WARP) y mock interactivo |
+| **v1** | 2026-11-17 | **Congelado** con el workspace compilando verde (`cargo check --workspace --all-targets`). Sin cambios de forma respecto a v0.3: solo se certifica lo ya implementado. |

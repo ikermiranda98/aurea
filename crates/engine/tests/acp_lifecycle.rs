@@ -1,5 +1,12 @@
 //! #296 through the engine: completed tools must not park a pending ACP turn.
 //! Separate binary because the diagnostic watchdog setting is process-wide.
+//!
+//! The peer is `tests/fixtures/acp-lifecycle.py`, run by its shebang: Windows'
+//! `CreateProcess` cannot execute a `.py` (and `validate_native_override` only
+//! launches `.exe`/`.cmd`/`.bat`/`.com`), so this is Unix-only like the other
+//! ACP fixture tests (`harness/tests/acp_quiet.rs` covers the same peer there).
+#![cfg(unix)]
+
 use std::{sync::Arc, time::Duration};
 use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, SessionCommandEntry, SessionCommandPayload,

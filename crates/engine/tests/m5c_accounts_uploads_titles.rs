@@ -1357,11 +1357,23 @@ async fn cursor_login_flow_spawns_shim_and_auto_activates() {
 
     // Fake shim: in login mode, emit the auth-url frame, write the minted
     // store file where the engine pointed us, exit 0. Mirrors the real shim's
-    // `node <shim> login <store-path>` argv contract.
+    // `node <shim> login <store-path>` argv contract. Windows gets a batch
+    // shim because the engine only launches real Windows executables.
+    #[cfg(windows)]
+    let shim = dir.path().join("fake-cursor-shim.cmd");
+    #[cfg(windows)]
+    let shim_script = concat!(
+        "@echo off\r\n",
+        "if not \"%~1\"==\"login\" exit /b 1\r\n",
+        "echo {\"ev\":\"auth-url\",\"url\":\"https://cursor.com/loginDeepControl?challenge=fake\"}\r\n",
+        "> \"%~2\" echo {\"version\":1,\"backendUrl\":\"https://api2.cursor.sh\",\"apiKey\":\"key-minted\",\"apiKeyExpiresAtMs\":99999999999999,\"email\":\"grace@example.com\",\"createdAtMs\":1}\r\n",
+        "echo {\"ev\":\"logged-in\",\"email\":\"grace@example.com\"}\r\n",
+        "exit /b 0\r\n",
+    );
+    #[cfg(unix)]
     let shim = dir.path().join("fake-cursor-shim.sh");
-    std::fs::write(
-        &shim,
-        r#"#!/bin/sh
+    #[cfg(unix)]
+    let shim_script = r#"#!/bin/sh
 [ "$1" = "login" ] || exit 1
 printf '%s\n' '{"ev":"auth-url","url":"https://cursor.com/loginDeepControl?challenge=fake"}'
 cat > "$2" <<JSON
@@ -1369,9 +1381,8 @@ cat > "$2" <<JSON
 JSON
 printf '%s\n' '{"ev":"logged-in","email":"grace@example.com"}'
 exit 0
-"#,
-    )
-    .expect("fake shim");
+"#;
+    std::fs::write(&shim, shim_script).expect("fake shim");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1476,16 +1487,22 @@ async fn login_until_done(accounts: &AgentAccounts, harness: HarnessId) {
 async fn codex_relogin_revives_the_live_account_and_live_is_removable() {
     let dir = tempfile::tempdir().expect("tmp");
     let (accounts, config) = test_accounts(dir.path());
-    let codex = dir.path().join("fake-codex.sh");
     let next_auth = dir.path().join("next-auth.json");
-    std::fs::write(
-        &codex,
-        format!(
-            "#!/bin/sh\n[ \"$1\" = \"login\" ] || exit 1\ncp '{}' \"$CODEX_HOME/auth.json\"\nexit 0\n",
-            next_auth.display()
-        ),
-    )
-    .expect("fake codex");
+    #[cfg(windows)]
+    let codex = dir.path().join("fake-codex.cmd");
+    #[cfg(windows)]
+    let codex_script = format!(
+        "@echo off\r\nif not \"%~1\"==\"login\" exit /b 1\r\ncopy /y \"{}\" \"%CODEX_HOME%\\auth.json\" > nul\r\nexit /b 0\r\n",
+        next_auth.display()
+    );
+    #[cfg(unix)]
+    let codex = dir.path().join("fake-codex.sh");
+    #[cfg(unix)]
+    let codex_script = format!(
+        "#!/bin/sh\n[ \"$1\" = \"login\" ] || exit 1\ncp '{}' \"$CODEX_HOME/auth.json\"\nexit 0\n",
+        next_auth.display()
+    );
+    std::fs::write(&codex, codex_script).expect("fake codex");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

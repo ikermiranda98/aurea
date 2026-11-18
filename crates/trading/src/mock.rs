@@ -360,36 +360,42 @@ static TX: OnceLock<watch::Sender<Snapshot>> = OnceLock::new();
 fn tx() -> &'static watch::Sender<Snapshot> {
     TX.get_or_init(|| {
         let (tx, _rx) = watch::channel(current());
-        let ticker = tx.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(2));
-            loop {
-                tick.tick().await;
-                let snapshot = {
-                    let guard = match overrides().lock() {
-                        Ok(g) => g,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
-                    let mut snap = compose(&guard);
-                    if let Some(eq) = snap.equity.as_mut() {
-                        let equity = snap.account.as_ref().and_then(|a| a.equity);
-                        let pnl_day = snap.account.as_ref().and_then(|a| a.pnl_day);
-                        eq.push(EquityPoint {
-                            ts: now_ms(),
-                            equity,
-                            pnl_day,
-                        });
-                        if eq.len() > 1000 {
-                            eq.remove(0);
+        // The 2 s ticker only exists to move the equity history along; every
+        // action already publishes through the sender. Callers without a
+        // runtime (the action tests, a CLI probe) still get a working
+        // snapshot instead of a panic from `tokio::spawn`.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let ticker = tx.clone();
+            handle.spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(2));
+                loop {
+                    tick.tick().await;
+                    let snapshot = {
+                        let guard = match overrides().lock() {
+                            Ok(g) => g,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        let mut snap = compose(&guard);
+                        if let Some(eq) = snap.equity.as_mut() {
+                            let equity = snap.account.as_ref().and_then(|a| a.equity);
+                            let pnl_day = snap.account.as_ref().and_then(|a| a.pnl_day);
+                            eq.push(EquityPoint {
+                                ts: now_ms(),
+                                equity,
+                                pnl_day,
+                            });
+                            if eq.len() > 1000 {
+                                eq.remove(0);
+                            }
                         }
+                        snap
+                    };
+                    if ticker.send(snapshot).is_err() {
+                        break;
                     }
-                    snap
-                };
-                if ticker.send(snapshot).is_err() {
-                    break;
                 }
-            }
-        });
+            });
+        }
         tx
     })
 }

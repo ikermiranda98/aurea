@@ -39,6 +39,10 @@ async fn git(cwd: &Path, args: &[&str]) {
 async fn init_dirty_repo(dir: &Path) {
     std::fs::create_dir_all(dir).expect("repo dir");
     git(dir, &["init", "-b", "main"]).await;
+    // Hermetic to the machine's git config: with `core.autocrlf` on, checkout
+    // would hand back CRLF while the committed blob is LF, and these tests
+    // assert the bytes the test wrote.
+    git(dir, &["config", "core.autocrlf", "false"]).await;
     std::fs::write(dir.join("a.txt"), "one\ntwo\n").expect("write a.txt");
     git(dir, &["add", "."]).await;
     git(dir, &["commit", "-m", "initial"]).await;
@@ -242,6 +246,28 @@ async fn chat_flap_keeps_entry_and_sustained_absence_removes_it() {
 /// fresh (repair) resolve drops the memo when the cwd no longer exists, and
 /// the grace period then runs out. Guards against the dampers making removal
 /// impossible.
+/// The checkout vanishes while its chat row remains.
+///
+/// Windows refuses the delete while a `git` child (a capture tick) still has a
+/// file open, so retry briefly like any external deleter would — the point is
+/// that the directory is gone, not how many attempts it took.
+async fn remove_checkout(dir: &Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "remove repo: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deleted_checkout_is_evicted_after_grace() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -274,7 +300,7 @@ async fn deleted_checkout_is_evicted_after_grace() {
     wait_for_diff(&sync).await;
 
     // The checkout vanishes while its chat row remains.
-    std::fs::remove_dir_all(&repo_dir).expect("remove repo");
+    remove_checkout(&repo_dir).await;
 
     // Chat-watch reconciles keep using the memo (they must not spawn git), so
     // eviction is the repair tick's job: fresh resolve fails + cwd is gone ⇒

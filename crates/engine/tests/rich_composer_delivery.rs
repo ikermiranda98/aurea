@@ -440,6 +440,13 @@ async fn queue_edits_preserve_reselected_skills_until_delivery_for_every_harness
 async fn projectless_catalogs_use_the_session_directory_and_reject_unknown_targets() {
     let (tmp, core, _harness, _rx) = setup(HarnessId::Codex).await;
     let client = zeron_rpc::memory_client(core.rpc_service());
+    // The host's home as the engine resolves it (`USERPROFILE` first on Windows).
+    let home = if cfg!(windows) {
+        std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
+    } else {
+        std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))
+    }
+    .expect("home set in test env");
     for method in [
         zeron_rpc::methods::LIST_COMMANDS,
         zeron_rpc::methods::LIST_SKILLS,
@@ -459,7 +466,7 @@ async fn projectless_catalogs_use_the_session_directory_and_reject_unknown_targe
         // runs, and lists, from its own scratch folder.
         assert_eq!(
             new_chat[0]["description"],
-            std::env::var("HOME").unwrap(),
+            home,
             "{method}"
         );
         let chat_cwd = core.workspace.chat(CHAT).unwrap().unwrap().cwd.unwrap();

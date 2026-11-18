@@ -2573,6 +2573,47 @@ fn a_device_removed_from_another_is_gone_everywhere_and_comes_back_on_its_own_bo
     }
 }
 
+/// The same-millisecond tie: clocks are compared as whole strings, so a local
+/// delete made in the millisecond a peer wrote lost when the peer's device id
+/// sorted higher, and the row stayed listed (reproduced under a loaded suite,
+/// where both writes land in one millisecond). A row from another device now
+/// teaches the local clock, so the delete is strictly newer.
+#[test]
+fn a_delete_wins_over_a_row_written_by_a_peer_in_the_same_millisecond() {
+    let mut a = RegistryDoc::new("dev-a");
+    a.upsert_device(&device("dev-a", "Laptop")).unwrap();
+    let peer_clock = encode_hlc(RegistryDoc::now_ms() + 5_000, 0, "dev-z");
+    let fields: BTreeMap<String, Value> = [
+        ("id", json!("dev-z")),
+        ("name", json!("Old box")),
+        ("platform", json!("macos")),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value))
+    .collect();
+    let clocks = fields
+        .keys()
+        .map(|key| (key.clone(), peer_clock.clone()))
+        .collect();
+    assert!(a.apply_rows(
+        1,
+        vec![RegistryRow {
+            kind: KIND_DEVICES.into(),
+            id: "dev-z".into(),
+            seq: 1,
+            deleted: false,
+            del_hlc: None,
+            fields,
+            clocks,
+        }]
+    ));
+    assert_eq!(a.read_devices().unwrap().len(), 2);
+
+    assert!(a.delete_device("dev-z").unwrap());
+    assert!(a.device_deleted("dev-z"));
+    assert!(a.read_devices().unwrap().iter().all(|d| d.id != "dev-z"));
+}
+
 #[test]
 fn a_chat_sleeps_wakes_once_and_clears() {
     use zeron_proto::{ChatSleep, SleepState};

@@ -110,11 +110,25 @@ fn complete_assistant_count(core: &EngineCore) -> usize {
         .count()
 }
 
+/// The host's home as the engine resolves it (`USERPROFILE` first on Windows,
+/// `HOME` first elsewhere).
+fn host_home() -> String {
+    let names: &[&str] = if cfg!(windows) {
+        &["USERPROFILE", "HOME"]
+    } else {
+        &["HOME", "USERPROFILE"]
+    };
+    names
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        .expect("home set in test env")
+}
+
 /// Where a projectless chat's run spawns: the host's home for a legacy `~`
 /// row, else its scratch folder under the engine data dir.
 fn expected_cwd(chat_cwd: &str, data_dir: &std::path::Path) -> String {
     if chat_cwd == "~" {
-        return std::env::var("HOME").expect("HOME set in test env");
+        return host_home();
     }
     assert!(
         zeron_proto::projectless::is_scratch_cwd(chat_cwd),
@@ -151,7 +165,7 @@ async fn projectless_terminal_resolves_home_and_preserves_explicit_paths() {
     )
     .expect("engine core assembles");
     let client = zeron_rpc::memory_client(core.rpc_service());
-    let home = std::env::var("HOME").expect("HOME set in test env");
+    let home = host_home();
 
     // `None` expects the chat's own scratch folder: a new chat with no cwd,
     // or `~` from an older client, never runs in home.

@@ -125,7 +125,14 @@ async fn a_window_calls_its_service_here() {
     let answered = ask(&f.plugins, "hello", json!({ "name": "Ada" })).await;
     assert_eq!(answered, json!({ "ok": true, "value": { "hi": "Ada", "from": "dev-1", "device": "dev-1" } }));
     let status = call(&f.plugins, methods::PLUGIN_STATUS, json!({ "id": "svc" })).await;
-    assert_eq!(status["service"]["running"], true, "{status}");
+    // The VM is idle-stopped by design, and the folder watcher can replace it
+    // right after this test writes the plugin, so "running this instant" is a
+    // race by construction. The durable facts are that it started here and
+    // that it records the method it served.
+    assert!(
+        status["service"]["starts"].as_u64().is_some_and(|starts| starts >= 1),
+        "{status}"
+    );
     assert_eq!(status["service"]["methods"]["hello"], true, "{status}");
 }
 

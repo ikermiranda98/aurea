@@ -9,6 +9,10 @@
 //! The harness here spawns a real child process per `run()` and kills it when
 //! the run's interrupt token fires, as the real drivers tear their child
 //! down.
+//!
+//! Unix-only: liveness is probed with `libc::kill(pid, 0)`.
+
+#![cfg(unix)]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -229,7 +229,7 @@ fn clamp_size(cols: u16, rows: u16) -> PtySize {
 /// The user's interactive shell: `$SHELL`, else the platform default.
 fn selected_shell() -> String {
     if cfg!(windows) {
-        return windows_shell(|name| std::env::var_os(name), |path| path.is_file());
+        return windows_shell(|name| std::env::var_os(name), launchable_shell);
     }
     std::env::var("SHELL")
         .ok()
@@ -243,10 +243,40 @@ fn selected_shell() -> String {
         })
 }
 
+/// Whether `path` is a shell this process can actually start.
+///
+/// A Windows Store app also exposes an *execution alias* on `PATH`
+/// (`…\WindowsApps\…\pwsh.exe`): a zero-byte reparse point that `is_file()`
+/// reports as a file, but `CreateProcessW` refuses with "Access is denied"
+/// once the child also joins a job object — which every terminal does. Only a
+/// real executable file counts as a candidate; an alias falls through to the
+/// next shell (Windows PowerShell, then `%COMSPEC%`).
+fn launchable_shell(path: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        /// `FILE_ATTRIBUTE_REPARSE_POINT`.
+        const REPARSE_POINT: u32 = 0x0400;
+        if metadata.file_attributes() & REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+    metadata.len() > 0
+}
+
 /// Windows' interactive shell: PowerShell 7 (`pwsh.exe` on `PATH`), else
 /// the Windows PowerShell every Windows has, else `%COMSPEC%` (cmd.exe).
 /// PowerShell, not cmd: its prompt ends in a space and PSReadLine colours
 /// what's typed, as a terminal on macOS or Linux does.
+///
+/// `exists` is [`launchable_shell`] in production: a Store execution alias on
+/// `PATH` is not a shell this engine can start (see that function).
 fn windows_shell(
     var: impl Fn(&str) -> Option<std::ffi::OsString>,
     exists: impl Fn(&std::path::Path) -> bool,
@@ -1161,6 +1191,39 @@ mod windows_tests {
         String::from_utf8_lossy(&output).into_owned()
     }
 
+    /// ConPTY draws a prompt's trailing space as a cursor-forward escape
+    /// (`ESC [ 1 C`) rather than a literal space, so matching "> " against the
+    /// raw stream misses a prompt that is right there. This turns cursor
+    /// moves into the spaces they stand for and drops every other escape.
+    fn plain(output: &str) -> String {
+        let mut plain = String::with_capacity(output.len());
+        let mut chars = output.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '\u{1b}' {
+                plain.push(ch);
+                continue;
+            }
+            if chars.peek() != Some(&'[') {
+                continue;
+            }
+            chars.next();
+            let mut params = String::new();
+            let mut final_byte = None;
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    final_byte = Some(next);
+                    break;
+                }
+                params.push(next);
+            }
+            if final_byte == Some('C') {
+                let count = params.parse::<usize>().unwrap_or(1).max(1);
+                plain.push_str(&" ".repeat(count));
+            }
+        }
+        plain
+    }
+
     async fn collect_until(
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<TerminalEvent>,
         events: &mut Vec<TerminalEvent>,
@@ -1189,7 +1252,7 @@ mod windows_tests {
             .expect("subscribe to startup");
         let mut events = Vec::new();
         collect_until(&mut rx, &mut events, |events| {
-            let output = decoded(events);
+            let output = plain(&decoded(events));
             output.contains("PS ") && output.contains("> ")
         })
         .await;
@@ -1485,7 +1548,7 @@ mod windows_tests {
 
 #[cfg(test)]
 mod windows_shell_tests {
-    use super::{is_powershell, windows_shell};
+    use super::{is_powershell, launchable_shell, windows_shell};
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
@@ -1534,6 +1597,21 @@ mod windows_shell_tests {
             "C:\\cmd.exe"
         );
         assert_eq!(windows_shell(env(&[], None), |_| false), "cmd.exe");
+    }
+
+    #[test]
+    fn only_a_real_executable_on_disk_is_a_shell_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.exe");
+        std::fs::write(&empty, b"").unwrap();
+        // A Store execution alias is exactly this: a zero-byte reparse point
+        // that `is_file()` accepts and `CreateProcessW` refuses inside a job.
+        assert!(!launchable_shell(&empty));
+        let real = dir.path().join("real.exe");
+        std::fs::write(&real, b"MZ").unwrap();
+        assert!(launchable_shell(&real));
+        assert!(!launchable_shell(dir.path()));
+        assert!(!launchable_shell(&dir.path().join("missing.exe")));
     }
 
     #[test]

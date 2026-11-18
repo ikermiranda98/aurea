@@ -922,7 +922,13 @@ async fn an_online_launch_dials_as_soon_as_the_network_is_reported() {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     let reported = start.elapsed();
-    assert!(reported < Duration::from_millis(150), "an online launch waited {reported:?}");
+    // Well under the patience below, but not a hair: a test machine can be
+    // linking a 200 MB binary when this runs, and the point is that the dial
+    // rode the report instead of waiting the fallback out.
+    assert!(
+        reported < Duration::from_millis(500),
+        "an online launch waited {reported:?}"
+    );
     client.shutdown();
 
     let edge = MockEdge::start().await;
