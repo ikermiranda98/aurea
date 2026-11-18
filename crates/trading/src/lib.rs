@@ -5,6 +5,7 @@
 //! dashboard consumes until the real engine (lane A) lands.
 
 pub mod claims;
+pub mod engine;
 pub mod ibkr;
 pub mod lifecycle;
 pub mod mock;
@@ -15,6 +16,7 @@ pub mod state;
 pub mod store;
 pub mod tasks;
 
+pub use engine::TradingEngine;
 pub use service::TradingService;
 
 /// Shared protocol types re-exported for convenience.
