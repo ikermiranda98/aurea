@@ -108,6 +108,10 @@ impl TradingEngine {
         self.store.clone()
     }
 
+    pub fn state(&self) -> Arc<Mutex<TradingState>> {
+        Arc::clone(&self.state)
+    }
+
     pub fn watch(&self) -> SnapshotWatch {
         self.watch.subscribe()
     }

@@ -4428,13 +4428,46 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&zeron_trading::mock::close_position(&p.symbol))
             }
             methods::TRADING_POSITIONS_CLOSE_ALL => {
-                self.require_demo_trading("Cerrar todas las posiciones")?;
                 let _ = params;
+                if self.trading.live() {
+                    if let Some(engine) = &self.trading_engine {
+                        let store = {
+                            let guard = engine.lock().unwrap();
+                            guard.store()
+                        };
+                        let result = zeron_trading::close::close_all_positions(
+                            "all",
+                            &store,
+                            &self.trading,
+                        ).await;
+                        return RpcReply::value(&result);
+                    }
+                }
+                self.require_demo_trading("Cerrar todas las posiciones")?;
                 RpcReply::value(&zeron_trading::mock::close_all_positions())
             }
             methods::TRADING_PANIC => {
-                self.require_demo_trading("El botón de pánico")?;
                 let _ = params;
+                if self.trading.live() {
+                    if let Some(engine) = &self.trading_engine {
+                        let store = {
+                            let guard = engine.lock().unwrap();
+                            guard.store()
+                        };
+                        let state = {
+                            let guard = engine.lock().unwrap();
+                            guard.state()
+                        };
+                        let result = zeron_trading::close::panic(
+                            "panic",
+                            &store,
+                            &self.trading,
+                            state,
+                        ).await;
+                        return RpcReply::value(&result);
+                    }
+                }
+                self.require_demo_trading("El botón de pánico")?;
                 RpcReply::value(&zeron_trading::mock::panic())
             }
             methods::TRADING_CONNECT => {
