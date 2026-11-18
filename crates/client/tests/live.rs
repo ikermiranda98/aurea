@@ -922,11 +922,13 @@ async fn an_online_launch_dials_as_soon_as_the_network_is_reported() {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     let reported = start.elapsed();
-    // Well under the patience below, but not a hair: a test machine can be
-    // linking a 200 MB binary when this runs, and the point is that the dial
-    // rode the report instead of waiting the fallback out.
+    // Below the 1 s first-report patience, so a launch that waited the
+    // fallback out still loses here. A loaded runner adds scheduling noise on
+    // top of the client's own build (843 ms was seen): the exact "straight
+    // away, no wait" contract is covered with paused time in
+    // `live::path_gate`'s unit test.
     assert!(
-        reported < Duration::from_millis(500),
+        reported < Duration::from_millis(900),
         "an online launch waited {reported:?}"
     );
     client.shutdown();

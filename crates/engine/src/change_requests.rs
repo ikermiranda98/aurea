@@ -1038,17 +1038,29 @@ mod tests {
         let mut stream = service.watch_checkout(PathBuf::from("/checkout"), identity());
         let first = stream.next().await.unwrap();
 
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), stream.next())
-                .await
-                .is_err()
-        );
+        // The retry is time-driven and only runs while the stream is polled:
+        // drive it until the second resolve has failed, without ever letting
+        // the 1 s failure backoff ask for a third one. A failed resolve keeps
+        // the last success and emits nothing.
+        let limite = tokio::time::Instant::now() + Duration::from_secs(2);
+        while lookup.resolve_count() < 2 {
+            assert!(
+                tokio::time::Instant::now() < limite,
+                "el reintento no llego bajo carga"
+            );
+            assert!(
+                futures::poll!(stream.next()).is_pending(),
+                "un fallo no emite un snapshot nuevo"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         assert_eq!(lookup.resolve_count(), 2);
 
+        let antes = lookup.resolve_count();
         let mut later = service.watch_checkout(PathBuf::from("/checkout"), identity());
         let cached = later.next().await.unwrap();
         assert_eq!(cached.change_request, first.change_request);
-        assert_eq!(lookup.resolve_count(), 2);
+        assert_eq!(lookup.resolve_count(), antes);
     }
 
     #[tokio::test]
