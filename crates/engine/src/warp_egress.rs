@@ -12,7 +12,7 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use zeron_warp::egress::{Puente, PuenteEgress, PROXY_WARP};
+use zeron_warp::egress::{PROXY_WARP, Puente, PuenteEgress};
 use zeron_warp::mundo::{Mundo, Sistema};
 use zeron_warp::{Egress, Ghost, Rutas};
 
@@ -49,6 +49,70 @@ fn desactivado() -> bool {
         std::env::var("ZERON_WARP_EGRESS").as_deref(),
         Ok("0") | Ok("off") | Ok("false")
     )
+}
+
+/// The automatic rotation on a rejected exit has its own switch: the bridge can
+/// be wanted while the ring must not hang up the tunnel under other traffic.
+fn rotacion_automatica() -> bool {
+    !matches!(
+        std::env::var("ZERON_WARP_AUTO_ROTATE").as_deref(),
+        Ok("0") | Ok("off") | Ok("false")
+    )
+}
+
+/// One automatic rotation per window: a provider that keeps answering 429 after
+/// a fresh `/64` will not be helped by hanging up the tunnel every retry.
+const ESPERA_ENTRE_ROTACIONES: Duration = Duration::from_secs(300);
+
+static ULTIMA_ROTACION: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// The words a rate-limited provider retry carries. The harness forwards the
+/// gateway's own message, so the ring recognizes the rejection without parsing
+/// provider-specific JSON.
+fn es_limite(message: &str) -> bool {
+    let minusculas = message.to_lowercase();
+    [
+        "429",
+        "rate limit",
+        "rate-limit",
+        "ratelimit",
+        "too many requests",
+        "quota",
+        "usage limit",
+        "limit reached",
+    ]
+    .iter()
+    .any(|marca| minusculas.contains(marca))
+}
+
+/// A provider retry that names a rate limit: rotate the ring once, in the
+/// background, so opencode's next attempt leaves by a fresh `/64`. Any other
+/// provider fault leaves the tunnel exactly as it was.
+pub fn retry_rechazado(message: &str) {
+    if desactivado() || !rotacion_automatica() || !es_limite(message) {
+        return;
+    }
+    let ahora = std::time::Instant::now();
+    {
+        let mut ultima = ULTIMA_ROTACION
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if ultima.is_some_and(|antes| ahora.duration_since(antes) < ESPERA_ENTRE_ROTACIONES) {
+            return;
+        }
+        *ultima = Some(ahora);
+    }
+    tokio::spawn(async move {
+        let rotacion = ghost().rotar(Some("limit")).await;
+        if rotacion.ok {
+            tracing::info!(
+                salida = rotacion.address.as_deref().unwrap_or("desconocida"),
+                "warp: el gateway rechazo la salida; ya hay otro /64"
+            );
+        } else {
+            tracing::warn!("warp: el gateway rechazo la salida y la rotacion no aterrizo");
+        }
+    });
 }
 
 /// Boot: mount the bridge when WARP's proxy is the path, and hand its variables
@@ -197,9 +261,11 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let registry = HarnessRegistry::new();
         let mundo = MundoGuion::con(&[&ajustes("Warp")]);
-        assert!(montar_con(&addr.to_string(), mundo, &registry)
-            .await
-            .is_none());
+        assert!(
+            montar_con(&addr.to_string(), mundo, &registry)
+                .await
+                .is_none()
+        );
         assert!(registry.warp_environment().is_none());
     }
 
@@ -229,5 +295,40 @@ mod tests {
                 .any(|(clave, valor)| clave == "NO_PROXY" && valor.contains("localhost")),
             "loopback debe quedar fuera del proxy"
         );
+    }
+
+    #[test]
+    fn el_chip_de_reintento_dice_cuando_es_un_limite() {
+        // opencode forwards the provider's own words; these are the shapes a
+        // gateway's 429 takes in practice.
+        for mensaje in [
+            "AI_APICallError: 429 Too Many Requests",
+            "Rate limit reached for requests",
+            "You have exceeded your weekly usage limit",
+            "insufficient_quota: quota exceeded",
+            "rate-limit exceeded",
+        ] {
+            assert!(es_limite(mensaje), "{mensaje}");
+        }
+        for mensaje in [
+            "The provider is failing and opencode is retrying (attempt 3): connection reset",
+            "AI_APICallError: 500 Internal Server Error",
+            "invalid api key",
+            "model overloaded",
+        ] {
+            assert!(!es_limite(mensaje), "{mensaje}");
+        }
+    }
+
+    #[test]
+    fn la_rotacion_automatica_se_apaga_por_entorno() {
+        // The matcher never spawns from here: with the switch off, a limit
+        // message is ignored before any work is scheduled.
+        // SAFETY: this test owns the variable for its duration.
+        unsafe { std::env::set_var("ZERON_WARP_AUTO_ROTATE", "off") };
+        assert!(!rotacion_automatica());
+        retry_rechazado("429 Too Many Requests");
+        unsafe { std::env::remove_var("ZERON_WARP_AUTO_ROTATE") };
+        assert!(rotacion_automatica());
     }
 }

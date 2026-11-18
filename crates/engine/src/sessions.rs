@@ -5564,6 +5564,22 @@ async fn drive_run(
         // Scheduled wake-ups and session crons live in the agent's process.
         self_scheduled.observe(&event, tokio::time::Instant::now());
 
+        // Lane C2: a provider retry that names a rate limit is the gateway
+        // rejecting this exit. The ring rotates in the background while
+        // opencode keeps retrying, so the next attempt leaves by a fresh /64.
+        let rechazo = match &event {
+            AgentEvent::Error { message } => Some(message.as_str()),
+            // A subagent shares the same machine exit.
+            AgentEvent::Subagent { event, .. } => match event.as_ref() {
+                AgentEvent::Error { message } => Some(message.as_str()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(message) = rechazo {
+            crate::warp_egress::retry_rechazado(message);
+        }
+
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream
         // into the subagent's own doc, and the parent keeps only the spawn
