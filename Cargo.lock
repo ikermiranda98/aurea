@@ -14076,10 +14076,12 @@ dependencies = [
 name = "zeron-trading"
 version = "0.3.7"
 dependencies = [
+ "async-trait",
  "chrono",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "zeron-proto",
  "zeron-tws",
 ]
