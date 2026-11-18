@@ -11,7 +11,9 @@ pub mod mock;
 pub mod mt5;
 pub mod pool;
 pub mod service;
+pub mod state;
 pub mod store;
+pub mod tasks;
 
 pub use service::TradingService;
 
