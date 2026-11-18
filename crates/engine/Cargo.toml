@@ -21,6 +21,7 @@ zeron-rpc.workspace = true
 zeron-update.workspace = true
 zeron-notify.workspace = true
 zeron-visual.workspace = true
+zeron-warp.workspace = true
 # Plugin services (plugins/service): a headless Luau VM per plugin, the
 # same mlua and Luau zeron-visual already links (no new crate).
 mlua = { version = "0.12", features = ["luau"] }

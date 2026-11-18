@@ -13754,6 +13754,7 @@ dependencies = [
  "zeron-trading",
  "zeron-update",
  "zeron-visual",
+ "zeron-warp",
  "zip",
 ]
 

@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
-use super::{Puente, PuenteEgress, entorno, normalizar_proxy};
+use super::{entorno, normalizar_proxy, Puente, PuenteEgress};
 use crate::ghost::Egress;
 use crate::mundo::Mundo;
 use crate::shell::Salida;
@@ -49,7 +49,10 @@ async fn socks_falso() -> SocksFalso {
     }
 }
 
-async fn atender(mut flujo: TcpStream, pedidos: Arc<Mutex<Vec<(u8, String, u16)>>>) -> std::io::Result<()> {
+async fn atender(
+    mut flujo: TcpStream,
+    pedidos: Arc<Mutex<Vec<(u8, String, u16)>>>,
+) -> std::io::Result<()> {
     let mut saludo = [0u8; 2];
     flujo.read_exact(&mut saludo).await?;
     let mut metodos = vec![0u8; saludo[1] as usize];
@@ -84,9 +87,7 @@ async fn atender(mut flujo: TcpStream, pedidos: Arc<Mutex<Vec<(u8, String, u16)>
     if let Ok(mut lista) = pedidos.lock() {
         lista.push((atyp, host, u16::from_be_bytes(puerto)));
     }
-    flujo
-        .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
-        .await?;
+    flujo.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).await?;
 
     let mut buf = [0u8; 1024];
     loop {
@@ -229,7 +230,10 @@ fn el_proxy_se_normaliza_y_se_valida() {
         normalizar_proxy("socks5://127.0.0.1:40000").unwrap(),
         "127.0.0.1:40000"
     );
-    assert_eq!(normalizar_proxy("127.0.0.1:40000").unwrap(), "127.0.0.1:40000");
+    assert_eq!(
+        normalizar_proxy("127.0.0.1:40000").unwrap(),
+        "127.0.0.1:40000"
+    );
     assert_eq!(normalizar_proxy("127.0.0.1").unwrap(), "127.0.0.1:40000");
     assert!(normalizar_proxy("no es una direccion").is_err());
 }
@@ -259,7 +263,12 @@ impl Mundo for MundoGuion {
             .lock()
             .unwrap()
             .push((programa.to_string(), args.to_vec()));
-        let stdout = self.respuestas.lock().unwrap().pop_front().unwrap_or_default();
+        let stdout = self
+            .respuestas
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_default();
         Salida { status: 0, stdout }
     }
 
@@ -296,13 +305,21 @@ async fn egress(mundo: Arc<MundoGuion>) -> PuenteEgress {
 
 #[tokio::test]
 async fn apuntar_exige_warp_on_y_una_salida_ipv6() {
-    let bueno = egress(MundoGuion::con(&[&traza("2a09:bac1:7681:1318::286:84", "on")])).await;
+    let bueno = egress(MundoGuion::con(&[&traza(
+        "2a09:bac1:7681:1318::286:84",
+        "on",
+    )]))
+    .await;
     assert_eq!(
         bueno.apuntar(&[]).await.as_deref(),
         Some("2a09:bac1:7681:1318::286:84")
     );
 
-    let apagado = egress(MundoGuion::con(&[&traza("2a09:bac1:7681:1318::286:84", "off")])).await;
+    let apagado = egress(MundoGuion::con(&[&traza(
+        "2a09:bac1:7681:1318::286:84",
+        "off",
+    )]))
+    .await;
     assert!(apagado.apuntar(&[]).await.is_none());
 
     let ipv4 = egress(MundoGuion::con(&[&traza("203.0.113.7", "on")])).await;
@@ -311,7 +328,10 @@ async fn apuntar_exige_warp_on_y_una_salida_ipv6() {
 
 #[tokio::test]
 async fn la_sonda_va_por_el_puente_y_reintenta_sin_ip() {
-    let mundo = MundoGuion::con(&["curl: (7) sin ruta\n", &traza("2a09:bac1:7681:1318::286:84", "on")]);
+    let mundo = MundoGuion::con(&[
+        "curl: (7) sin ruta\n",
+        &traza("2a09:bac1:7681:1318::286:84", "on"),
+    ]);
     let egress = egress(Arc::clone(&mundo)).await;
 
     let salida = egress.sonda().await.expect("la segunda toma responde");
@@ -323,12 +343,18 @@ async fn la_sonda_va_por_el_puente_y_reintenta_sin_ip() {
     let (programa, args) = &llamadas[0];
     assert_eq!(programa, "curl");
     let texto = args.join(" ");
-    assert!(texto.contains(&format!("--proxy http://{}", egress.addr())), "{texto}");
+    assert!(
+        texto.contains(&format!("--proxy http://{}", egress.addr())),
+        "{texto}"
+    );
     assert!(
         !args.iter().any(|arg| arg == "-6"),
         "la sonda no debe forzar IPv6 local: {texto}"
     );
-    assert!(texto.contains("https://cloudflare.com/cdn-cgi/trace"), "{texto}");
+    assert!(
+        texto.contains("https://cloudflare.com/cdn-cgi/trace"),
+        "{texto}"
+    );
 }
 
 #[tokio::test]

@@ -86,6 +86,7 @@ mod transcript_history;
 mod update_trial;
 pub mod uploads;
 pub mod voice;
+pub mod warp_egress;
 pub mod workspace_files;
 pub mod workspace_host;
 pub mod workspace_search;
@@ -1132,6 +1133,9 @@ impl Engine {
             )?,
         };
         core.set_auth(auth.clone());
+        // Lane C2: a machine already in WARP's proxy mode gets its agents'
+        // traffic bridged; every other mode is left exactly as it was.
+        warp_egress::montar_en(&core.registry).await;
         // Agents' commits credit Zeron (always on Cloud, else per the
         // device's setting).
         core.registry

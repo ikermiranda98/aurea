@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use zeron_warp::egress::{PROXY_WARP, Puente, PuenteEgress};
+use zeron_warp::egress::{Puente, PuenteEgress, PROXY_WARP};
 use zeron_warp::mundo::Sistema;
 
 #[tokio::main]

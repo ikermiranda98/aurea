@@ -221,6 +221,9 @@ pub struct HarnessRegistry {
     /// Spawn-time environment of the agent accounts zeron keeps itself
     /// (Muse's per-account roots); after the Cloud broker, never over it.
     account_environment: Mutex<Option<Arc<dyn RunEnvironment>>>,
+    /// Lane C2: the sidecar's egress variables, set once at boot when WARP's
+    /// local proxy is the path. They ride every spawn, over the provider's own.
+    warp_environment: std::sync::OnceLock<Vec<(String, String)>>,
     /// Credits Zeron in agents' commits ([`crate::commit_credit`]).
     commit_credit: std::sync::OnceLock<Arc<crate::commit_credit::CommitCredit>>,
 }
@@ -308,6 +311,7 @@ impl HarnessRegistry {
             run_environment: Mutex::new(None),
             run_environment_ready: tokio::sync::watch::channel(true).0,
             account_environment: Mutex::new(None),
+            warp_environment: std::sync::OnceLock::new(),
             commit_credit: std::sync::OnceLock::new(),
         }
     }
@@ -336,6 +340,18 @@ impl HarnessRegistry {
             .account_environment
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(environment);
+    }
+
+    /// Stamp the sidecar's egress variables (lane C2). First mount wins: it is
+    /// the bridge that is still listening.
+    pub fn set_warp_environment(&self, vars: Vec<(String, String)>) {
+        let _ = self.warp_environment.set(vars);
+    }
+
+    /// What [`Self::set_warp_environment`] installed, if the machine booted in
+    /// WARP's proxy mode.
+    pub fn warp_environment(&self) -> Option<&Vec<(String, String)>> {
+        self.warp_environment.get()
     }
 
     fn environments(&self) -> Vec<Arc<dyn RunEnvironment>> {
@@ -373,6 +389,13 @@ impl HarnessRegistry {
         }
         if let Some(credit) = self.commit_credit.get() {
             credit.apply(&mut request.env);
+        }
+        // Lane C2: a machine in WARP's proxy mode hands its agents the bridge,
+        // after the provider's own env (it decides how traffic leaves).
+        if let Some(vars) = self.warp_environment.get() {
+            for (key, value) in vars {
+                request.env.insert(key.clone(), value.clone());
+            }
         }
         Ok(())
     }
@@ -2008,6 +2031,44 @@ mod gate_tests {
         assert_eq!(
             request.env.get("HARNESS").map(String::as_str),
             Some("Codex")
+        );
+    }
+
+    /// Lane C2: an installed egress rides every prepared spawn, after the
+    /// provider's own variables.
+    #[tokio::test]
+    async fn warp_environment_rides_every_prepared_run() {
+        let mut request: zeron_proto::RunRequest = serde_json::from_str(
+            r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null}"#,
+        )
+        .unwrap();
+        let registry = HarnessRegistry::new();
+        registry
+            .prepare_run(HarnessId::Codex, None, &mut request)
+            .await
+            .unwrap();
+        assert!(request.env.is_empty());
+
+        registry.set_warp_environment(vec![
+            ("HTTPS_PROXY".to_string(), "http://127.0.0.1:40123".to_string()),
+            (
+                "NO_PROXY".to_string(),
+                "127.0.0.1,localhost,::1,[::1]".to_string(),
+            ),
+        ]);
+        registry
+            .prepare_run(HarnessId::Codex, None, &mut request)
+            .await
+            .unwrap();
+        assert_eq!(
+            request.env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:40123")
+        );
+        assert!(
+            request
+                .env
+                .get("NO_PROXY")
+                .is_some_and(|valor| valor.contains("localhost"))
         );
     }
 
