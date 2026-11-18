@@ -64,6 +64,88 @@ fn row<const N: usize>(fields: [&str; N]) -> Vec<String> {
     fields.iter().map(|field| (*field).to_string()).collect()
 }
 
+/// `PLACE_ORDER` (msg 3): sends a new order. `contract_fields` are the contract
+/// fields in wire order. `oca_group`/`oca_type` are optional.
+pub fn place_order<Oid, C, S, A, O, R, T, F>(
+    order_id: Oid,
+    contract_fields: C,
+    action: A,
+    quantity: f64,
+    order_type: O,
+    tif: T,
+    order_ref: R,
+    transmit: bool,
+    account: F,
+    outside_rth: bool,
+    oca_group: Option<impl Into<String>>,
+    oca_type: Option<i32>,
+) -> Vec<String>
+where
+    Oid: Into<i64>,
+    C: IntoIterator<Item = S>,
+    S: Into<String>,
+    A: AsRef<str>,
+    O: AsRef<str>,
+    T: AsRef<str>,
+    R: AsRef<str>,
+    F: AsRef<str>,
+{
+    let mut fields: Vec<String> = Vec::new();
+    fields.push("3".to_string());
+    fields.push(order_id.into().to_string());
+    for field in contract_fields {
+        fields.push(field.into());
+    }
+    fields.push(action.as_ref().to_string());
+    fields.push(quantity.to_string());
+    fields.push(order_type.as_ref().to_string());
+    fields.push(tif.as_ref().to_string());
+    fields.push(order_ref.as_ref().to_string());
+    fields.push(if transmit { "1" } else { "0" }.to_string());
+    fields.push(account.as_ref().to_string());
+    fields.push(if outside_rth { "1" } else { "0" }.to_string());
+    fields.push(oca_group.map(|value| value.into()).unwrap_or_default());
+    fields.push(oca_type.map(|value| value.to_string()).unwrap_or_default());
+    fields
+}
+
+/// `CANCEL_ORDER` (msg 4).
+pub fn cancel_order<Oid: Into<i64>>(order_id: Oid) -> Vec<String> {
+    vec!["4".to_string(), "1".to_string(), order_id.into().to_string()]
+}
+
+/// `REQ_ALL_OPEN_ORDERS` (msg 16).
+pub fn req_all_open_orders() -> Vec<String> {
+    vec!["16".to_string(), "1".to_string()]
+}
+
+/// `REQ_EXECUTIONS` (msg 7).
+pub fn req_executions<Cid: Into<i64>, Rid: Into<i64>>(client_id: Cid, req_id: Rid) -> Vec<String> {
+    vec![
+        "7".to_string(),
+        "3".to_string(),
+        req_id.into().to_string(),
+        client_id.into().to_string(),
+    ]
+}
+
+/// `REQ_CONTRACT_DETAILS` (msg 9).
+pub fn req_contract_details<Rid, C, S>(req_id: Rid, contract_fields: C) -> Vec<String>
+where
+    Rid: Into<i64>,
+    C: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut fields: Vec<String> = Vec::new();
+    fields.push("9".to_string());
+    fields.push("8".to_string());
+    fields.push(req_id.into().to_string());
+    for field in contract_fields {
+        fields.push(field.into());
+    }
+    fields
+}
+
 /// The summary tags Openbot asks for (`ACCOUNT_SUMMARY_TAGS` in `trading.ts`).
 pub const ACCOUNT_SUMMARY_TAGS: &str = "NetLiquidation,TotalCashBalance,CashBalance,UnrealizedPnL,RealizedPnL,AccountType,Currency,AvailableFunds,BuyingPower,ExcessLiquidity,MaintMarginReq";
 

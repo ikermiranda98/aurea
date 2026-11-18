@@ -151,6 +151,11 @@ impl TradingService {
         lock(&self.inner.state).live
     }
 
+    /// Cloneable handle to the underlying TWS client, if connected.
+    pub fn tws_client(&self) -> Option<zeron_tws::client::IbClient> {
+        lock(&self.inner.client).clone()
+    }
+
     /// Dials TWS paper (127.0.0.1:7497) and subscribes the read-only streams.
     ///
     /// Returns the shown account once known; the first connect usually answers

@@ -5,6 +5,7 @@
 //! dashboard consumes until the real engine (lane A) lands.
 
 pub mod claims;
+pub mod close;
 pub mod engine;
 pub mod ibkr;
 pub mod lifecycle;
@@ -16,6 +17,8 @@ pub mod state;
 pub mod store;
 pub mod tasks;
 
+pub use close::cerrar_una;
+pub use close::close_position;
 pub use engine::TradingEngine;
 pub use service::TradingService;
 

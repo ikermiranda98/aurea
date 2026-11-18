@@ -10,4 +10,5 @@
 pub mod client;
 pub mod codec;
 pub mod inbound;
+pub mod orders;
 pub mod requests;

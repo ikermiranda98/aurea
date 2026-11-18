@@ -118,8 +118,79 @@ impl TradingEngine {
         if state.bots.get(system_id).map(|r| r.started_at.is_some()).unwrap_or(false) {
             return Ok(());
         }
-        let runtime = crate::lifecycle::runtime_nuevo();
+
+        let systems_dir = state.systems_dir.clone().or(self.systems_dir.clone());
+        let dossier = state.systems.iter().find(|d| d.id == system_id).cloned();
+        let dir_name = dossier
+            .as_ref()
+            .map(|d| d.dir_name.clone())
+            .unwrap_or_else(|| system_id.to_string());
+        let folder = systems_dir
+            .as_ref()
+            .map(|d| d.join(&dir_name))
+            .unwrap_or_else(|| std::path::PathBuf::from(&dir_name));
+
+        // Resolve pythonw.
+        let pythonw = resolve_pythonw();
+
+        let bot_py = folder.join("bot.py");
+
+        // Open consola.log in append mode.
+        let consola_path = folder.join("consola.log");
+        let consola_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&consola_path)
+            .map_err(|e| TradingError::InvalidRequest {
+                message: format!("no se pudo abrir consola.log: {e}"),
+            })?;
+
+        // Seed offsets.
+        let today_prefix = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let registro_path = folder.join("registro.log");
+        let reg_offset = crate::lifecycle::today_offset(&registro_path, &today_prefix);
+        let con_offset = crate::lifecycle::file_tail_size(&consola_path);
+
+        // Spawn.
+        let mut cmd = std::process::Command::new(&pythonw);
+        cmd.arg(&bot_py)
+            .current_dir(&folder)
+            .env("PYTHONPATH", folder.to_string_lossy().to_string())
+            .env("PYTHONIOENCODING", "utf-8")
+            .env("OPENBOT_SYSTEM_ID", system_id)
+            .env("OPENBOT_ENGINE_URL", "http://127.0.0.1:0")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(consola_file));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let child = cmd.spawn().map_err(|e| TradingError::InvalidRequest {
+            message: format!("spawn failed: {e}"),
+        })?;
+        let pid = child.id();
+        // Drop the handle; we track pid.
+        drop(child);
+        if pid == 0 {
+            return Err(TradingError::InvalidRequest {
+                message: "spawn failed: no pid".to_string(),
+            });
+        }
+
+        // Write panel.pid.
+        let _ = std::fs::write(folder.join("panel.pid"), pid.to_string());
+
+        // Set runtime.
+        let mut runtime = crate::lifecycle::runtime_nuevo();
+        runtime.source = Some(crate::lifecycle::RuntimeSource::Panel);
+        runtime.pid = Some(pid);
+        runtime.started_at = Some(now_ms());
+        runtime.registro_offset = reg_offset;
+        runtime.consola_offset = con_offset;
         state.bots.insert(system_id.to_string(), runtime);
+
         state.push_log(
             zeron_proto::trading::LogLevel::Info,
             "motor",
@@ -128,6 +199,25 @@ impl TradingEngine {
             true,
         );
         drop(state);
+
+        // Spawn background ingestion task.
+        let state_arc = Arc::clone(&self.state);
+        let cancel = Arc::clone(&self.cancel);
+        let sid = system_id.to_string();
+        let sd = systems_dir.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                loop {
+                    interval.tick().await;
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    ingest_one(&state_arc, &sid, sd.as_deref());
+                }
+            });
+        }
+
         self.publish();
         Ok(())
     }
@@ -139,6 +229,92 @@ impl TradingEngine {
                 system_id: system_id.to_string(),
             });
         }
+        let running = state.bots.get(system_id).map(|r| r.started_at.is_some()).unwrap_or(false);
+        if !running {
+            return Ok(());
+        }
+
+        let systems_dir = state.systems_dir.clone().or(self.systems_dir.clone());
+        let dossier = state.systems.iter().find(|d| d.id == system_id).cloned();
+        let dir_name = dossier
+            .as_ref()
+            .map(|d| d.dir_name.clone())
+            .unwrap_or_else(|| system_id.to_string());
+        let folder = systems_dir
+            .as_ref()
+            .map(|d| d.join(&dir_name))
+            .unwrap_or_else(|| std::path::PathBuf::from(&dir_name));
+
+        let pid = state.bots.get(system_id).and_then(|r| r.pid);
+
+        if let Some(pid) = pid {
+            match pid_vivo_sync(pid) {
+                None => {
+                    drop(state);
+                    return Err(TradingError::InvalidRequest {
+                        message: "no se pudo confirmar".to_string(),
+                    });
+                }
+                Some(false) => {
+                    // already dead; clean up
+                }
+                Some(true) => {
+                    let es_bot = pid_es_bot_sync(pid, Some(&folder));
+                    match es_bot {
+                        None => {
+                            // keep running, warn
+                            state.push_log(
+                                zeron_proto::trading::LogLevel::Warning,
+                                "motor",
+                                format!("Bot {} no se pudo verificar", system_id),
+                                now_ms(),
+                                true,
+                            );
+                            drop(state);
+                            self.publish();
+                            return Ok(());
+                        }
+                        Some(false) => {
+                            // recycled; clean up
+                        }
+                        Some(true) => {
+                            let _ = std::process::Command::new("taskkill")
+                                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                                .output();
+                            match pid_vivo_sync(pid) {
+                                Some(false) => {}
+                                _ => {
+                                    state.push_log(
+                                        zeron_proto::trading::LogLevel::Warning,
+                                        "motor",
+                                        format!("Bot {} sigue vivo", system_id),
+                                        now_ms(),
+                                        true,
+                                    );
+                                    drop(state);
+                                    self.publish();
+                                    return Err(TradingError::InvalidRequest {
+                                        message: "no se pudo confirmar".to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // external without pid: warn
+            state.push_log(
+                zeron_proto::trading::LogLevel::Warning,
+                "motor",
+                format!("Bot {} externo sin PID", system_id),
+                now_ms(),
+                true,
+            );
+        }
+
+        // cleanup
+        let _ = std::fs::remove_file(folder.join("panel.pid"));
         state.bots.remove(system_id);
         state.push_log(
             zeron_proto::trading::LogLevel::Info,
@@ -175,7 +351,7 @@ impl TradingEngine {
         let conn = self.store.conn();
         let guard = conn.lock().unwrap();
         let task = tasks::cancel_task(&guard, task_id, now_ms())
-            .map_err(|msg| TradingError::TaskNotFound {
+            .map_err(|_msg| TradingError::TaskNotFound {
                 task_id: task_id.to_string(),
             })?;
         let tasks_list = tasks::list_tasks(&guard, 50).unwrap_or_default();
@@ -232,6 +408,227 @@ impl TradingEngine {
     }
 }
 
+fn resolve_pythonw() -> String {
+    // Try `where pythonw`.
+    if let Ok(output) = std::process::Command::new("where").arg("pythonw").output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(first) = stdout.lines().next() {
+                let trimmed = first.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+    }
+    "pythonw".to_string()
+}
+
+fn pid_vivo_sync(pid: u32) -> Option<bool> {
+    let mut cmd = std::process::Command::new("tasklist");
+    cmd.args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let output = cmd.output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        return None;
+    }
+    Some(stdout.contains(&format!("\"{pid}\"")))
+}
+
+fn pid_es_bot_sync(pid: u32, dir: Option<&std::path::Path>) -> Option<bool> {
+    let filter = format!("ProcessId={pid}");
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-Command",
+        &format!(
+            "Get-CimInstance Win32_Process -Filter \"{}\" | Select-Object -ExpandProperty CommandLine",
+            filter
+        ),
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let output = cmd.output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let panel_contents = match dir {
+        Some(d) => std::fs::read_to_string(d.join("panel.pid")).ok(),
+        None => None,
+    };
+    crate::lifecycle::pid_es_bot_decision(pid, &stdout, panel_contents.as_deref(), dir)
+}
+
+fn ingest_one(state: &Arc<Mutex<TradingState>>, system_id: &str, systems_dir: Option<&Path>) {
+    use std::path::PathBuf;
+    // Resolve folder and offsets.
+    let (folder, mut reg_offset, mut con_offset) = {
+        let st = state.lock().unwrap();
+        let base = systems_dir
+            .map(PathBuf::from)
+            .or(st.systems_dir.clone());
+        let dossier = st.systems.iter().find(|d| d.id == system_id);
+        let dir_name = dossier
+            .map(|d| d.dir_name.clone())
+            .unwrap_or_else(|| system_id.to_string());
+        let folder = base
+            .map(|b| b.join(&dir_name))
+            .unwrap_or_else(|| PathBuf::from(&dir_name));
+        let rt = st.bots.get(system_id);
+        let (ro, co) = rt
+            .map(|r| (r.registro_offset, r.consola_offset))
+            .unwrap_or((0, 0));
+        (folder, ro, co)
+    };
+
+    let reg_path = folder.join("registro.log");
+    if let Ok(meta) = std::fs::metadata(&reg_path) {
+        let size = meta.len();
+        if size > reg_offset {
+            if let Ok(bytes) = std::fs::read(&reg_path) {
+                let start = reg_offset as usize;
+                let to_read = ((size - reg_offset) as usize).min(1_000_000);
+                let end = (start + to_read).min(bytes.len());
+                let chunk = &bytes[start..end];
+                let text = String::from_utf8_lossy(chunk);
+                let mut last_ts = now_ms();
+                for line in text.lines() {
+                    if let Some((ts, msg)) = parse_bot_line(line) {
+                        last_ts = ts;
+                        if is_sorro(&msg) {
+                            if let Some(v) = parse_unrealized(&msg) {
+                                let mut st = state.lock().unwrap();
+                                st.pnl_bots.insert(system_id.to_string(), v);
+                            }
+                            continue;
+                        }
+                        {
+                            let mut st = state.lock().unwrap();
+                            st.push_log(
+                                zeron_proto::trading::LogLevel::Info,
+                                system_id.to_string(),
+                                msg.clone(),
+                                ts,
+                                false,
+                            );
+                            if is_close(&msg) {
+                                let pnl = parse_trade_pnl(&msg);
+                                st.register_trade(system_id.to_string(), ts, pnl, msg.clone());
+                            }
+                        }
+                    } else if line.starts_with(char::is_whitespace) {
+                        // continuation; skip
+                    } else if line.contains("Traceback") || line.contains("Exception") {
+                        let mut st = state.lock().unwrap();
+                        st.push_log(
+                            zeron_proto::trading::LogLevel::Error,
+                            system_id.to_string(),
+                            line.to_string(),
+                            last_ts,
+                            false,
+                        );
+                    }
+                }
+                reg_offset += (end - start) as u64;
+            }
+        }
+    }
+
+    // consola.log: update offset only.
+    let con_path = folder.join("consola.log");
+    if let Ok(meta) = std::fs::metadata(&con_path) {
+        let size = meta.len();
+        if size > con_offset {
+            con_offset = size;
+        }
+    }
+
+    let mut st = state.lock().unwrap();
+    if let Some(rt) = st.bots.get_mut(system_id) {
+        rt.registro_offset = reg_offset;
+        rt.consola_offset = con_offset;
+    }
+}
+
+fn parse_bot_line(line: &str) -> Option<(i64, String)> {
+    if line.len() < 24 {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    if bytes[23] != b' ' {
+        return None;
+    }
+    let ts_part = &line[..23];
+    let msg = line[24..].to_string();
+    let fixed = ts_part.replacen(',', ".", 1);
+    let dt = chrono::NaiveDateTime::parse_from_str(&fixed, "%Y-%m-%d %H:%M:%S%.3f").ok()?;
+    let millis = dt.and_utc().timestamp_millis();
+    Some((millis, msg))
+}
+
+fn is_sorro(msg: &str) -> bool {
+    let patterns = [
+        "updatePortfolio:",
+        "Disconnecting",
+        "position: ",
+        "Connecting",
+        "Connected",
+        "Logged on",
+        "API connection",
+        "Synchronization",
+        "connectRequest",
+        "commissionReport:",
+        "execDetails ",
+        "openOrder:",
+        "orderStatus:",
+    ];
+    if patterns.iter().any(|p| msg.contains(p)) {
+        return true;
+    }
+    if let Some(idx) = msg.find("Warning ") {
+        let rest = &msg[idx + "Warning ".len()..];
+        if rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_close(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    msg.contains("FUERA") || lower.contains("posición cerrada") || lower.contains("posicion cerrada")
+}
+
+fn parse_trade_pnl(msg: &str) -> Option<f64> {
+    // find '(' ... ' USD brutos)'
+    if let Some(start) = msg.find('(') {
+        let rest = &msg[start + 1..];
+        if let Some(end) = rest.find(" USD brutos)") {
+            let num = &rest[..end];
+            return num.trim().parse::<f64>().ok();
+        }
+    }
+    None
+}
+
+fn parse_unrealized(msg: &str) -> Option<f64> {
+    if let Some(idx) = msg.find("unrealizedPNL=") {
+        let rest = &msg[idx + "unrealizedPNL=".len()..];
+        // take until whitespace
+        let end = rest
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(rest.len());
+        return rest[..end].parse::<f64>().ok();
+    }
+    None
+}
+
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -246,6 +643,12 @@ mod tests {
         let engine = TradingEngine::new(None, None).unwrap();
         let snap = engine.snapshot();
         let _ = snap.systems.len();
+    }
+
+    #[tokio::test]
+    async fn start_system_unknown_returns_error() {
+        let engine = TradingEngine::new(None, None).unwrap();
+        assert!(engine.start_system("99").is_err());
     }
 
     #[tokio::test]
