@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use zeron_warp::egress::{Puente, PuenteEgress, PROXY_WARP};
 use zeron_warp::mundo::{Mundo, Sistema};
+use zeron_warp::{Egress, Ghost, Rutas};
 
 use crate::registry::HarnessRegistry;
 
@@ -29,6 +30,17 @@ static EGRESS: OnceLock<Arc<PuenteEgress>> = OnceLock::new();
 /// rotation trigger asks it for the exit and cuts the keep-alives.
 pub fn egress() -> Option<Arc<PuenteEgress>> {
     EGRESS.get().cloned()
+}
+
+/// The ring over this machine's shared files, riding the mounted bridge when
+/// there is one: the rotation then proves the exit the agents' next request
+/// will use, not just the shield's own trace.
+pub fn ghost() -> Arc<Ghost> {
+    let ghost = Ghost::nuevo(Rutas::del_entorno(), Arc::new(Sistema));
+    match egress() {
+        Some(egress) => Arc::new(ghost.con_egress(egress as Arc<dyn Egress>)),
+        None => Arc::new(ghost),
+    }
 }
 
 /// Opt-out for tests and for machines whose agents must bypass WARP.

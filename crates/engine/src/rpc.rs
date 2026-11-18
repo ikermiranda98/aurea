@@ -909,6 +909,9 @@ pub struct EngineRpc {
     plugins: Option<crate::plugins::Plugins>,
     /// The trading surface's source (demo fixture or a live TWS paper link).
     trading: zeron_trading::TradingService,
+    /// The WARP ring (lanes C1/C2): this machine's `warp-cli`, shared files and
+    /// the mounted egress. Absent in bare schemes, where the surface degrades.
+    warp: Option<std::sync::Arc<zeron_warp::Ghost>>,
     engine_info: EngineInfo,
 }
 
@@ -973,7 +976,15 @@ impl EngineRpc {
             plugins: None,
             engine_info,
             trading,
+            warp: None,
         }
+    }
+
+    /// Attach the WARP ring (lane C1). Without it the `Warp*` methods answer
+    /// `Unavailable`, which is what a scheme-only assembly has always said.
+    pub fn with_warp(mut self, ghost: std::sync::Arc<zeron_warp::Ghost>) -> Self {
+        self.warp = Some(ghost);
+        self
     }
 
     /// Attach the plugins service (the Plugin* methods).
@@ -2514,6 +2525,67 @@ fn warm_signed_out(
             .accounts
             .iter()
             .any(|account| account.harness == harness && account.active)
+}
+
+/// How many finished runs `WarpHistory` hands the widget.
+const WARP_HISTORIAL_MAX: usize = 100;
+
+/// The proto's state for the ring's own answer. A rotation in flight reads as
+/// `Connecting`; a machine without `warp-cli` as `Unavailable`.
+fn warp_estado(estado: &zeron_warp::Estado) -> zeron_proto::warp::WarpState {
+    use zeron_proto::warp::WarpState;
+    if estado.rotating {
+        return WarpState::Connecting;
+    }
+    match estado.warp {
+        zeron_warp::EstadoWarp::Connected => WarpState::Connected,
+        zeron_warp::EstadoWarp::Disconnected => WarpState::Disconnected,
+        zeron_warp::EstadoWarp::Unavailable | zeron_warp::EstadoWarp::Missing => {
+            WarpState::Unavailable
+        }
+    }
+}
+
+fn warp_status(estado: &zeron_warp::Estado, ultima: Option<i64>) -> zeron_proto::warp::WarpStatus {
+    zeron_proto::warp::WarpStatus {
+        state: warp_estado(estado),
+        day: Some(chrono::Utc::now().format("%Y-%m-%d").to_string()),
+        prefix: estado.current.clone(),
+        last_rotate_at: ultima,
+    }
+}
+
+fn warp_rotacion(
+    estado: &zeron_warp::Estado,
+    rotacion: &zeron_warp::Rotacion,
+) -> zeron_proto::warp::WarpRotateResult {
+    zeron_proto::warp::WarpRotateResult {
+        state: warp_estado(estado),
+        // The landed `/64` is what the widget shows; the full exit address stays
+        // in the history and the event log.
+        prefix: rotacion.address.as_deref().and_then(zeron_warp::cubo),
+    }
+}
+
+fn warp_historial(runs: Vec<zeron_warp::GhostRun>) -> Vec<zeron_proto::warp::WarpHistoryEntry> {
+    runs.into_iter()
+        .map(|run| zeron_proto::warp::WarpHistoryEntry {
+            at: run.at,
+            from: run.from,
+            to: run.to,
+            reason: Some(run.origin),
+        })
+        .collect()
+}
+
+/// The answer of a scheme-only assembly: the ring's crate is not mounted.
+fn warp_apagado() -> zeron_proto::warp::WarpStatus {
+    zeron_proto::warp::WarpStatus {
+        state: zeron_proto::warp::WarpState::Unavailable,
+        day: None,
+        prefix: None,
+        last_rotate_at: None,
+    }
 }
 
 fn forwardable(method: &str) -> bool {
@@ -4351,20 +4423,37 @@ impl RpcService for EngineRpc {
                     Err(error) => return Err(RpcError::Failed(error.to_string())),
                 }
             }
-            // WARP: constants exist; the ring's crate lands in lane C, so the
-            // surface degrades honestly until then.
-            methods::WARP_STATUS => RpcReply::value(&zeron_proto::warp::WarpStatus {
-                state: zeron_proto::warp::WarpState::Unavailable,
-                day: None,
-                prefix: None,
-                last_rotate_at: None,
-            }),
-            methods::WARP_ROTATE => RpcReply::value(&zeron_proto::warp::WarpRotateResult {
-                state: zeron_proto::warp::WarpState::Unavailable,
-                prefix: None,
-            }),
+            // WARP ring (lane C3): the machine's own status, a manual rotation
+            // and the run history. These stay device-local (not relay-forwarded):
+            // warp-cli and the shared files are this machine's.
+            methods::WARP_STATUS => {
+                let Some(ghost) = &self.warp else {
+                    return RpcReply::value(&warp_apagado());
+                };
+                let estado = ghost.estado().await;
+                let ultima = ghost.historial().await.last().map(|run| run.at);
+                RpcReply::value(&warp_status(&estado, ultima))
+            }
+            methods::WARP_ROTATE => {
+                let Some(ghost) = &self.warp else {
+                    return RpcReply::value(&zeron_proto::warp::WarpRotateResult {
+                        state: zeron_proto::warp::WarpState::Unavailable,
+                        prefix: None,
+                    });
+                };
+                let rotacion = ghost.rotar(Some("manual")).await;
+                let estado = ghost.estado().await;
+                RpcReply::value(&warp_rotacion(&estado, &rotacion))
+            }
             methods::WARP_HISTORY => {
-                RpcReply::value(&Vec::<zeron_proto::warp::WarpHistoryEntry>::new())
+                let Some(ghost) = &self.warp else {
+                    return RpcReply::value(&Vec::<zeron_proto::warp::WarpHistoryEntry>::new());
+                };
+                let mut runs = ghost.historial().await;
+                if runs.len() > WARP_HISTORIAL_MAX {
+                    runs.drain(..runs.len() - WARP_HISTORIAL_MAX);
+                }
+                RpcReply::value(&warp_historial(runs))
             }
             methods::WATCH_CHATS if wants_changes(&params) => Ok(RpcReply::Stream(
                 keyed_changes_stream(self.workspace.watch_chats(), "id"),
@@ -7561,5 +7650,91 @@ mod context_usage_tests {
         remote.clear_context_usage().unwrap();
         tx.send_replace(crate::doc_host::TranscriptSnapshot::default());
         assert!(stream.next().await.unwrap()["contextUsage"].is_null());
+    }
+}
+
+
+#[cfg(test)]
+mod warp_tests {
+    use super::*;
+
+    fn estado(warp: zeron_warp::EstadoWarp, rotating: bool, current: Option<&str>) -> zeron_warp::Estado {
+        zeron_warp::Estado {
+            warp,
+            rotating,
+            attempts: 10,
+            attempt: None,
+            rotations: usize::from(current.is_some()),
+            current: current.map(str::to_string),
+            pin: true,
+        }
+    }
+
+    #[test]
+    fn warp_status_mapea_el_anillo_al_proto() {
+        let hoy = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let proto = warp_status(
+            &estado(zeron_warp::EstadoWarp::Connected, false, Some("2a09:bac1:7681:1318")),
+            Some(1_763_500_000_000),
+        );
+        assert_eq!(proto.state, zeron_proto::warp::WarpState::Connected);
+        assert_eq!(proto.day.as_deref(), Some(hoy.as_str()));
+        assert_eq!(proto.prefix.as_deref(), Some("2a09:bac1:7681:1318"));
+        assert_eq!(proto.last_rotate_at, Some(1_763_500_000_000));
+    }
+
+    #[test]
+    fn un_run_en_marcha_dice_connecting() {
+        let proto = warp_status(&estado(zeron_warp::EstadoWarp::Connected, true, None), None);
+        assert_eq!(proto.state, zeron_proto::warp::WarpState::Connecting);
+    }
+
+    #[test]
+    fn sin_warp_cli_el_estado_es_unavailable() {
+        let proto = warp_status(&estado(zeron_warp::EstadoWarp::Missing, false, None), None);
+        assert_eq!(proto.state, zeron_proto::warp::WarpState::Unavailable);
+        let apagado = warp_apagado();
+        assert_eq!(apagado.state, zeron_proto::warp::WarpState::Unavailable);
+        assert!(apagado.prefix.is_none());
+    }
+
+    #[test]
+    fn la_rotacion_lleva_el_cubo_de_la_salida() {
+        let rotacion = zeron_warp::Rotacion {
+            ok: true,
+            address: Some("2a09:bac1:7681:1318::286:84".to_string()),
+        };
+        let proto = warp_rotacion(
+            &estado(zeron_warp::EstadoWarp::Connected, false, Some("2a09:bac1:7681:1318")),
+            &rotacion,
+        );
+        assert_eq!(proto.state, zeron_proto::warp::WarpState::Connected);
+        assert_eq!(proto.prefix.as_deref(), Some("2a09:bac1:7681:1318"));
+
+        let fallo = warp_rotacion(
+            &estado(zeron_warp::EstadoWarp::Disconnected, false, None),
+            &zeron_warp::Rotacion::fallo(),
+        );
+        assert_eq!(fallo.state, zeron_proto::warp::WarpState::Disconnected);
+        assert!(fallo.prefix.is_none());
+    }
+
+    #[test]
+    fn el_historial_conserva_motivo_y_cubos() {
+        let run = zeron_warp::GhostRun::registrar(
+            1_763_500_000_000,
+            Some("limit"),
+            true,
+            3,
+            42_000,
+            Some("2a09:bac1:7681:1318"),
+            Some("2a09:bac1:76e1:1318"),
+        );
+        let proto = warp_historial(vec![run]);
+        assert_eq!(proto.len(), 1);
+        assert_eq!(proto[0].at, 1_763_500_000_000);
+        assert_eq!(proto[0].from.as_deref(), Some("2a09:bac1:7681:1318"));
+        assert_eq!(proto[0].to.as_deref(), Some("2a09:bac1:76e1:1318"));
+        assert_eq!(proto[0].reason.as_deref(), Some("limit"));
     }
 }
