@@ -14079,8 +14079,10 @@ version = "0.3.7"
 dependencies = [
  "async-trait",
  "chrono",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha1",
  "tokio",
  "tracing",
  "zeron-proto",

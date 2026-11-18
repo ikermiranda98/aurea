@@ -4,11 +4,14 @@
 //! watch channel the RPC layer streams) plus [`mock`], the fixture source the
 //! dashboard consumes until the real engine (lane A) lands.
 
+pub mod claims;
 pub mod ibkr;
+pub mod lifecycle;
 pub mod mock;
 pub mod mt5;
 pub mod pool;
 pub mod service;
+pub mod store;
 
 pub use service::TradingService;
 
