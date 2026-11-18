@@ -14276,10 +14276,12 @@ dependencies = [
 name = "zeron-warp"
 version = "0.3.7"
 dependencies = [
+ "async-trait",
  "chrono",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

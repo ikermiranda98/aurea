@@ -62,10 +62,10 @@ pub fn librar(
     let anterior = std::fs::read_to_string(&ruta).ok();
     if let Some(anterior) = anterior {
         let anterior = anterior.trim();
-        if let Ok(anterior_pid) = anterior.parse::<u32>() {
-            if pid_vivo(anterior_pid) {
-                return None;
-            }
+        if let Ok(anterior_pid) = anterior.parse::<u32>()
+            && pid_vivo(anterior_pid)
+        {
+            return None;
         }
         if fresco(&ruta, ahora) {
             return None;
