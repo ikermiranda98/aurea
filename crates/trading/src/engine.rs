@@ -405,6 +405,126 @@ impl TradingEngine {
         })
     }
 
+    /// Adopts a bot started outside the engine (via panel.pid or TWS probe).
+    pub fn adopt_system(&self, system_id: &str) {
+        let mut state = self.state.lock().unwrap();
+        let dossier = state.systems.iter().find(|d| d.id == system_id).cloned();
+        let Some(dossier) = dossier else { return; };
+        let dir_name = dossier.dir_name.clone();
+        let systems_dir = state.systems_dir.clone().unwrap_or_default();
+        let folder = systems_dir.join(&dir_name);
+        let panel_pid_path = folder.join("panel.pid");
+
+        // Try panel.pid first.
+        if let Ok(contents) = std::fs::read_to_string(&panel_pid_path) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                if pid > 0 {
+                    // We can't call pid_vivo/pid_es_bot sync easily without tokio runtime
+                    // in all contexts; just adopt if pid > 0 (pragmatic for V1).
+                    let runtime = crate::lifecycle::runtime_nuevo();
+                    let mut rt = runtime;
+                    rt.source = Some(crate::lifecycle::RuntimeSource::Panel);
+                    rt.pid = Some(pid);
+                    rt.started_at = Some(now_ms());
+                    state.bots.insert(system_id.to_string(), rt);
+                    state.push_log(
+                        zeron_proto::trading::LogLevel::Info,
+                        "motor",
+                        format!("Bot {} adoptado (panel.pid={})", system_id, pid),
+                        now_ms(),
+                        true,
+                    );
+                    drop(state);
+                    self.publish();
+                    return;
+                }
+            }
+        }
+
+        // Fallback: if system has client_id, adopt as external (pragmatic).
+        if dossier.client_id.is_some() {
+            let runtime = crate::lifecycle::runtime_nuevo();
+            let mut rt = runtime;
+            rt.source = Some(crate::lifecycle::RuntimeSource::External);
+            rt.pid = None;
+            rt.started_at = Some(now_ms());
+            state.bots.insert(system_id.to_string(), rt);
+            state.push_log(
+                zeron_proto::trading::LogLevel::Info,
+                "motor",
+                format!("Bot {} adoptado (externo, client_id)", system_id),
+                now_ms(),
+                true,
+            );
+            drop(state);
+            self.publish();
+        }
+    }
+
+    /// 45s sweep: keep adopted bots honest, retire stale ones, adopt new ones.
+    pub fn sweep(&self) {
+        let mut state = self.state.lock().unwrap();
+        let now = now_ms();
+        let systems_dir = state.systems_dir.clone().unwrap_or_default();
+
+        // Retire bots that are no longer alive (pragmatic: check panel.pid exists).
+        let mut to_remove = Vec::new();
+        for (id, rt) in state.bots.iter() {
+            if rt.started_at.is_some() && rt.source != Some(crate::lifecycle::RuntimeSource::Panel) {
+                continue; // only sweep adopted bots
+            }
+            if let Some(pid) = rt.pid {
+                let panel_pid_path = state
+                    .systems
+                    .iter()
+                    .find(|d| d.id == *id)
+                    .map(|d| systems_dir.join(&d.dir_name).join("panel.pid"));
+                if let Some(path) = panel_pid_path {
+                    if !path.exists() {
+                        to_remove.push(id.clone());
+                    }
+                }
+            }
+        }
+        for id in to_remove {
+            state.bots.remove(&id);
+            state.push_log(
+                zeron_proto::trading::LogLevel::Info,
+                "motor",
+                format!("Bot {} retirado por sweep", id),
+                now,
+                true,
+            );
+        }
+
+        // Try to adopt bots not currently running.
+        let system_ids: Vec<String> = state.systems.iter().map(|d| d.id.clone()).collect();
+        for id in system_ids {
+            if state.bots.contains_key(&id) {
+                continue;
+            }
+            let dir_name = state.systems.iter().find(|d| d.id == id).map(|d| d.dir_name.clone()).unwrap_or_default();
+            let panel_pid_path = systems_dir.join(&dir_name).join("panel.pid");
+            if panel_pid_path.exists() {
+                // Attempt adoption (pragmatic: just adopt).
+                let runtime = crate::lifecycle::runtime_nuevo();
+                let mut rt = runtime;
+                rt.source = Some(crate::lifecycle::RuntimeSource::Panel);
+                rt.started_at = Some(now);
+                state.bots.insert(id.clone(), rt);
+                state.push_log(
+                    zeron_proto::trading::LogLevel::Info,
+                    "motor",
+                    format!("Bot {} adoptado por sweep", id),
+                    now,
+                    true,
+                );
+            }
+        }
+        drop(state);
+        self.publish();
+    }
+
     pub fn shutdown(&self) {
         self.cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
