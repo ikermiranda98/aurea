@@ -36,7 +36,8 @@ fn main() -> anyhow::Result<()> {
                 workos_client_id: workos_client_id_from_env(&edge_token),
                 edge_token,
                 org_id: std::env::var("ZERON_ORG_ID").ok(),
-                default_harness: zeron_ui::HarnessId::ClaudeCode,
+                // Aurea's one agent: opencode (DeepSeek by default).
+                default_harness: zeron_ui::HarnessId::Opencode,
                 initial_url: open_url,
             });
             Ok(())

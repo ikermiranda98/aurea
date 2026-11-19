@@ -59,54 +59,12 @@ enum Command {
     /// app closed.
     #[command(hide = true)]
     Engine,
-    /// Sign in and enable sync on the next engine start.
-    Login,
-    /// Remove the saved session and return to local-only on the next start.
-    Logout,
     /// Show workspace mode, optional auth, and engine status.
     Status,
-    /// Live sync introspection from the running engine: per-room connection
-    /// state, last pushed-frame/ack ages, rejoin/probe/resync counters.
-    Sync,
-    /// Cloud sleep handshake: ask the running engine to start no new work.
-    /// Exits 0 when quiesced, 75 when busy (a turn in flight, a message
-    /// waiting) — the edge then keeps the machine awake.
-    #[command(hide = true)]
-    Quiesce,
-    #[cfg(target_os = "linux")]
-    /// Trigger an Appshot in the running headed instance (desktop shortcut fallback).
-    Appshot,
     /// Serve the Zeron MCP (Model Context Protocol) server on stdin/stdout,
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
     Mcp,
-    /// Make, sign, check and list plugins (through the running Zeron).
-    Plugin {
-        #[command(subcommand)]
-        command: PluginCommand,
-    },
-    /// List, make, use and delete templates: whole replacements of Zeron's
-    /// interface (through the running Zeron). `zeron template use zeron`
-    /// puts Zeron's own back.
-    Template {
-        #[command(subcommand)]
-        command: TemplateCommand,
-    },
-    /// Manage `zeron headless` as a background service (launchd / systemd --user).
-    Daemon {
-        #[command(subcommand)]
-        command: DaemonCommand,
-    },
-    /// Check for a newer release and apply it (download → verify → swap →
-    /// service restart). `--check` only reports (exits 1 when one is available).
-    Update {
-        #[arg(long)]
-        check: bool,
-    },
-    /// Watches a new version while it proves itself after an update: started by
-    /// the old version just before it hands over.
-    #[command(name = "update-watchdog", hide = true)]
-    UpdateWatchdog,
 }
 
 #[derive(Subcommand)]
@@ -289,7 +247,7 @@ pub fn run(version: &'static str, engines: Engines) -> Launch {
         init_logging(
             long_running,
             mode,
-            matches!(&cli.command, Some(Command::Mcp | Command::Plugin { .. } | Command::Template { .. })),
+            matches!(&cli.command, Some(Command::Mcp)),
         );
     }
     if long_running {
@@ -304,30 +262,8 @@ pub fn run(version: &'static str, engines: Engines) -> Launch {
     match cli.command {
         Some(Command::Headless) => engine(EngineCommand::Headless),
         Some(Command::Engine) => engine(EngineCommand::Engine),
-        Some(Command::Login) => engine(EngineCommand::Login),
-        Some(Command::Logout) => engine(EngineCommand::Logout),
         Some(Command::Status) => engine(EngineCommand::Status),
-        Some(Command::Sync) => engine(EngineCommand::Sync),
-        Some(Command::Quiesce) => engine(EngineCommand::Quiesce),
         Some(Command::Mcp) => engine(EngineCommand::Mcp),
-        Some(Command::Plugin { command }) => engine(EngineCommand::Plugin(command)),
-        Some(Command::Template { command }) => engine(EngineCommand::Template(command)),
-        #[cfg(target_os = "linux")]
-        Some(Command::Appshot) => Launch::Appshot,
-        Some(Command::Update { check }) => Launch::Done(
-            tokio::runtime::Runtime::new()
-                .map_err(anyhow::Error::from)
-                .and_then(|runtime| runtime.block_on(update_cli::update(&edge_url_from_env(), check))),
-        ),
-        Some(Command::UpdateWatchdog) => Launch::Done(zeron_update::transaction::run_watchdog()),
-        Some(Command::Daemon { command }) => Launch::Done(match command {
-            DaemonCommand::Install => daemon::install(&paths::data_dir()),
-            DaemonCommand::Uninstall => daemon::uninstall(),
-            DaemonCommand::Start => daemon::start(),
-            DaemonCommand::Stop => daemon::stop(),
-            DaemonCommand::Restart => daemon::restart(),
-            DaemonCommand::Status => daemon::status(),
-        }),
         None => Launch::Window {
             open_url: cli.open_url,
             safe_mode: cli.safe_mode,
@@ -339,19 +275,7 @@ impl Command {
     /// Whether it runs the engine's code ([`EngineCommand`]).
     fn runs_engine(&self) -> bool {
         match self {
-            Self::Headless
-            | Self::Engine
-            | Self::Login
-            | Self::Logout
-            | Self::Status
-            | Self::Sync
-            | Self::Quiesce
-            | Self::Mcp
-            | Self::Plugin { .. }
-            | Self::Template { .. } => true,
-            #[cfg(target_os = "linux")]
-            Self::Appshot => false,
-            Self::Update { .. } | Self::UpdateWatchdog | Self::Daemon { .. } => false,
+            Self::Headless | Self::Engine | Self::Status | Self::Mcp => true,
         }
     }
 }
@@ -426,21 +350,8 @@ mod tests {
     #[test]
     fn every_subcommand_is_reachable() {
         let paths = subcommand_paths("0.0.0");
-        for expected in [
-            &["headless"][..],
-            &["engine"],
-            &["login"],
-            &["logout"],
-            &["status"],
-            &["sync"],
-            &["quiesce"],
-            &["mcp"],
-            &["plugin", "new"],
-            &["plugin", "export"],
-            &["template", "use"],
-            &["daemon", "install"],
-            &["update"],
-        ] {
+        // Aurea keeps the launcher's own commands only.
+        for expected in [&["headless"][..], &["engine"], &["status"], &["mcp"]] {
             assert!(
                 paths.iter().any(|path| path == expected),
                 "{expected:?} missing from {paths:?}"
@@ -458,56 +369,10 @@ mod tests {
                 .unwrap()
                 .command
         };
-        for args in [
-            &["headless"][..],
-            &["engine"],
-            &["login"],
-            &["logout"],
-            &["status"],
-            &["sync"],
-            &["quiesce"],
-            &["mcp"],
-            &["plugin", "list"],
-            &["plugin", "export", "focus"],
-            &["template", "list"],
-        ] {
+        for args in [&["headless"][..], &["engine"], &["status"], &["mcp"]] {
             assert!(parse(args).unwrap().runs_engine(), "{args:?}");
         }
-        for args in [&["update", "--check"][..], &["daemon", "status"]] {
-            assert!(!parse(args).unwrap().runs_engine(), "{args:?}");
-        }
         assert!(parse(&[]).is_none());
-    }
-
-    /// `--to` reaches the engine as a full path: a relative one is taken
-    /// from the current folder.
-    #[test]
-    fn plugin_export_takes_a_full_path() {
-        let export = |args: &[&str]| {
-            let argv = ["zeron", "plugin", "export"].into_iter().chain(args.iter().copied());
-            match Cli::from_arg_matches(&command("0.0.0").try_get_matches_from(argv).unwrap())
-                .unwrap()
-                .command
-            {
-                Some(Command::Plugin { command: PluginCommand::Export { id, to } }) => (id, to),
-                _ => panic!("not plugin export"),
-            }
-        };
-        assert_eq!(export(&["focus"]), ("focus".to_owned(), None));
-        let cwd = std::env::current_dir().unwrap();
-        assert_eq!(
-            export(&["focus", "--to", "dist/focus.zeron-plugin"]).1,
-            Some(cwd.join("dist/focus.zeron-plugin"))
-        );
-        assert_eq!(export(&["focus", "--to", "."]).1.unwrap(), cwd);
-        let full = if cfg!(windows) { r"C:\out" } else { "/tmp/out" };
-        assert_eq!(export(&["focus", "--to", full]).1, Some(std::path::PathBuf::from(full)));
-        assert!(
-            command("0.0.0")
-                .try_get_matches_from(["zeron", "plugin", "export", "focus", "--to", ""])
-                .is_err()
-        );
-        assert!(command("0.0.0").try_get_matches_from(["zeron", "plugin", "export"]).is_err());
     }
 
     #[test]

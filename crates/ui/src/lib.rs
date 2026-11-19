@@ -223,7 +223,7 @@ pub fn run_app(config: UiConfig) {
         if std::env::var("ZERON_RELEASES_URL").is_ok_and(|url| !url.trim().is_empty()) {
             app_update::AppUpdate::init(config.boot().edge_url, data_dir.clone(), cx);
         }
-        cx.register_url_scheme("zeron").detach();
+        // No `zeron://` scheme in Aurea: links from outside never open it.
 
         let state = cx.new(|cx| {
             let mut state = state::AppState::new();
