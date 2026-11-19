@@ -223,7 +223,13 @@ pub fn run_app(config: UiConfig) {
         appshots::set_enabled(ui_settings.appshots_enabled);
         terminal::panel::init(cx);
         app_menus::init(cx);
-        app_update::AppUpdate::init(config.boot().edge_url, data_dir.clone(), cx);
+        // Aurea has no release feed of its own yet: Zeron's checker would offer
+        // Zeron's releases ("Update available — download from GitHub") and
+        // could replace this fork with upstream. It starts only when a feed is
+        // named explicitly (`ZERON_RELEASES_URL`, the updater's own override).
+        if std::env::var("ZERON_RELEASES_URL").is_ok_and(|url| !url.trim().is_empty()) {
+            app_update::AppUpdate::init(config.boot().edge_url, data_dir.clone(), cx);
+        }
         cx.register_url_scheme("zeron").detach();
 
         let state = cx.new(|cx| {

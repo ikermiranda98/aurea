@@ -21,6 +21,11 @@ use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 
 const ROW_HEIGHT: f32 = 30.0;
+/// Narrowest the main column (equity, positions, log) goes beside the side
+/// column before the side column wraps under it.
+const MAIN_COLUMN_BASIS: f32 = 600.0;
+/// The side column's (systems, connections, tasks) own width beside it.
+const SIDE_COLUMN_BASIS: f32 = 360.0;
 const PAGE_PAD: f32 = 16.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,7 +275,11 @@ impl TradingSurface {
                             .child("MESA DE TRADING"),
                     ),
             )
-            .child(self.phase_chip(theme))
+            // The phase reads "EN VIVO" once the stream is up; on the demo
+            // fixture that would contradict the DEMO chip beside it.
+            .when(!(demo && self.phase == Phase::Live), |el| {
+                el.child(self.phase_chip(theme))
+            })
             .when(demo, |el| {
                 el.child(chip("DEMO", theme.accent))
             })
@@ -282,10 +291,6 @@ impl TradingSurface {
                     .child(version),
             )
             .child(div().flex_1())
-            // The header shares the titlebar row: on Windows the native
-            // caption cluster (3 × 36px) sits over its right edge, so the
-            // actions stop short of it.
-            .pr(px(HEADER_RIGHT_PADDING))
             .child(
                 button("trading-close-all", "Cerrar todo", ButtonTone::Ghost, theme).on_click(
                     cx.listener(|this, _, _, cx| this.ask(Confirm::CloseAll, cx)),
@@ -512,20 +517,29 @@ impl TradingSurface {
                     .flex_wrap()
                     .items_start()
                     .gap(px(14.0))
+                    // Both columns grow from their basis (2:1); when the two
+                    // bases no longer fit side by side, the side column wraps
+                    // under the main one and each takes the full width, so the
+                    // positions table never squeezes its figures to "21.4…".
                     .child(
                         div()
-                            .flex_1()
+                            .flex_basis(px(MAIN_COLUMN_BASIS))
+                            .flex_grow(2.0)
+                            .flex_shrink(1.0)
                             .min_w(px(0.0))
                             .flex()
                             .flex_col()
                             .gap(px(14.0))
                             .child(self.equity_card(&snapshot, theme))
-                            .child(self.positions_card(&snapshot, theme, cx)),
+                            .child(self.positions_card(&snapshot, theme, cx))
+                            .child(self.logs_card(&snapshot, theme, now)),
                     )
                     .child(
                         div()
-                            .w(px(360.0))
-                            .flex_none()
+                            .flex_basis(px(SIDE_COLUMN_BASIS))
+                            .flex_grow(1.0)
+                            .flex_shrink(1.0)
+                            .min_w(px(0.0))
                             .flex()
                             .flex_col()
                             .gap(px(14.0))
@@ -534,7 +548,6 @@ impl TradingSurface {
                             .child(self.tasks_card(&snapshot, theme, cx)),
                     ),
             )
-            .child(self.logs_card(&snapshot, theme, now))
             .into_any_element()
     }
 
@@ -686,8 +699,11 @@ impl TradingSurface {
             .when(ix % 2 == 1, |el| el.bg(crate::theme::ink(0.015)))
             .child(
                 div()
-                    .flex_1()
-                    .min_w(px(72.0))
+                    .flex_basis(px(80.0))
+                    .flex_grow(1.0)
+                    .flex_shrink(1.0)
+                    .min_w(px(56.0))
+                    .truncate()
                     .font_family(theme.font_mono.clone())
                     .text_size(px(11.5))
                     .font_weight(gpui::FontWeight::MEDIUM)
@@ -705,15 +721,22 @@ impl TradingSurface {
                 pnl_color,
             ))
             .child(
-                button(
-                    ("trading-close-position", ix),
-                    "Cerrar",
-                    ButtonTone::Ghost,
-                    theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.ask(Confirm::Close(symbol.to_string()), cx);
-                })),
+                div()
+                    .w(px(CLOSE_COLUMN))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .child(
+                        button(
+                            ("trading-close-position", ix),
+                            "Cerrar",
+                            ButtonTone::Ghost,
+                            theme,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.ask(Confirm::Close(symbol.to_string()), cx);
+                        })),
+                    ),
             )
     }
 
@@ -796,10 +819,20 @@ impl TradingSurface {
                     .gap(px(1.0))
                     .child(
                         div()
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .truncate()
-                            .child(SharedString::from(system.name.clone())),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .text_size(px(12.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .truncate()
+                                    .child(SharedString::from(system.name.clone())),
+                            )
+                            .child(div().flex_none().child(chip(state_label, state_tone))),
                     )
                     .child(
                         div()
@@ -813,7 +846,6 @@ impl TradingSurface {
                             ))),
                     ),
             )
-            .child(chip(state_label, state_tone))
             .child(
                 div()
                     .w(px(70.0))
@@ -839,7 +871,7 @@ impl TradingSurface {
             rows.push(empty_row(theme, "Sin conexiones registradas."));
         } else {
             for (ix, link) in links.iter().enumerate() {
-                rows.push(self.link_row(ix, link, theme, cx));
+                rows.push(self.link_row(ix, link, !live, theme, cx));
             }
         }
         let actions = div()
@@ -987,23 +1019,48 @@ impl TradingSurface {
                     cx.notify();
                 })),
             );
+        let meta = if live {
+            SharedString::from(format!("{connected}/{} activas", links.len()))
+        } else {
+            SharedString::from("de ejemplo")
+        };
         card(theme)
-            .child(section_header(
-                theme,
-                "Conexiones",
-                SharedString::from(format!("{connected}/{} activas", links.len())),
-            ))
+            .child(section_header(theme, "Conexiones", meta))
             .children(rows)
+            .when(!live, |el| {
+                el.child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(7.0))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .text_size(px(10.5))
+                        .text_color(theme.text_faint)
+                        .child("Modo demo: estas conexiones son de ejemplo. Conecta TWS paper para ver tu cuenta."),
+                )
+            })
             .child(actions)
     }
 
-    fn link_row(&self, ix: usize, link: &Link, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn link_row(
+        &self,
+        ix: usize,
+        link: &Link,
+        demo: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let (broker_label, broker_tone) = match link.broker {
             Some(Broker::Mt5) => ("MT5", theme.accent),
             Some(Broker::Nt) => ("NT", theme.warning),
             Some(Broker::Ibkr) | None => ("IBKR", theme.success),
         };
-        let (state_label, state_tone) = if link.connected {
+        let (state_label, state_tone) = if demo {
+            // The demo fixture's links are invented: they are not connected
+            // to anything, and "CONECTADA" beside "Conectar TWS paper" read
+            // as a contradiction.
+            ("EJEMPLO", theme.text_faint)
+        } else if link.connected {
             ("CONECTADA", theme.success)
         } else {
             ("CAÍDA", theme.danger)
@@ -1254,8 +1311,12 @@ impl TradingSurface {
 impl Render for TradingSurface {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        // The page starts under the titlebar row, like Zeron's Pull requests
+        // page: the row belongs to the sidebar toggle, history arrows and the
+        // window's own caption buttons, whichever side they sit on.
         let mut root = div()
             .size_full()
+            .pt(px(Theme::TITLEBAR_HEIGHT))
             .flex()
             .flex_col()
             .bg(theme.bg)
@@ -1334,14 +1395,6 @@ fn chip(label: impl Into<SharedString>, tone: Hsla) -> Div {
         .child(label.into())
 }
 
-/// Right inset of the desk header: the base 18px gutter plus, on Windows, the
-/// native caption buttons (minimize/maximize/close, 36px each) and a gap.
-const HEADER_RIGHT_PADDING: f32 = if cfg!(target_os = "windows") {
-    18.0 + 36.0 * 3.0 + 8.0
-} else {
-    18.0
-};
-
 fn card(theme: &Theme) -> Div {
     div()
         .w_full()
@@ -1396,10 +1449,22 @@ fn empty_row(theme: &Theme, message: &'static str) -> Div {
         .child(message)
 }
 
-fn head_cell(theme: &Theme, width: f32, label: &'static str) -> Div {
+/// The close button's column, the one fixed-width cell of a position row.
+const CLOSE_COLUMN: f32 = 64.0;
+
+/// A numeric column: `width` is its share of the row, never a floor, so a
+/// narrow card shrinks the figures instead of pushing the close button out.
+fn flex_cell(width: f32) -> Div {
     div()
-        .w(px(width))
-        .flex_none()
+        .flex_basis(px(width))
+        .flex_grow(1.0)
+        .flex_shrink(1.0)
+        .min_w(px(0.0))
+        .truncate()
+}
+
+fn head_cell(theme: &Theme, width: f32, label: &'static str) -> Div {
+    flex_cell(width)
         .text_right()
         .text_size(px(8.5))
         .font_weight(gpui::FontWeight::MEDIUM)
@@ -1408,9 +1473,7 @@ fn head_cell(theme: &Theme, width: f32, label: &'static str) -> Div {
 }
 
 fn num_cell(theme: &Theme, width: f32, value: String) -> Div {
-    div()
-        .w(px(width))
-        .flex_none()
+    flex_cell(width)
         .text_right()
         .font_family(theme.font_mono.clone())
         .text_size(px(10.5))
@@ -1419,9 +1482,7 @@ fn num_cell(theme: &Theme, width: f32, value: String) -> Div {
 }
 
 fn money_cell(theme: &Theme, width: f32, value: String, tone: Hsla) -> Div {
-    div()
-        .w(px(width))
-        .flex_none()
+    flex_cell(width)
         .text_right()
         .font_family(theme.font_mono.clone())
         .text_size(px(10.5))
@@ -1443,8 +1504,10 @@ fn positions_head(theme: &Theme) -> Div {
         .border_color(theme.border)
         .child(
             div()
-                .flex_1()
-                .min_w(px(72.0))
+                .flex_basis(px(80.0))
+                .flex_grow(1.0)
+                .flex_shrink(1.0)
+                .min_w(px(56.0))
                 .text_size(px(8.5))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text_faint)
@@ -1464,7 +1527,7 @@ fn positions_head(theme: &Theme) -> Div {
         .child(head_cell(theme, 92.0, "ACTUAL"))
         .child(head_cell(theme, 96.0, "P&L"))
         .child(head_cell(theme, 74.0, "P&L %"))
-        .child(div().w(px(60.0)).flex_none())
+        .child(div().w(px(CLOSE_COLUMN)).flex_none())
 }
 
 fn now_ms() -> i64 {
