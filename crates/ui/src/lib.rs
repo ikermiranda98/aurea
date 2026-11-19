@@ -296,8 +296,6 @@ pub fn run_app(config: UiConfig) {
             boot: config.boot(),
         });
         open_main_window(state, config.boot(), cx);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        start_appshot_service(config.boot().data_dir, cx);
         // Native menu bar — macOS gets the standard app menu (About/Services/
         // Hide/Quit ⌘Q), Edit clipboard verbs routed to the focused input, and
         // a Window menu (⌘M/⌘W). Without this, `NSApp.mainMenu` stays nil: no

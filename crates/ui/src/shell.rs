@@ -663,7 +663,17 @@ impl SettingsSection {
     }
 
     fn visible_in_nav(self) -> bool {
-        self != Self::Agents && (self != Self::Appshots || crate::appshots::is_desktop())
+        // Aurea is a local trading desk: no devices, Zeron Cloud, billing,
+        // file editor or Appshots pages.
+        !matches!(
+            self,
+            Self::Agents
+                | Self::Devices
+                | Self::Cloud
+                | Self::Billing
+                | Self::Files
+                | Self::Appshots
+        )
     }
 
     /// [`Self::visible_in_nav`], plus what depends on the account: Cloud
@@ -9984,7 +9994,8 @@ impl Shell {
         let trading = self.render_trading_button(theme, cx);
         let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
-        let action = account_menu_action(self.state.read(cx).workspace_scope, self.sync_flow);
+        // Aurea is local-only: no sign-in, sync or sign-out rows.
+        let action: Option<AccountMenuAction> = None;
         // The profile pill hugs avatar + name (shrinking so long names fade
         // out); the gap between it and the settings button is not interactive.
         let initial: SharedString = user_line
@@ -10149,7 +10160,9 @@ impl Shell {
                 })
                 // macOS keeps "Check for Updates…" in the app menu under
                 // About; elsewhere there is no app menu, so it lives here.
-                .when(!cfg!(target_os = "macos"), |menu| {
+                .when(
+                    !cfg!(target_os = "macos") && crate::app_update::AppUpdate::global(cx).is_some(),
+                    |menu| {
                     menu.child(
                         popover::menu_row(theme, false, "user-menu-check-updates")
                             .id("user-menu-check-updates")

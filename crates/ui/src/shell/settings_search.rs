@@ -476,11 +476,11 @@ mod tests {
         cx.simulate_keystrokes(&platform_combo("mod-f"));
         assert!(field_focused(&shell, cx));
         // A query lists its hits in place of the sections.
-        search_for("wrap", cx);
+        search_for("sounds", cx);
         assert!(shell.read_with(cx, |shell, cx| shell.settings_searching(cx)));
         assert_eq!(
             active_hit(&shell, cx),
-            Some(Target::Setting(SettingId::WordWrap))
+            Some(Target::Setting(SettingId::SessionSounds))
         );
         // Enter opens the page the hit lives on and lights its row.
         take_anchored();
@@ -488,22 +488,22 @@ mod tests {
         draw(cx);
         draw(cx);
         shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.route, Route::Settings(SettingsSection::Files));
+            assert_eq!(shell.route, Route::Settings(SettingsSection::Notifications));
         });
-        assert!(take_anchored().contains(&Target::Setting(SettingId::WordWrap)));
-        assert_eq!(lit(), Some(Target::Setting(SettingId::WordWrap)));
+        assert!(take_anchored().contains(&Target::Setting(SettingId::SessionSounds)));
+        assert_eq!(lit(), Some(Target::Setting(SettingId::SessionSounds)));
         // The hits stay for the next pick: ↓ walks them.
         cx.simulate_keystrokes("down");
         assert_ne!(
             active_hit(&shell, cx),
-            Some(Target::Setting(SettingId::WordWrap))
+            Some(Target::Setting(SettingId::SessionSounds))
         );
         // Escape clears the query first, and the sections come back…
         cx.simulate_keystrokes("escape");
         draw(cx);
         shell.read_with(cx, |shell, cx| {
             assert!(!shell.settings_searching(cx));
-            assert_eq!(shell.route, Route::Settings(SettingsSection::Files));
+            assert_eq!(shell.route, Route::Settings(SettingsSection::Notifications));
         });
         // …then leaves Settings, as anywhere on the page.
         cx.simulate_keystrokes("escape");
