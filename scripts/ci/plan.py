@@ -55,26 +55,19 @@ from reuse import matches  # noqa: E402
 SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
     "core": [("core-tests", "linux")],  # ui-tests.yml
     "ui": [("ui-tests", "linux")],  # ui-tests.yml (UI + Linux browser)
-    "cursor": [("cursor-compatibility", "linux")],  # cursor-compatibility.yml
     "edge": [("edge", "linux")],  # preview-tests.yml
     "installer": [("desktop-entry", "linux")],  # linux-installer.yml
-    "voice": [("offline-linux", "linux"), ("windows-runtime", "windows")],  # voice-tests.yml
     "windows": [("tests", "windows"), ("app", "windows")],  # windows.yml
     "macos": [("macos-native", "macos")],  # macos.yml
     "frame_source": [("macos-frame-source", "macos")],  # macos.yml
-    "ios": [("ios-core", "linux"), ("ios-tests", "macos")],  # macos.yml (+ android publish below)
-    "android": [("apk", "linux")],  # android.yml (+ publish on main, added below)
-    "zgx": [("zgx-macos", "macos"), ("zgx-linux", "linux")],  # zgx-tests.yml
 }
-# Run only nightly, manually or with `ci:full` (see the module docstring): voice
-# (the AEC3 audio stack and the packaged Windows media runtime; no failures of
-# their own in the two weeks measured, and the rest of voice is tested in
-# core-tests, ios-core and the Windows tests) and the Linux native browser
-# fixture (its failures were window-timing flakes and package downloads).
-NIGHTLY_SUITES = ("voice",)
+# Run only nightly, manually or with `ci:full` (see the module docstring): the
+# Linux native browser fixture (its failures were window-timing flakes and
+# package downloads). No whole suite is nightly-only in Aurea.
+NIGHTLY_SUITES: tuple[str, ...] = ()
 NIGHTLY_FLAGS = (("ui", "browser"),)
 # Suites whose jobs are independent, so one can be skipped while another runs.
-SPLITTABLE = ("voice", "windows")
+SPLITTABLE = ("windows",)
 
 CARGO = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 CI_SELF = [
@@ -84,31 +77,6 @@ CI_SELF = [
     "scripts/ci/reuse.py",
 ]
 
-# The apps link the Rust mobile core and everything it depends on (iOS and Android).
-# main() replaces this with zeron-mobile's dependency closure from the Cargo.toml
-# files; this list is the fallback when they cannot be read.
-MOBILE_CORE = [
-    "crates/mobile/**", "crates/client/**", "crates/text/**", "crates/markdown/**",
-    "crates/doc/**", "crates/sync/**", "crates/proto/**", "crates/rpc/**", "crates/syntax/**",
-    "crates/orb/**", "crates/voice-session/**", "crates/visual/**", "crates/visual-gpu/**",
-    "crates/term/**", "crates/term-link/**", "crates/veil/**", "crates/zatex/**", "crates/preview/**",
-]
-
-# Voice: the WebRTC audio stack (zeron-audio, which nothing else builds yet) and
-# the packaged Windows media runtime. The rest of voice is tested where it is
-# built: protocol and transport in core-tests, mobile voice in ios-core,
-# voice-media in core-tests and the Windows tests.
-VOICE_PATHS = ["crates/audio/**", "crates/voice-media/**", "dist/voice/**", "scripts/package-voice-runtime.py",
-               "scripts/codex-voice-remote-smoke.py", "scripts/tests/*voice*", ".github/workflows/voice-tests.yml"]
-
-# The zgx suite's own files, and the crates it builds: main() replaces ZGX_CORE
-# with the closure of reuse.SUITE_PACKAGES["zgx"]; this list is the fallback.
-ZGX_PATHS = ["apps/zgx/**", "scripts/ci/nextest.toml", ".github/workflows/zgx-tests.yml"]
-ZGX_CORE = [
-    "crates/engine/**", "crates/plugin-guard/**", "crates/zatex/**", "crates/theme/**",
-    "crates/preview-label/**", "crates/cli/**", "crates/launch/**", "crates/notify/**",
-    "crates/proto/**", "crates/update/**", "crates/visual/**", "crates/visual-gpu/**",
-]
 
 BROAD: dict[str, list[str]] = {
     "core": CARGO + ["crates/**", "apps/zeron/**", "scripts/ci/**", ".github/actions/linux-ci/**",
@@ -116,13 +84,10 @@ BROAD: dict[str, list[str]] = {
     "ui": CARGO + ["crates/**", "scripts/ci/**", ".github/actions/linux-ci/**",
                    "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py",
                    ".github/workflows/ui-tests.yml"],
-    "cursor": CARGO + ["crates/harness/**", "crates/doc/**", "crates/engine/**",
-                       "scripts/*cursor-sdk*", ".github/workflows/cursor-*.yml"],
     "edge": ["edge/**", ".github/workflows/preview-tests.yml"],
     "installer": ["edge/src/install.sh", "scripts/package-linux.sh", "scripts/test-linux-desktop-entry.sh",
                   "scripts/ci/apt-install.sh", "dist/zeron.desktop", "dist/zeron.png",
                   ".github/workflows/linux-installer.yml"],
-    "voice": CARGO + VOICE_PATHS,
     "windows": CARGO + ["crates/**", "apps/zeron/**", "dist/windows/**", "scripts/test-windows-*.ps1",
                         "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
                         ".github/workflows/windows.yml"],
@@ -131,18 +96,10 @@ BROAD: dict[str, list[str]] = {
                       "dist/macos/Info.plist", ".github/workflows/macos.yml"],
     # Tests the pinned GPUI checkout: only when the pin moves (see gpui_moved()).
     "frame_source": [".github/workflows/macos.yml"],
-    "ios": CARGO + MOBILE_CORE + ["apps/ios/**", "scripts/ios/**", ".github/workflows/macos.yml"],
-    "android": CARGO + ["apps/android/**", "crates/**", "scripts/android/**", "apps/ios/Zeron/Fonts/**",
-                        "apps/ios/Zeron/Assets.xcassets/**", ".github/workflows/android.yml"],
-    # The zgx interface (its own workspace: apps/zgx/Cargo.lock) with its Rust and
-    # Luau UI tests, and the engine's plugin host (also on macOS here; core-tests
-    # runs it on Linux).
-    "zgx": CARGO + ZGX_PATHS + ZGX_CORE,
 }
 
 # Fast tier: the files that always select the platform suite...
 FAST_PATHS: dict[str, list[str]] = {
-    "voice": VOICE_PATHS,
     "windows": CARGO + ["apps/zeron/**", "dist/windows/**", "scripts/test-windows-*.ps1",
                         "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
                         ".github/workflows/windows.yml", "crates/update/**", "crates/cli/**",
@@ -152,11 +109,6 @@ FAST_PATHS: dict[str, list[str]] = {
                       "edge/package.json", "edge/package-lock.json", "scripts/run-macos-browser-fixture.sh",
                       "scripts/test-browser-storage.py", "scripts/ci/run-macos-fixture.sh",
                       "dist/macos/Info.plist", ".github/workflows/macos.yml"],
-    # The Rust is the same code the Linux suites test (no Android cfg), so a pull
-    # request builds the APK for the app, the FFI crate and dependency changes.
-    "android": CARGO + ["apps/android/**", "scripts/android/**", "crates/mobile/**", "crates/mobile-bindgen/**",
-                        "apps/ios/Zeron/Fonts/**", "apps/ios/Zeron/Assets.xcassets/**",
-                        ".github/workflows/android.yml"],
 }
 
 # Fast tier: jobs and steps of a selected suite that only run for their own files.
@@ -167,10 +119,6 @@ JOB_PATHS: dict[tuple[str, str], list[str]] = {
     ("windows", "app"): CARGO + ["apps/zeron/**", "dist/windows/**", "scripts/test-windows-*.ps1",
                                  "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
                                  ".github/workflows/windows.yml", "crates/update/**"],
-    # The simulator unit tests (and the bindings they link): the app, the FFI
-    # crate and the client it wraps; ios-core tests the rest of the mobile core.
-    ("ios", "ios-tests"): CARGO + ["apps/ios/**", "scripts/ios/**", "crates/mobile/**", "crates/mobile-bindgen/**",
-                                   "crates/client/**", ".github/workflows/macos.yml"],
 }
 # Fast tier: optional steps (flags passed to the suite workflow, and part of its fingerprint).
 FLAG_PATHS: dict[tuple[str, str], list[str]] = {
@@ -210,7 +158,7 @@ PLATFORM_CODE = {
 COMMENT = re.compile(r"^\s*(?://|/\*|\*)")
 
 
-PLATFORM_FAST_SUITES = ("voice", "windows", "macos", "android")
+PLATFORM_FAST_SUITES = ("windows", "macos")
 
 
 def changed_code(patch: str) -> str:
@@ -289,10 +237,6 @@ def select(files: list[dict] | None, tier: str, mobile: list[str] | None,
         return {suite: True for suite in SUITE_JOBS}
 
     broad = dict(BROAD)
-    if mobile is not None:
-        broad["ios"] = CARGO + mobile + ["apps/ios/**", "scripts/ios/**", ".github/workflows/macos.yml"]
-    if zgx is not None:
-        broad["zgx"] = CARGO + ZGX_PATHS + zgx
     suites = {suite: any(matches(p, broad[suite]) for p in paths) for suite in SUITE_JOBS}
     suites["frame_source"] = suites["frame_source"] or gpui_moved(files)
     if tier == "fast":
@@ -337,8 +281,6 @@ def reservation(running: dict[str, list[tuple[str, str]]], event: str, ref: str)
     for jobs in running.values():
         for _, runner in jobs:
             counts[runner] += 1
-    if running.get("android") and event == "push" and ref == "refs/heads/main":
-        counts["linux"] += 1  # android.yml publish
     return counts
 
 
@@ -448,17 +390,8 @@ def main() -> int:
         print(f"::warning::could not list changed files ({error}); running every suite")
         files = None
 
-    mobile = None
-    try:
-        mobile = [d + "/**" for d in sorted(reuse.Workspace(".").closure(["zeron-mobile"]))] + ["crates/mobile-bindgen/**"]
-    except (OSError, ValueError, KeyError) as error:
-        print(f"::warning::could not read the workspace ({error}); using the static mobile core list")
-    zgx = None
-    try:
-        zgx = [d + "/**" for d in sorted(reuse.Workspace(".").closure(reuse.SUITE_PACKAGES["zgx"]))]
-    except (OSError, ValueError, KeyError) as error:
-        print(f"::warning::could not read the workspace ({error}); using the static zgx crate list")
-    selected = plan(files, tier, mobile, nightly, zgx)
+    # Aurea has no mobile apps or zgx suite: nothing to widen.
+    selected = plan(files, tier, None, nightly, None)
     off, flags = gated(files, tier, selected, nightly)
     # What a job does depends on its gated jobs and flags too: they are part of the fingerprint.
     variants = {suite: " ".join(f"-{j}" for j in off.get(suite, [])) + " " + " ".join(flags.get(suite, []))
@@ -524,7 +457,7 @@ def main() -> int:
         lines += ["", "Windows, macOS and Android run on pull requests only when the change looks "
                   "platform specific. Add the `ci:full` label and re-run for everything."]
     if not nightly:
-        lines += ["", "Nightly only (or with `ci:full`): voice and the Linux native browser fixture."]
+        lines += ["", "Nightly only (or with `ci:full`): the Linux native browser fixture."]
     files_read = {path for paths in extra.values() for path in paths}
     if files_read:
         lines += ["", "Files outside their packages that Rust suites read (part of their fingerprints): "

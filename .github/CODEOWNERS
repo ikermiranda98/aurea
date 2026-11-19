@@ -18,4 +18,3 @@
 /scripts/ios/ @SinaKhalili @wingleeio
 
 # Reads the Android release keystore (ZERON_ANDROID_KEYSTORE*).
-/apps/android/app/build.gradle.kts @SinaKhalili @wingleeio

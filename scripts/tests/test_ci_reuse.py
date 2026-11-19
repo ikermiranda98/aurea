@@ -187,10 +187,6 @@ class RealWorkspaceTests(unittest.TestCase):
         self.assertNotIn("crates/ui", core)
         self.assertIn("crates/ui", ws.closure(reuse.SUITE_PACKAGES["windows"]))
 
-    def test_mobile_reads_the_ui_icons_and_fonts(self):
-        _, extra, _ = reuse.suite_keys(["ios"], str(ROOT))
-        self.assertIn("crates/ui/src/file-icons.json", extra["ios"])
-
     def test_every_rust_suite_has_packages_that_exist(self):
         ws = reuse.Workspace(str(ROOT))
         for suite, packages in reuse.SUITE_PACKAGES.items():
@@ -215,22 +211,21 @@ class LookupTests(unittest.TestCase):
 
 class ReusePlanTests(unittest.TestCase):
     def test_whole_suites(self):
-        suites = {s: s in ("core", "ios") for s in plan.SUITE_JOBS}
-        skip = plan.reused_jobs(suites, {"core": {"core-tests"}, "ios": {"ios-core"}})
-        self.assertEqual(skip, {"core": ["core-tests"]})  # iOS: the simulator tests never passed
+        suites = {s: s in ("core", "windows") for s in plan.SUITE_JOBS}
+        skip = plan.reused_jobs(suites, {"core": {"core-tests"}, "windows": {"tests"}})
+        self.assertEqual(skip, {"core": ["core-tests"], "windows": ["tests"]})
         running = plan.jobs_to_run(suites, skip)
         self.assertEqual(running["core"], [])
-        self.assertEqual([j for j, _ in running["ios"]], ["ios-core", "ios-tests"])
+        self.assertEqual([j for j, _ in running["windows"]], ["app"])
 
     def test_single_jobs_of_splittable_suites(self):
-        suites = {s: s in ("windows", "voice") for s in plan.SUITE_JOBS}
-        passed = {"windows": {"tests"}, "voice": {"offline-linux"}}
+        suites = {s: s == "windows" for s in plan.SUITE_JOBS}
+        passed = {"windows": {"tests"}}
         skip = plan.reused_jobs(suites, passed)
         running = plan.jobs_to_run(suites, skip)
         self.assertEqual(running["windows"], [("app", "windows")])
-        self.assertEqual(running["voice"], [("windows-runtime", "windows")])
         counts = plan.reservation(running, "pull_request", "refs/pull/1/merge")
-        self.assertEqual(counts, {"linux": 1, "windows": 2, "macos": 0})
+        self.assertEqual(counts, {"linux": 1, "windows": 1, "macos": 0})
 
     def test_unselected_suites_are_not_reused(self):
         suites = {s: False for s in plan.SUITE_JOBS}
