@@ -62,7 +62,6 @@ SUITE_INPUTS: dict[str, list[str]] = {
     "core": [".github/workflows/ui-tests.yml", "scripts/ci/test-core.sh"] + LINUX_SETUP + NEXTEST,
     "ui": [".github/workflows/ui-tests.yml", "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py"]
           + LINUX_SETUP + NEXTEST,
-    "edge": [".github/workflows/preview-tests.yml", "edge/**"],
     "installer": [".github/workflows/linux-installer.yml", "edge/src/install.sh", "scripts/package-linux.sh",
                   "scripts/test-linux-desktop-entry.sh", "dist/zeron.desktop", "dist/zeron.png",
                   "scripts/ci/apt-install.sh"],

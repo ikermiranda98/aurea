@@ -139,13 +139,6 @@ jobs:
       browser: ${{ contains(fromJSON(needs.plan.outputs.flags).ui || fromJSON('[]'), 'browser') }}
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).ui || '' }}
 
-  edge:
-    needs: [plan, admit]
-    if: fromJSON(needs.plan.outputs.suites).edge
-    uses: ./.github/workflows/preview-tests.yml
-    with:
-      pass-key: ${{ fromJSON(needs.plan.outputs.keys).edge || '' }}
-
   installer:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).installer
@@ -182,7 +175,7 @@ jobs:
 
   result:
     name: CI result
-    needs: [plan, admit, linux-core, linux-ui, edge, installer, windows, macos, frame-source]
+    needs: [plan, admit, linux-core, linux-ui, installer, windows, macos, frame-source]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

@@ -55,7 +55,6 @@ from reuse import matches  # noqa: E402
 SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
     "core": [("core-tests", "linux")],  # ui-tests.yml
     "ui": [("ui-tests", "linux")],  # ui-tests.yml (UI + Linux browser)
-    "edge": [("edge", "linux")],  # preview-tests.yml
     "installer": [("desktop-entry", "linux")],  # linux-installer.yml
     "windows": [("tests", "windows"), ("app", "windows")],  # windows.yml
     "macos": [("macos-native", "macos")],  # macos.yml
@@ -84,7 +83,6 @@ BROAD: dict[str, list[str]] = {
     "ui": CARGO + ["crates/**", "scripts/ci/**", ".github/actions/linux-ci/**",
                    "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py",
                    ".github/workflows/ui-tests.yml"],
-    "edge": ["edge/**", ".github/workflows/preview-tests.yml"],
     "installer": ["edge/src/install.sh", "scripts/package-linux.sh", "scripts/test-linux-desktop-entry.sh",
                   "scripts/ci/apt-install.sh", "dist/zeron.desktop", "dist/zeron.png",
                   ".github/workflows/linux-installer.yml"],

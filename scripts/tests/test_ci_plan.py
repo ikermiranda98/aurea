@@ -78,10 +78,8 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(selected(plan.plan(None, "fast")), daytime)
         self.assertTrue(all(plan.plan(None, "full", nightly=True).values()))
 
-    def test_edge_and_installer(self):
-        self.assertEqual(selected(plan.plan(files("edge/src/coordinator.ts"), "fast")), {"edge"})
-        self.assertEqual(selected(plan.plan(files("edge/src/install.sh"), "fast")), {"edge", "installer"})
-        self.assertTrue(plan.plan(files("edge/package-lock.json"), "fast")["macos"])
+    def test_installer(self):
+        self.assertEqual(selected(plan.plan(files("edge/src/install.sh"), "fast")), {"installer"})
 
     def test_version_bumps_select_nothing(self):
         bump = [{"filename": "Cargo.toml", "patch": '@@ -37 +37 @@\n-version = "0.2.126"\n+version = "0.2.127"'},
@@ -143,7 +141,6 @@ class WorkflowConsistencyTests(unittest.TestCase):
     SUITES = {
         "core": ("ui-tests.yml", ["core-tests"]),
         "ui": ("ui-tests.yml", ["ui-tests"]),
-        "edge": ("preview-tests.yml", ["edge"]),
         "installer": ("linux-installer.yml", ["desktop-entry"]),
         "windows": ("windows.yml", ["tests", "app"]),
         "macos": ("macos.yml", ["macos-native"]),

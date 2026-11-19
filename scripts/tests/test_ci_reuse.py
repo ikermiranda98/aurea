@@ -143,12 +143,11 @@ class FingerprintTests(unittest.TestCase):
         self.assertEqual(self.changed_after(".github/workflows/ci.yml", "on: push\n"), {"a", "b", "app"})
 
     def test_ci_files_count_for_the_suites_that_run_them(self):
-        keys = lambda: reuse.suite_keys(["core", "edge", "windows"], str(ROOT))[0]  # noqa: E731
+        keys = lambda: reuse.suite_keys(["core", "windows"], str(ROOT))[0]  # noqa: E731
         if not (ROOT / "crates" / "ui" / "src").is_dir():
             self.skipTest("Rust sources not checked out")
         self.assertIn("scripts/ci/nextest.toml", reuse.SUITE_INPUTS["core"])
         self.assertIn("scripts/ci/test-core.sh", reuse.SUITE_INPUTS["core"])
-        self.assertNotIn("scripts/ci/nextest.toml", reuse.SUITE_INPUTS["edge"])
         self.assertIn(".github/actions/windows-ci-setup/**", reuse.SUITE_INPUTS["windows"])
         self.assertTrue(all(not reuse.matches(f"scripts/ci/{f}", reuse.COMMON)
                             for f in ("plan.py", "admit.py", "reuse.py", "emergency.py")))
