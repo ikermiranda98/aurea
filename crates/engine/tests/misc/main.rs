@@ -2,7 +2,6 @@
 //! linked against the whole crate, so a handful of tests each cost more to
 //! link than to run.
 
-mod pi_resume;
 mod osc7501;
 // The fake Claude and Codex CLIs are POSIX shell scripts (`fake-*.sh`, as in the
 // harness crate's own suites); Windows cannot spawn them.

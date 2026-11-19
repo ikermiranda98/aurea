@@ -7253,7 +7253,7 @@ mod tests {
         let config = RuntimeConfig::new(
             HarnessId::Grok,
             &initial,
-            Arc::new(zeron_harness::AcpHarness::grok()),
+            Arc::new(zeron_harness::OpencodeHarness::new()),
         );
 
         let mut follow_up = initial.clone();
@@ -7274,7 +7274,7 @@ mod tests {
         let config = RuntimeConfig::new(
             HarnessId::Grok,
             &spelled,
-            Arc::new(zeron_harness::AcpHarness::grok()),
+            Arc::new(zeron_harness::OpencodeHarness::new()),
         );
         follow_up
             .model_options

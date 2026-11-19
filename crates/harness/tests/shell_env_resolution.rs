@@ -9,7 +9,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use zeron_harness::{AcpHarness, Harness as _};
+use zeron_harness::Harness as _;
 
 fn write_executable(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap();
@@ -70,16 +70,4 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         zeron_harness::ClaudeHarness::new().installed(),
         "claude resolves via login-shell PATH"
     );
-    let devin = AcpHarness::devin()
-        .launch_program()
-        .expect("devin resolves via login-shell PATH");
-    assert_eq!(devin, shell_bin.join("devin"), "{devin:?}");
-    let hermes = AcpHarness::hermes()
-        .launch_program()
-        .expect("hermes resolves via login-shell PATH");
-    assert_eq!(hermes, shell_bin.join("hermes"), "{hermes:?}");
-    let pi = zeron_harness::PiHarness::new()
-        .resolve_executable()
-        .expect("pi resolves via login-shell PATH");
-    assert_eq!(pi, shell_bin.join("pi"), "{pi:?}");
 }

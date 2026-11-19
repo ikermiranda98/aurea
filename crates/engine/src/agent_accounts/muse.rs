@@ -24,7 +24,52 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use zeron_harness::muse::account as msp;
+/// Muse's harness is gone from Aurea: its account calls refuse, so a kept
+/// account can be forgotten but no new sign-in starts.
+mod msp {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use zeron_harness::HarnessError;
+
+    fn gone() -> HarnessError {
+        HarnessError::NotInstalled("Muse Code is not available in Aurea".into())
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct MuseAccount {
+        pub state: String,
+        pub label: Option<String>,
+    }
+
+    impl MuseAccount {
+        pub fn signed_in(&self) -> bool {
+            self.state != "loggedOut"
+        }
+    }
+
+    pub struct DeviceLogin {
+        pub verification_url: String,
+        pub user_code: String,
+    }
+
+    impl DeviceLogin {
+        pub async fn finish(self) -> Result<MuseAccount, HarnessError> {
+            Err(gone())
+        }
+    }
+
+    pub async fn start_device_login(
+        _exe: &Path,
+        _env: &BTreeMap<String, String>,
+    ) -> Result<DeviceLogin, HarnessError> {
+        Err(gone())
+    }
+
+    pub async fn logout(_exe: &Path, _env: &BTreeMap<String, String>) -> Result<MuseAccount, HarnessError> {
+        Err(gone())
+    }
+}
 use zeron_proto::{AgentLoginMode, AgentLoginStart, AgentUsageWindow, HarnessId};
 
 use super::{
@@ -111,9 +156,7 @@ impl AgentAccounts {
         if let Some(path) = lock(&self.inner.cli_overrides).get(&HarnessId::Muse) {
             return Ok(path.clone());
         }
-        zeron_harness::MuseHarness::new()
-            .resolve_executable()
-            .map_err(muse_error)
+        Err(muse_error("not available in Aurea"))
     }
 
     fn muse_home(&self, name: &str) -> Result<PathBuf, EngineError> {
@@ -204,7 +247,7 @@ impl AgentAccounts {
         let handle = tokio::spawn(async move {
             let outcome = match login.finish().await {
                 Ok(account) => this.adopt_muse_login(&pending, account).await,
-                Err(reason) => Err(EngineError::Other(reason)),
+                Err(reason) => Err(muse_error(reason)),
             };
             match &outcome {
                 Ok(()) => tracing::info!(%pending, "Muse sign-in adopted"),

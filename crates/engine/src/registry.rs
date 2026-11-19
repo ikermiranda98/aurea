@@ -743,31 +743,6 @@ impl HarnessRegistry {
         }
     }
 
-    /// Registers an agent added from the ACP registry (or replaces its slot,
-    /// once updated): the generic ACP harness, launched from its record.
-    pub fn register_registry_agent(&self, record: &zeron_harness::acp_registry::Record) {
-        let Some(agent) = zeron_proto::RegistryAgent::new(&record.id) else {
-            return;
-        };
-        let name = record.name.clone();
-        let harness = zeron_harness::AcpHarness::registry(agent, &name);
-        let descriptor = HarnessDescriptor {
-            icon: record.icon_svg.clone(),
-            ..describe(&harness)
-        };
-        let id = descriptor.id;
-        let slot = Slot::Lazy {
-            descriptor,
-            installed: Box::new(move || zeron_harness::acp_registry::installed(agent)),
-            factory: Box::new(move || {
-                Ok(Arc::new(zeron_harness::AcpHarness::registry(agent, &name)) as Arc<dyn Harness>)
-            }),
-        };
-        if self.slots().insert(id, slot).is_none() {
-            self.order().push(id);
-        }
-    }
-
     /// Forgets a registry agent removed from this device.
     pub fn unregister(&self, id: HarnessId) {
         if id.registry().is_none() {
@@ -832,14 +807,6 @@ impl HarnessRegistry {
                 };
                 descriptor.enabled = Some(enabled.contains(id));
                 descriptor.can_install = zeron_harness::install::can_install(*id);
-                // An agent from the ACP registry keeps its icon in its record:
-                // a slot resolved since (its first run, a model listing) is
-                // described by its harness, which carries none.
-                if descriptor.icon.is_none()
-                    && let Some(agent) = id.registry()
-                {
-                    descriptor.icon = zeron_harness::acp_registry::record(agent).and_then(|r| r.icon_svg);
-                }
                 Some(descriptor)
             })
             .collect()
@@ -926,184 +893,7 @@ fn full_registry() -> HarnessRegistry {
             },
         ],
     }));
-    registry.register_lazy(
-        HarnessDescriptor {
-            icon: None,
-            id: HarnessId::ClaudeCode,
-            name: "Claude Code".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::StepBoundary,
-            // Must mirror ClaudeHarness exactly — the descriptor-stability
-            // rule (see the codex test below).
-            reasoning_levels: vec![
-                ReasoningLevel::Low,
-                ReasoningLevel::Medium,
-                ReasoningLevel::High,
-                ReasoningLevel::XHigh,
-                ReasoningLevel::Max,
-            ],
-            installed: true,
-            can_install: false,
-            enabled: None,
-            access_modes: AccessMode::WITH_AUTO.to_vec(),
-            supports_plan: true,
-        },
-        Box::new(|| zeron_harness::ClaudeHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::ClaudeHarness::new()) as Arc<dyn Harness>)),
-    );
-    // Codex, same lazy pattern: the static descriptor mirrors AcpHarness::codex()
-    // exactly (`describe()` after the first resolve must not change the
-    // catalog entry) — "Codex" per the original HARNESS_LABEL, StepBoundary
-    // steering via native `turn/steer`, and the unified reasoning ladder from
-    // zeron_harness::codex::catalog. CLI discovery only happens when a
-    // run/model call actually resolves the slot.
-    registry.register_lazy(
-        HarnessDescriptor {
-            icon: None,
-            id: HarnessId::Codex,
-            name: "Codex".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::StepBoundary,
-            reasoning_levels: vec![
-                ReasoningLevel::Minimal,
-                ReasoningLevel::Low,
-                ReasoningLevel::Medium,
-                ReasoningLevel::High,
-                ReasoningLevel::XHigh,
-                ReasoningLevel::Max,
-                ReasoningLevel::Ultra,
-            ],
-            installed: true,
-            can_install: false,
-            enabled: None,
-            access_modes: AccessMode::WITH_AUTO.to_vec(),
-            supports_plan: true,
-        },
-        Box::new(|| zeron_harness::CodexHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::CodexHarness::new()) as Arc<dyn Harness>)),
-    );
-    // Cursor via the pinned @cursor/sdk shim (NOT ACP — that surface strips
-    // subagent transcripts), same lazy pattern: the static descriptor mirrors
-    // CursorHarness exactly. Native step-boundary steering; no effort ladder.
-    registry.register_lazy(
-        HarnessDescriptor {
-            icon: None,
-            id: HarnessId::Cursor,
-            name: "Cursor".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::StepBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            enabled: None,
-            access_modes: vec![AccessMode::FullAccess],
-            supports_plan: false,
-        },
-        Box::new(|| zeron_harness::CursorHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::CursorHarness::new()) as Arc<dyn Harness>)),
-    );
-    // Devin over ACP (`devin acp`), same lazy pattern: the static descriptor
-    // mirrors AcpHarness::devin() exactly. No steering extension (turn
-    // boundaries) and no effort ladder — Devin bakes effort into the
-    // advertised model ids instead of a `thought_level` option.
-    registry.register_lazy(
-        HarnessDescriptor {
-            icon: None,
-            id: HarnessId::Devin,
-            name: "Devin".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            enabled: None,
-            access_modes: vec![AccessMode::FullAccess],
-            supports_plan: false,
-        },
-        Box::new(|| zeron_harness::AcpHarness::devin().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::devin()) as Arc<dyn Harness>)),
-    );
-    // Grok Build over ACP, same lazy pattern: the static descriptor mirrors
-    // AcpHarness::grok() exactly. No `_session/steering` extension yet, so
-    // steers deliver at turn boundaries; the effort ladder applies per
-    // session via the `thought_level` config option.
-    registry.register_lazy(
-        HarnessDescriptor {
-            icon: None,
-            id: HarnessId::Grok,
-            name: "Grok".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: vec![
-                ReasoningLevel::Low,
-                ReasoningLevel::Medium,
-                ReasoningLevel::High,
-            ],
-            installed: true,
-            can_install: false,
-            enabled: None,
-            access_modes: vec![AccessMode::FullAccess],
-            supports_plan: false,
-        },
-        Box::new(|| zeron_harness::AcpHarness::grok().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::grok()) as Arc<dyn Harness>)),
-    );
-    // Hermes Agent over ACP (`hermes acp`), same lazy pattern: the static
-    // descriptor mirrors AcpHarness::hermes() exactly. No steering extension
-    // (turn boundaries) and no effort ladder — Hermes exposes no effort
-    // config over ACP today (hybrid reasoning is model-internal).
-    registry.register_lazy(
-        HarnessDescriptor {
-            icon: None,
-            id: HarnessId::Hermes,
-            name: "Hermes".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            enabled: None,
-            access_modes: vec![AccessMode::FullAccess],
-            supports_plan: false,
-        },
-        Box::new(|| zeron_harness::AcpHarness::hermes().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::hermes()) as Arc<dyn Harness>)),
-    );
-    registry.register_lazy(
-        HarnessDescriptor {
-            icon: None,
-            id: HarnessId::Fx,
-            name: "fx".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            enabled: None,
-            access_modes: vec![AccessMode::Supervised, AccessMode::FullAccess],
-            supports_plan: false,
-        },
-        Box::new(|| zeron_harness::AcpHarness::fx().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::fx()) as Arc<dyn Harness>)),
-    );
-    // Native Pi RPC. Thinking levels are discovered per model.
-    registry.register_lazy(
-        HarnessDescriptor {
-            icon: None,
-            id: HarnessId::Pi,
-            name: "Pi".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::StepBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            enabled: None,
-            access_modes: vec![AccessMode::FullAccess],
-            supports_plan: false,
-        },
-        Box::new(|| zeron_harness::PiHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::PiHarness::new()) as Arc<dyn Harness>)),
-    );
+    // Aurea registers one real agent: opencode.
     // opencode over its NATIVE HTTP/SSE protocol (the one the opencode
     // desktop app speaks — `opencode serve` + the /global/event bus), same
     // lazy pattern: the static descriptor mirrors OpencodeHarness exactly.
@@ -1131,46 +921,6 @@ fn full_registry() -> HarnessRegistry {
         },
         Box::new(|| zeron_harness::OpencodeHarness::new().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::OpencodeHarness::new()) as Arc<dyn Harness>)),
-    );
-    // antigravity over acp (google's agy_acp_server), same lazy pattern: the
-    // static descriptor mirrors AcpHarness::antigravity() exactly. No steering
-    // extension (turn boundaries), and effort is baked into the model ids, so
-    // the ladder lives on each model rather than the harness.
-    registry.register_lazy(
-        HarnessDescriptor {
-            icon: None,
-            id: HarnessId::Antigravity,
-            name: "Antigravity".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            enabled: None,
-            access_modes: AccessMode::ALL.to_vec(),
-            supports_plan: false,
-        },
-        Box::new(|| zeron_harness::AcpHarness::antigravity().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::antigravity()) as Arc<dyn Harness>)),
-    );
-    // Muse Code over its native session protocol (`muse serve`), same lazy
-    // pattern: the static descriptor mirrors MuseHarness exactly.
-    registry.register_lazy(
-        HarnessDescriptor {
-            icon: None,
-            id: HarnessId::Muse,
-            name: "Muse Code".into(),
-            supports_steering: true,
-            steering_mode: SteeringMode::StepBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            enabled: None,
-            access_modes: vec![AccessMode::Supervised, AccessMode::FullAccess],
-            supports_plan: false,
-        },
-        Box::new(|| zeron_harness::MuseHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::MuseHarness::new()) as Arc<dyn Harness>)),
     );
     registry
 }

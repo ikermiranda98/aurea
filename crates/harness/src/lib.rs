@@ -480,7 +480,6 @@ pub trait Harness: Send + Sync {
 }
 
 pub mod acp;
-pub mod acp_registry;
 pub(crate) mod adapter_install;
 pub mod approval;
 pub mod archive_install;
@@ -489,24 +488,21 @@ pub use background::{MarkOutcome, MarkRefused, OutputSource};
 pub mod bounded_file;
 mod catalog;
 mod catalog_failure;
-pub(crate) mod code_signature;
+
 /// Secret redaction, shared with the doc fold (command output tails).
 pub use zeron_proto::redact;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
 pub mod codex;
 pub mod agent_ports;
-pub mod cursor;
 pub(crate) mod executable;
 pub mod install;
 pub(crate) mod jsonl_tail;
 pub(crate) mod jsonrpc;
 pub(crate) mod lossy_lines;
 pub mod mock;
-pub mod muse;
 mod model_context;
 pub mod opencode;
-pub mod pi;
 pub mod process;
 mod scratch;
 pub mod shell_env;
@@ -804,13 +800,9 @@ pub(crate) fn crash_message(
     }
 }
 
-pub use acp::AcpHarness;
 pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
-pub use cursor::CursorHarness;
 pub use opencode::OpencodeHarness;
-pub use muse::MuseHarness;
-pub use pi::PiHarness;
 
 // ---------------------------------------------------------------------------
 // Child lifecycle (shared by the codex and ACP harnesses)

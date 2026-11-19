@@ -259,29 +259,6 @@ fn key_entry(harness: HarnessId, key: &str) -> serde_json::Value {
     }
 }
 
-/// A string overwritten when dropped (the key's copy on its way to stdin).
-struct Zeroized(String);
-
-impl Drop for Zeroized {
-    fn drop(&mut self) {
-        // SAFETY: zeros are valid UTF-8; the bytes are dropped right after.
-        unsafe { self.0.as_bytes_mut().fill(0) };
-    }
-}
-
-fn zeroize_on_drop(text: String) -> Zeroized {
-    Zeroized(text)
-}
-
-/// Every occurrence of `key` in `text`, blanked — for the agent's own
-/// words, which never name a key, but are never trusted to.
-fn without(text: &str, key: &str) -> String {
-    if key.is_empty() {
-        return text.to_string();
-    }
-    text.replace(key, "[key]")
-}
-
 impl AgentAccounts {
     /// Add `key` for `provider` of `harness` (an `api_key_options` pair),
     /// checked with the provider first. Pi / OpenCode: written to the
@@ -331,9 +308,8 @@ impl AgentAccounts {
         self.check_api_key(provider, key).await?;
         match harness {
             HarnessId::Hermes => {
-                self.add_hermes_key(provider, key, name.as_deref()).await?;
-                let _ops = self.inner.ops.lock().await;
-                self.list_locked(false).await
+                let _ = (provider, key, name);
+                Err(EngineError::Other("Hermes isn't available in Aurea".into()))
             }
             HarnessId::Pi | HarnessId::Opencode => {
                 let entry = key_entry(harness, key);
@@ -404,72 +380,6 @@ impl AgentAccounts {
             429 => format!("{vendor} is rate limiting right now — try the key again in a minute."),
             _ => format!("{vendor} couldn't check the key ({status}) — try again."),
         }))
-    }
-
-    /// `hermes auth add <provider> --type api-key`, the key written to its
-    /// stdin (never argv, never its environment), in a session of its own
-    /// so `getpass` has no terminal to prompt on and reads stdin instead.
-    async fn add_hermes_key(
-        &self,
-        provider: &str,
-        key: &str,
-        name: Option<&str>,
-    ) -> Result<(), EngineError> {
-        // (Its name is no secret — checked to hold none of the key — so it
-        // may ride on the command line, as Hermes takes it.)
-        // (`--label=…` in one argument: a name starting with `-` is never
-        // read as a flag.)
-        let label = name.map(|name| format!("--label={name}"));
-        let mut args = vec!["auth", "add", provider, "--type", "api-key"];
-        if let Some(label) = &label {
-            args.push(label);
-        }
-        let mut command = self.cli_command(HarnessId::Hermes, &args).await?;
-        // A sign-in abandoned (the engine stopping, the wait timing out)
-        // takes Hermes with it.
-        command.kill_on_drop(true);
-        command
-            .env("HERMES_HOME", &self.inner.config.hermes_home)
-            .stdin(zeron_harness::process::Stdio::piped())
-            .stdout(zeron_harness::process::Stdio::piped())
-            .stderr(zeron_harness::process::Stdio::piped());
-        #[cfg(unix)]
-        // SAFETY: `setsid` is async-signal-safe; nothing else runs between
-        // fork and exec.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|e| EngineError::Other(format!("Couldn't run hermes: {e}")))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt as _;
-            let line = zeroize_on_drop(format!("{key}\n"));
-            let _ = stdin.write_all(line.0.as_bytes()).await;
-            let _ = stdin.shutdown().await;
-        }
-        let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
-            .await
-            .map_err(|_| EngineError::Other("hermes didn't finish adding the key.".into()))?
-            .map_err(|e| EngineError::Other(format!("hermes failed: {e}")))?;
-        if output.status.success() {
-            return Ok(());
-        }
-        let said = String::from_utf8_lossy(&output.stderr);
-        let said = without(said.trim(), key);
-        let last = said
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty() && !l.contains("GetPassWarning"))
-            .unwrap_or("hermes refused the key");
-        Err(EngineError::Other(zeron_harness::redact::redact_output(
-            &without(last.trim(), key),
-        )))
     }
 
     /// OpenCode 2.x: its credentials live in `opencode.db`'s `credential`

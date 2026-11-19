@@ -5,7 +5,7 @@ use futures::StreamExt;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 use zeron_harness::{
-    AcpHarness, CancellationToken, ClaudeHarness, CodexHarness, CursorHarness, Harness,
+    CancellationToken, ClaudeHarness, CodexHarness, Harness,
     OpencodeHarness, RunControls, SteerMessage,
 };
 use zeron_proto::{AgentEvent, DoneStatus, RunRequest, SandboxLevel};
@@ -18,13 +18,7 @@ async fn main() -> anyhow::Result<()> {
     let harness: Arc<dyn Harness> = match name.as_str() {
         "claude" => Arc::new(ClaudeHarness::new()),
         "codex" => Arc::new(CodexHarness::new()),
-        "cursor" => Arc::new(CursorHarness::new()),
         "opencode" => Arc::new(OpencodeHarness::new()),
-        "grok" => Arc::new(AcpHarness::grok()),
-        "devin" => Arc::new(AcpHarness::devin()),
-        "hermes" => Arc::new(AcpHarness::hermes()),
-        "pi" => Arc::new(zeron_harness::PiHarness::new()),
-        "antigravity" => Arc::new(AcpHarness::antigravity()),
         _ => anyhow::bail!("unknown harness"),
     };
     if model.as_deref() == Some("--models") {

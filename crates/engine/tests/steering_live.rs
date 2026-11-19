@@ -4,7 +4,7 @@ use std::{sync::Arc, time::Duration};
 use zeron_doc::{MessageRole, SessionCommandPayload};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{
-    AcpHarness, ClaudeHarness, CodexHarness, CursorHarness, Harness, OpencodeHarness,
+    ClaudeHarness, CodexHarness, Harness, OpencodeHarness,
 };
 use zeron_proto::{ChatConfig, RunRequest, SandboxLevel, SessionStatus};
 
@@ -42,13 +42,7 @@ async fn rapid_steers_preserve_children_context_and_held_queue() {
     let harness: Arc<dyn Harness> = match name.as_str() {
         "claude" => Arc::new(ClaudeHarness::new()),
         "codex" => Arc::new(CodexHarness::new()),
-        "cursor" => Arc::new(CursorHarness::new()),
         "opencode" => Arc::new(OpencodeHarness::new()),
-        "grok" => Arc::new(AcpHarness::grok()),
-        "devin" => Arc::new(AcpHarness::devin()),
-        "hermes" => Arc::new(AcpHarness::hermes()),
-        "pi" => Arc::new(zeron_harness::PiHarness::new()),
-        "antigravity" => Arc::new(AcpHarness::antigravity()),
         _ => panic!("unknown harness"),
     };
     let dir = tempfile::tempdir().unwrap();

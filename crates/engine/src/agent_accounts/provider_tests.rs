@@ -1396,60 +1396,6 @@ async fn a_failed_cli_sign_in_reports_the_clis_last_words() {
 // ── output scanning + reasons ───────────────────────────────────────────────
 
 #[test]
-fn device_codes_and_urls_are_found_in_coloured_cli_output() {
-    let hermes = "  1. Open: \u{1b}[94mhttps://portal.nousresearch.com/device?code=AB12-CD34\u{1b}[0m\n  2. If prompted, enter code: AB12-CD34\n";
-    assert_eq!(scan_device_code(hermes).as_deref(), Some("AB12-CD34"));
-    assert_eq!(
-        scan_https_url(hermes, &["nousresearch.com"]).as_deref(),
-        Some("https://portal.nousresearch.com/device?code=AB12-CD34")
-    );
-    let codex_style = "2. Enter this code:\n     \u{1b}[94mQRST-5678\u{1b}[0m\n";
-    assert_eq!(scan_device_code(codex_style).as_deref(), Some("QRST-5678"));
-    // A loopback login's output has no code; foreign hosts don't match.
-    assert_eq!(
-        scan_device_code("open https://auth.openai.com/oauth?x in your browser"),
-        None
-    );
-    assert_eq!(
-        scan_device_code("error code: 503 Service Unavailable"),
-        None
-    );
-    assert_eq!(
-        scan_https_url("see https://evil.example/x.ai", &["x.ai"]),
-        None
-    );
-    // Grok and Hermes pages: vendor host on a label boundary, https, no
-    // userinfo and no explicit port; a later good url is still found.
-    for output in [
-        "see https://evilx.ai/device",
-        "see https://x.ai.evil.example/device",
-        "see https://auth.x.ai@evil.example/device",
-        "see https://user@auth.x.ai/device",
-        "see https://auth.x.ai:8443/device",
-        "see http://auth.x.ai/device",
-    ] {
-        assert_eq!(scan_grok_url(output), None, "{output}");
-    }
-    assert_eq!(
-        scan_grok_url("see https://evil.example/ then https://accounts.x.ai/device?c=1.")
-            .as_deref(),
-        Some("https://accounts.x.ai/device?c=1")
-    );
-    assert_eq!(
-        scan_hermes_url("go to https://nousresearch.com.evil.example/device"),
-        None
-    );
-    assert_eq!(
-        scan_hermes_url("go to https://portal.nousresearch.com/device").as_deref(),
-        Some("https://portal.nousresearch.com/device")
-    );
-    assert_eq!(
-        strip_ansi("\u{1b}]8;;https://a\u{7}link\u{1b}]8;;\u{7} \u{1b}[1mbold\u{1b}[0m"),
-        "link bold"
-    );
-}
-
-#[test]
 fn usage_reasons_name_each_providers_vendor_and_cli() {
     let entry = UsageEntry::default();
     let reason = |harness, key: Option<&str>, active, error: ProbeError| {
@@ -1602,57 +1548,6 @@ fn credential_defined_endpoints_must_be_the_vendors_own_https_hosts() {
     assert_eq!(
         copilot_api_base(&serde_json::json!({}), "https://api.github.com", false).as_deref(),
         Some("https://api.github.com")
-    );
-}
-
-/// Devin's sign-in page is opened on the requesting device: only a
-/// Devin / Windsurf / Codeium https page of the expected shape qualifies.
-#[test]
-fn devin_sign_in_urls_must_be_devins_own_pages() {
-    for url in [
-        "https://app.devin.ai/auth/cli/continue?redirect_uri=http%3A%2F%2F127.0.0.1%3A45678%2Fcallback&state=s",
-        "https://app.devin.ai/auth/cli/continue?state=s",
-        "https://windsurf.com/editor/signin?response_type=token&redirect_uri=http://localhost:1455/callback",
-        "https://www.codeium.com/editor/signin",
-        "https://devin.ai/auth/cli/?redirect_uri=http://[::1]:1455/cb",
-    ] {
-        assert!(devin_login_url(url), "{url}");
-    }
-    for url in [
-        // The review's case: any https host used to pass.
-        "https://evil.example/auth/cli/?redirect_uri=http://localhost:1455/callback",
-        "https://evildevin.ai/auth/cli/continue",
-        "https://app.devin.ai.evil.example/auth/cli/continue",
-        "https://app.devin.ai@evil.example/auth/cli/continue",
-        "https://user:pw@app.devin.ai/auth/cli/continue",
-        "https://app.devin.ai:8443/auth/cli/continue",
-        "http://app.devin.ai/auth/cli/continue",
-        "https://1.2.3.4/auth/cli/continue",
-        // Wrong page shapes.
-        "https://app.devin.ai/?redirect_uri=http://localhost:1455/callback",
-        "https://app.devin.ai/settings",
-        "https://app.devin.ai/editor/signinx",
-        "https://app.devin.ai/x/auth/cli/continue",
-        // A redirect that isn't a loopback http callback.
-        "https://app.devin.ai/auth/cli/continue?redirect_uri=https://evil.example/cb",
-        "https://app.devin.ai/auth/cli/continue?redirect_uri=http://evil.example:1455/cb",
-        "https://app.devin.ai/auth/cli/continue?redirect_uri=http://localhost/cb",
-        "https://app.devin.ai/auth/cli/continue?redirect_uri=http://localhost:1455/cb&redirect_uri=https://evil.example/",
-        "not a url",
-    ] {
-        assert!(!devin_login_url(url), "{url}");
-    }
-    // The log fallback applies the same rule.
-    let tmp = tempfile::tempdir().unwrap();
-    let logs = tmp.path().join("logs");
-    write(
-        &logs.join("devin.log"),
-        "open https://evil.example/auth/cli/?redirect_uri=http://localhost:1455/callback\n\
-         open https://app.devin.ai/auth/cli/continue?redirect_uri=http://127.0.0.1:1455/cb\n",
-    );
-    assert_eq!(
-        recorded_devin_url(&tmp.path().join("browser-url"), &logs).as_deref(),
-        Some("https://app.devin.ai/auth/cli/continue?redirect_uri=http://127.0.0.1:1455/cb")
     );
 }
 

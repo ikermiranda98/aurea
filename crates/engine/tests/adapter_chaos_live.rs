@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use zeron_doc::SessionCommandPayload;
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{
-    AcpHarness, ClaudeHarness, CodexHarness, CursorHarness, Harness, OpencodeHarness, PiHarness,
+    ClaudeHarness, CodexHarness, Harness, OpencodeHarness,
 };
 use zeron_proto::{
     AgentEvent, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SessionStatus,
@@ -71,17 +71,7 @@ fn harness(name: &str) -> (HarnessId, Arc<dyn Harness>, u32) {
     match name {
         "claude" => (HarnessId::ClaudeCode, Arc::new(ClaudeHarness::new()), 270),
         "codex" => (HarnessId::Codex, Arc::new(CodexHarness::new()), 370),
-        "cursor" => (HarnessId::Cursor, Arc::new(CursorHarness::new()), 470),
         "opencode" => (HarnessId::Opencode, Arc::new(OpencodeHarness::new()), 570),
-        "grok" => (HarnessId::Grok, Arc::new(AcpHarness::grok()), 670),
-        "devin" => (HarnessId::Devin, Arc::new(AcpHarness::devin()), 770),
-        "pi" => (HarnessId::Pi, Arc::new(PiHarness::new()), 870),
-        "hermes" => (HarnessId::Hermes, Arc::new(AcpHarness::hermes()), 970),
-        "antigravity" => (
-            HarnessId::Antigravity,
-            Arc::new(AcpHarness::antigravity()),
-            1070,
-        ),
         other => panic!("unknown harness {other}"),
     }
 }

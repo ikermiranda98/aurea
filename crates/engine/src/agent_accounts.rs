@@ -257,7 +257,7 @@ impl AgentAccountsConfig {
             claude_config_file,
             codex_home: env_dir("CODEX_HOME").unwrap_or_else(|| home_dir().join(".codex")),
             cursor_sdk_auth_file: home_dir().join(".cursor").join("sdk").join("auth.json"),
-            antigravity_home: zeron_harness::acp::antigravity_home().ok(),
+            antigravity_home: None,
             antigravity_keychain: keychain
                 && std::env::var_os("AGY_ACP_FORCE_FILE_STORAGE")
                     .is_none_or(|v| !matches!(v.to_str(), Some("1" | "true"))),
@@ -957,21 +957,6 @@ impl AgentAccounts {
     #[doc(hidden)]
     pub fn override_cli(&self, harness: HarnessId, path: impl Into<PathBuf>) {
         lock(&self.inner.cli_overrides).insert(harness, path.into());
-    }
-
-    /// The ACP harness for `harness`'s CLI, honouring [`Self::override_cli`].
-    fn acp_harness(&self, harness: HarnessId) -> Option<zeron_harness::AcpHarness> {
-        let acp = match harness {
-            HarnessId::Grok => zeron_harness::AcpHarness::grok(),
-            HarnessId::Devin => zeron_harness::AcpHarness::devin(),
-            HarnessId::Hermes => zeron_harness::AcpHarness::hermes(),
-            HarnessId::Antigravity => zeron_harness::AcpHarness::antigravity(),
-            _ => return None,
-        };
-        Some(match lock(&self.inner.cli_overrides).get(&harness) {
-            Some(path) => acp.with_executable(path.clone()),
-            None => acp,
-        })
     }
 
     // ── list ────────────────────────────────────────────────────────────────
@@ -1700,10 +1685,18 @@ impl AgentAccounts {
                 self.start_claude_login().await
             }
             HarnessId::Codex => self.start_codex_login(requester).await?,
-            HarnessId::Cursor => self.start_cursor_login().await?,
-            HarnessId::Antigravity => self.start_antigravity_login(requester),
-            HarnessId::Grok => self.start_grok_login(requester).await?,
-            HarnessId::Devin => self.start_devin_login(requester)?,
+            // Aurea keeps opencode (and Claude/Codex's own sign-ins): the
+            // other agents' harnesses are gone.
+            HarnessId::Cursor
+            | HarnessId::Antigravity
+            | HarnessId::Grok
+            | HarnessId::Devin
+            | HarnessId::Hermes => {
+                return Err(EngineError::Other(format!(
+                    "{} isn't available in Aurea",
+                    stores::cli_name(harness)
+                )));
+            }
             // Every agent from the ACP registry: its own sign-in, `provider`
             // naming one of the methods it offers.
             HarnessId::Registry(agent) => self.start_registry_login(agent, provider, requester)?,
@@ -1725,13 +1718,6 @@ impl AgentAccounts {
                 "anthropic" => self.start_pi_claude_login().await?,
                 other => return Err(stores::unsupported_login(harness, other)),
             },
-            HarnessId::Hermes => {
-                let provider = provider.unwrap_or("openai-codex");
-                if !stores::HERMES_LOGINS.contains(&provider) {
-                    return Err(stores::unsupported_login(harness, provider));
-                }
-                self.start_hermes_login(provider).await?
-            }
             other => {
                 return Err(EngineError::Other(format!(
                     "agent logins are not supported for {other:?}"
@@ -2216,99 +2202,6 @@ impl AgentAccounts {
             mode: AgentLoginMode::Browser,
             callback_port: None,
         })
-    }
-
-    /// Antigravity: its ACP server's own Google sign-in. The start replies at
-    /// once — a first sign-in may download a large server — and polls carry
-    /// the browser url once the server prints it. A server that already holds
-    /// a valid token answers `authenticate` without any browser at all, which
-    /// is success: the poll reports done and the list shows the login.
-    fn start_antigravity_login(&self, requester: Option<&str>) -> AgentLoginStart {
-        self.reap_spawned_flows(HarnessId::Antigravity);
-        let login_id = new_id();
-        let state = Arc::new(Mutex::new(TaskLoginState {
-            requester: requester.map(str::to_string),
-            ..Default::default()
-        }));
-        #[cfg(unix)]
-        let browser = {
-            self.inner
-                .config
-                .private_root()
-                .ok()
-                .and_then(|root| ensure_noop_browser(&root))
-        };
-        #[cfg(not(unix))]
-        let browser = None;
-        let home = self.inner.config.antigravity_home.clone();
-        let keychain = self.inner.config.antigravity_keychain;
-        let task_state = state.clone();
-        let handle = tokio::spawn(async move {
-            let progress_state = task_state.clone();
-            let mut outcome = zeron_harness::AcpHarness::antigravity()
-                .sign_in(browser, move |progress| {
-                    if let zeron_harness::acp::SignInProgress::OpenBrowser(url) = progress {
-                        lock(&progress_state).url = Some(url);
-                    }
-                })
-                .await
-                .map_err(|e| e.to_string());
-            // A success the list can't show would drop the user back at
-            // "Connect" with no word why — say where the login went missing.
-            if outcome.is_ok()
-                && let Some(home) = &home
-                && detect_antigravity_login(home, keychain).await.is_none()
-            {
-                outcome = Err(format!(
-                    "Antigravity reported a successful sign-in, but no login was saved in {}.",
-                    home.join("antigravity-acp").display()
-                ));
-            }
-            lock(&task_state).outcome = Some(outcome);
-        });
-        lock(&self.inner.flows).insert(
-            login_id.clone(),
-            LoginFlow::Task {
-                harness: HarnessId::Antigravity,
-                started_at: Instant::now(),
-                state,
-                handle,
-                home: None,
-                port: None,
-            },
-        );
-        AgentLoginStart {
-            login_id,
-            url: String::new(),
-            mode: AgentLoginMode::Browser,
-            callback_port: None,
-        }
-    }
-
-    /// Cursor: the SDK's own PKCE browser flow, driven through the zeron shim
-    /// in login mode. The minted key lands in a throwaway store file (never
-    /// the live `~/.cursor/sdk/auth.json`), then snapshots into a slot on
-    /// poll — mirroring codex's throwaway `CODEX_HOME`.
-    async fn start_cursor_login(&self) -> Result<AgentLoginStart, EngineError> {
-        self.reap_spawned_flows(HarnessId::Cursor);
-        let login_id = new_id();
-        let home = self.login_home(&login_id)?;
-        let cmd = zeron_harness::cursor::login_command(&home.join("auth.json"))
-            .await
-            .map_err(|e| {
-                let _ = std::fs::remove_dir_all(&home);
-                EngineError::Other(format!("Could not start the Cursor login: {e}"))
-            })?;
-        self.spawn_login_child(
-            login_id,
-            HarnessId::Cursor,
-            cmd,
-            home,
-            SpawnedCompletion::CredentialFile,
-            scan_cursor_url,
-            None,
-        )
-        .await
     }
 
     /// Exchange the pasted `code#state` for tokens and save the account as a
@@ -3900,8 +3793,9 @@ impl AntigravityLogin {
 /// so the saved method is all there is. A first run saves no method; its
 /// default is the personal Google sign-in.
 async fn detect_antigravity_login(home: &Path, keychain: bool) -> Option<AntigravityLogin> {
-    let method = zeron_harness::acp::antigravity_saved_auth_method(home)
-        .unwrap_or_else(|| "oauth-personal".into());
+    // Antigravity's server is gone from Aurea: only the default method's
+    // token file can still be found.
+    let method = String::from("oauth-personal");
     let token = match method.as_str() {
         "oauth-personal" => Some(("acp_token.json", "antigravity-acp")),
         "oauth-business" => Some(("acp_business_token.json", "antigravity-acp-business")),
@@ -4022,15 +3916,6 @@ fn claude_plan(org_type: Option<&str>, tier: Option<&str>) -> Option<String> {
 
 fn codex_plan(plan: Option<&str>) -> Option<String> {
     zeron_proto::plan_usage::codex_plan(plan)
-}
-
-/// Meter label for a Codex rate-limit window from its `limit_window_seconds`:
-/// the free tier's window is a 30-day month (2_592_000s), Plus runs a 5-hour
-/// primary (~18_000s) with a weekly secondary (604_800s). A bare "> 1 day =
-/// week" rule mislabeled the monthly window "Week"; thresholds in seconds
-/// leave the middle gaps to the nearest label rather than guessing a plan.
-fn codex_window_label(span_seconds: i64) -> &'static str {
-    zeron_proto::plan_usage::codex_window_label(span_seconds)
 }
 
 /// Compose a target Claude login with the machine's current shared fields.
@@ -4746,16 +4631,6 @@ fn scan_shim_event(output: &str, ev: &str) -> Option<serde_json::Value> {
     })
 }
 
-/// The Cursor SDK's sign-in page from the shim's `auth-url` frame — only a
-/// Cursor https page (it's opened on the requesting device).
-fn scan_cursor_url(output: &str) -> Option<String> {
-    str_field(&scan_shim_event(output, "auth-url")?, "url")
-        .filter(|url| stores::trusted_page(url, CURSOR_DOMAINS))
-}
-
-/// Where the Cursor SDK's browser sign-in lives.
-const CURSOR_DOMAINS: &[&str] = &["cursor.com", "cursor.sh"];
-
 fn scan_shim_fatal(output: &str) -> Option<String> {
     str_field(&scan_shim_event(output, "fatal")?, "message")
 }
@@ -5372,18 +5247,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_window_labels_track_the_window_span() {
-        // Codex free tier: one 30-day window (observed live:
-        // limit_window_seconds = 2_592_000) — NOT a week.
-        assert_eq!(codex_window_label(2_592_000), "Month");
-        // Plus: 5-hour primary + weekly secondary.
-        assert_eq!(codex_window_label(18_000), "Session");
-        assert_eq!(codex_window_label(604_800), "Week");
-        // Unknown/absent span falls back to the shortest label.
-        assert_eq!(codex_window_label(0), "Session");
-    }
-
-    #[test]
     fn claude_usage_windows_map_buckets_and_percent() {
         let body = serde_json::json!({
             "five_hour": { "utilization": 6.0, "resets_at": "2026-04-08T18:59:59Z" },
@@ -5533,42 +5396,6 @@ mod tests {
         // No expiry field = never expires.
         assert!(cursor_key_usable(&serde_json::json!({"apiKey": "k"})));
         assert!(parse_cursor_auth(serde_json::json!({"version": 1})).is_none());
-    }
-
-    #[test]
-    fn cursor_shim_output_scan() {
-        let output = concat!(
-            "npm warn something unrelated\n",
-            "{\"ev\":\"auth-url\",\"url\":\"https://cursor.com/loginDeepControl?challenge=x\"}\n",
-        );
-        assert_eq!(
-            scan_cursor_url(output).as_deref(),
-            Some("https://cursor.com/loginDeepControl?challenge=x")
-        );
-        assert_eq!(scan_cursor_url("no frames here"), None);
-        // Only a Cursor https page is ever opened on the requesting device.
-        for url in [
-            "https://evil.example/loginDeepControl?challenge=x",
-            "https://cursor.com.evil.example/loginDeepControl",
-            "http://cursor.com/loginDeepControl",
-            "https://user@cursor.com/loginDeepControl",
-            "https://cursor.com:8443/loginDeepControl",
-            "javascript:alert(1)",
-        ] {
-            let frame = format!("{}\n", serde_json::json!({ "ev": "auth-url", "url": url }));
-            assert_eq!(scan_cursor_url(&frame), None, "{url}");
-        }
-        assert!(
-            scan_cursor_url(
-                "{\"ev\":\"auth-url\",\"url\":\"https://www.cursor.com/loginDeepControl?c=1\"}\n"
-            )
-            .is_some()
-        );
-        assert_eq!(
-            scan_shim_fatal("{\"ev\":\"fatal\",\"message\":\"cursor login failed: boom\"}\n")
-                .as_deref(),
-            Some("cursor login failed: boom")
-        );
     }
 
     #[test]
@@ -5960,55 +5787,6 @@ mod login_tests {
                 .url
                 .contains("redirect_uri=https%3A%2F%2Fconsole.anthropic.com")
         );
-    }
-
-    #[tokio::test]
-    async fn antigravity_login_is_detected_from_settings_and_token_presence() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("gemini");
-        let acp = home.join("antigravity-acp");
-        // Never signed in.
-        assert_eq!(detect_antigravity_login(&home, false).await, None);
-        // A first sign-in: the consumer token, no saved method yet.
-        write(&acp.join("acp_token.json"), "{}");
-        let login = detect_antigravity_login(&home, false).await.unwrap();
-        assert_eq!(login.method, "oauth-personal");
-        let row = login.account();
-        assert_eq!(row.harness, HarnessId::Antigravity);
-        assert_eq!(row.display_name.as_deref(), Some("Google account"));
-        assert_eq!(row.email, None);
-        assert!(row.active && !row.switchable);
-        assert!(row.usage_windows.is_empty() && row.usage_error.is_none());
-        // Gemini Enterprise keeps its own token file.
-        write(
-            &acp.join("settings.json"),
-            r#"{"auth": {"type": "oauth-business"}}"#,
-        );
-        assert_eq!(detect_antigravity_login(&home, false).await, None);
-        write(&acp.join("acp_business_token.json"), "{}");
-        let business = detect_antigravity_login(&home, false).await.unwrap();
-        assert_eq!(
-            business.account().plan_label.as_deref(),
-            Some("Gemini Enterprise")
-        );
-        // Key-based methods: the saved method is the login.
-        write(
-            &acp.join("settings.json"),
-            r#"{"auth": {"type": "gemini-api-key"}}"#,
-        );
-        let key = detect_antigravity_login(&home, false).await.unwrap();
-        assert_eq!(
-            key.account().display_name.as_deref(),
-            Some("Gemini API key")
-        );
-        assert_eq!(key.account().auth_kind, Some(AgentAuthKind::ApiKey));
-        // Signed out: the method stays, the Google token is gone.
-        write(
-            &acp.join("settings.json"),
-            r#"{"auth": {"type": "oauth-personal"}}"#,
-        );
-        std::fs::remove_file(acp.join("acp_token.json")).unwrap();
-        assert_eq!(detect_antigravity_login(&home, false).await, None);
     }
 
     #[tokio::test]

@@ -6,6 +6,4 @@ mod claude_models;
 mod model_catalog;
 mod model_refresh;
 mod run_env;
-mod pi_mcp;
 mod claude_availability;
-mod acp_hardening;

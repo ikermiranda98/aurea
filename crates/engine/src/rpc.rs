@@ -940,7 +940,7 @@ impl EngineRpc {
         let engine_info = EngineInfo {
             device_id: doc_host.device_id().to_string(),
             workspace_scope,
-            cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
+            cursor_sdk_version: None,
             capabilities: {
                 let mut capabilities = zeron_proto::capabilities::current();
                 if crate::desktop_notify::enabled() {
@@ -7141,24 +7141,6 @@ mod tests {
         assert_eq!(entries.len(), 3);
         assert_eq!(entries.last().unwrap().id, "live");
         host.shutdown_workers().await;
-    }
-
-    #[tokio::test]
-    async fn antigravity_disable_does_not_launch_the_server() {
-        let registry = HarnessRegistry::new();
-        let executable = std::env::current_exe().unwrap();
-        registry.register(std::sync::Arc::new(
-            zeron_harness::AcpHarness::grok().with_executable(executable.clone()),
-        ));
-        registry.register(std::sync::Arc::new(
-            zeron_harness::AcpHarness::antigravity().with_executable(executable),
-        ));
-        registry.set_enabled(HarnessId::Antigravity, true).unwrap();
-
-        update_harness_enabled(&registry, HarnessId::Antigravity, false)
-            .await
-            .unwrap();
-        assert!(!registry.enabled_set().contains(&HarnessId::Antigravity));
     }
 
     /// The UI's Switch/Forget calls send `{id, accountId, harness}` (+ optional

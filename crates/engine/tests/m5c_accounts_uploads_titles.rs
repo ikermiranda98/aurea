@@ -20,7 +20,7 @@ use zeron_engine::{
 };
 use zeron_harness::mock::MockHarness;
 use zeron_proto::{
-    AgentAccountsSnapshot, AgentEvent, AgentLoginMode, AgentLoginStatus, DoneStatus, HarnessId,
+    AgentAccountsSnapshot, AgentEvent, AgentLoginStatus, DoneStatus, HarnessId,
     SandboxLevel,
 };
 use zeron_rpc::methods;
@@ -1347,114 +1347,6 @@ async fn cursor_slot_swap_round_trip() {
             .any(|w| w.harness == HarnessId::Cursor && w.message.contains("expired")),
         "{:?}",
         snapshot.warnings
-    );
-}
-
-#[tokio::test]
-async fn cursor_login_flow_spawns_shim_and_auto_activates() {
-    let dir = tempfile::tempdir().expect("tmp");
-    let (accounts, config) = test_accounts(dir.path());
-
-    // Fake shim: in login mode, emit the auth-url frame, write the minted
-    // store file where the engine pointed us, exit 0. Mirrors the real shim's
-    // `node <shim> login <store-path>` argv contract. Windows gets a batch
-    // shim because the engine only launches real Windows executables.
-    #[cfg(windows)]
-    let shim = dir.path().join("fake-cursor-shim.cmd");
-    #[cfg(windows)]
-    let shim_script = concat!(
-        "@echo off\r\n",
-        "if not \"%~1\"==\"login\" exit /b 1\r\n",
-        "echo {\"ev\":\"auth-url\",\"url\":\"https://cursor.com/loginDeepControl?challenge=fake\"}\r\n",
-        "> \"%~2\" echo {\"version\":1,\"backendUrl\":\"https://api2.cursor.sh\",\"apiKey\":\"key-minted\",\"apiKeyExpiresAtMs\":99999999999999,\"email\":\"grace@example.com\",\"createdAtMs\":1}\r\n",
-        "echo {\"ev\":\"logged-in\",\"email\":\"grace@example.com\"}\r\n",
-        "exit /b 0\r\n",
-    );
-    #[cfg(unix)]
-    let shim = dir.path().join("fake-cursor-shim.sh");
-    #[cfg(unix)]
-    let shim_script = r#"#!/bin/sh
-[ "$1" = "login" ] || exit 1
-printf '%s\n' '{"ev":"auth-url","url":"https://cursor.com/loginDeepControl?challenge=fake"}'
-cat > "$2" <<JSON
-{"version":1,"backendUrl":"https://api2.cursor.sh","apiKey":"key-minted","apiKeyExpiresAtMs":99999999999999,"email":"grace@example.com","createdAtMs":1}
-JSON
-printf '%s\n' '{"ev":"logged-in","email":"grace@example.com"}'
-exit 0
-"#;
-    std::fs::write(&shim, shim_script).expect("fake shim");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    unsafe { std::env::set_var("CURSOR_SDK_SHIM_EXECUTABLE", &shim) };
-
-    let start = accounts
-        .start_login(HarnessId::Cursor)
-        .await
-        .expect("start");
-    assert_eq!(start.mode, AgentLoginMode::Browser);
-    assert_eq!(
-        start.url,
-        "https://cursor.com/loginDeepControl?challenge=fake"
-    );
-
-    poll_until_done(&accounts, &start.login_id).await;
-
-    // First connect on a device with no live login: the minted key was
-    // auto-activated, so runs work immediately.
-    let live: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&config.cursor_sdk_auth_file).unwrap())
-            .unwrap();
-    assert_eq!(live["email"], "grace@example.com");
-    let snapshot = accounts.list(false).await.expect("list");
-    assert_eq!(
-        account_emails(&snapshot, HarnessId::Cursor),
-        vec![("grace@example.com".to_string(), true)]
-    );
-
-    // Re-connecting the LIVE account (still usable, older key) replaces the
-    // live key — it is not re-snapshotted back over the fresh one.
-    write_cursor_login(&config, "grace@example.com", 60_000);
-    accounts.list(false).await.expect("list old key");
-    login_until_done(&accounts, HarnessId::Cursor).await;
-    assert_eq!(
-        read_json_file(&config.cursor_sdk_auth_file)["apiKey"],
-        "key-minted"
-    );
-    let snapshot = accounts.list(false).await.expect("list");
-    let slot = snapshot
-        .accounts
-        .iter()
-        .find(|a| a.harness == HarnessId::Cursor)
-        .unwrap();
-    assert!(slot.active);
-
-    // Connecting while ANOTHER usable account is live leaves it live.
-    write_cursor_login(&config, "hopper@example.com", 60_000);
-    accounts.list(false).await.expect("list hopper");
-    login_until_done(&accounts, HarnessId::Cursor).await;
-    assert_eq!(
-        read_json_file(&config.cursor_sdk_auth_file)["email"],
-        "hopper@example.com"
-    );
-
-    // The live login is removable: the SDK store goes, so it isn't re-detected.
-    let snapshot = accounts.list(false).await.expect("list");
-    let hopper = snapshot
-        .accounts
-        .iter()
-        .find(|a| a.email.as_deref() == Some("hopper@example.com"))
-        .unwrap();
-    let snapshot = accounts
-        .forget(HarnessId::Cursor, &hopper.id)
-        .await
-        .expect("forget live hopper");
-    assert!(!config.cursor_sdk_auth_file.exists());
-    assert_eq!(
-        account_emails(&snapshot, HarnessId::Cursor),
-        vec![("grace@example.com".to_string(), false)]
     );
 }
 
