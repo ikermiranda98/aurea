@@ -4767,7 +4767,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Hidden from View → Show: keep the row's top breathing room only.
-        if !self.settings.sidebar_show_project_filter {
+        // Aurea has no projects to filter by, so the row never shows.
+        if crate::state::AUREA_NO_PROJECTS || !self.settings.sidebar_show_project_filter {
             return div().flex_none().h(px(4.0)).into_any_element();
         }
         let filter = self.settings.space_filter.clone();

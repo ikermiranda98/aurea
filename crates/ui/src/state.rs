@@ -934,6 +934,9 @@ const CLOUD_WAKE_GRACE: std::time::Duration = std::time::Duration::from_secs(180
 /// couldn't reach its Cloud machine (it retries every couple of seconds).
 const CLOUD_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// Aurea runs without projects (see [`AppState::apply_spaces`]).
+pub(crate) const AUREA_NO_PROJECTS: bool = true;
+
 pub struct AppState {
     pub connection: ConnectionStatus,
     /// Fixed data boundary of the attached engine. Authentication may change
@@ -1498,6 +1501,12 @@ impl AppState {
 
     /// Returns whether the list or the healed selection changed.
     pub fn apply_spaces(&mut self, mut spaces: Vec<Space>) -> bool {
+        // Aurea has no projects: every chat runs in its own scratch folder
+        // (`zeron_proto::projectless`). Projects the engine still knows about
+        // (an older profile's) are never shown or targeted.
+        if AUREA_NO_PROJECTS {
+            spaces.clear();
+        }
         sort_spaces(&mut spaces);
         let previous_selection = self.selected_space.clone();
         let mut changed = false;
@@ -1512,6 +1521,9 @@ impl AppState {
     }
 
     fn heal_space_selection(&mut self) {
+        if AUREA_NO_PROJECTS {
+            self.no_project = true;
+        }
         if self.no_project {
             self.selected_space = None;
             return;
@@ -7344,157 +7356,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_spaces_sorts_and_heals_selection() {
-        let mut state = AppState::new();
-        state.apply_spaces(vec![
-            space("s2", "dev", "/b", 2),
-            space("s1", "dev", "/a", 1),
-        ]);
-        let ids: Vec<&str> = state.spaces.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["s1", "s2"]);
-        // First frame auto-selects the first space.
-        assert_eq!(state.selected_space.as_deref(), Some("s1"));
-        state.selected_space = Some("s2".into());
-        // Vanished selection heals to the first space.
-        state.apply_spaces(vec![space("s1", "dev", "/a", 1)]);
-        assert_eq!(state.selected_space.as_deref(), Some("s1"));
-        // No spaces at all: selection clears.
-        state.apply_spaces(vec![]);
-        assert_eq!(state.selected_space, None);
-    }
-
-    #[test]
-    fn file_link_roots_order_chat_parent_then_projects() {
-        use crate::workspace_links::FileLinkRoot;
-        let mut state = AppState::new();
-        state.local_device_id = Some("dev".into());
-        let mut parent = chat("parent", 0, None);
-        parent.cwd = Some("/repo".into());
-        let mut fork = chat("fork", 1, None);
-        fork.cwd = Some("/fork/fork".into());
-        fork.parent_chat_id = Some("parent".into());
-        // A chat hosted on another device still contributes its checkout —
-        // reads go through it — but is flagged remote so system-level file
-        // actions stay hidden.
-        let mut remote = chat("remote", 2, None);
-        remote.device_id = "other".into();
-        remote.cwd = Some("/far/worktree".into());
-        remote.parent_chat_id = Some("fork".into());
-        state.apply_chats(vec![parent, fork, remote]);
-        state.apply_spaces(vec![
-            space("local", "dev", "/projects/zeron", 0),
-            space("remote", "other", "/remote/only", 1),
-        ]);
-        let root = |chat: Option<&str>, root: &str, local: bool| FileLinkRoot {
-            chat: chat.map(str::to_owned),
-            root: root.into(),
-            local,
-        };
-
-        let roots = state.file_link_roots("fork");
-        assert_eq!(
-            roots,
-            vec![
-                root(Some("fork"), "/fork/fork", true),
-                root(Some("parent"), "/repo", true),
-                root(None, "/projects/zeron", true),
-            ],
-            "own checkout, parent, then this device's projects"
-        );
-        assert!(state.chat_is_local("fork"));
-        assert!(!state.chat_is_local("remote"));
-        // A remote chat's paths name its own device: this device's projects
-        // and a parent hosted here never own them.
-        assert_eq!(
-            state.file_link_roots("remote"),
-            vec![
-                root(Some("remote"), "/far/worktree", false),
-                root(None, "/remote/only", false),
-            ]
-        );
-
-        // An absolute path outside every known root is still a file: it
-        // resolves as an outside link owned by the linking chat.
-        let root_refs: Vec<&str> = roots.iter().map(|root| root.root.as_str()).collect();
-        assert!(matches!(
-            crate::workspace_links::first_root_owning("/elsewhere/x.md", root_refs.clone()),
-            Some(crate::workspace_links::FileLinkResolution::Outside(link))
-                if link.path == "/elsewhere/x.md" && link.outside
-        ));
-        // A path under the parent's checkout resolves to that root.
-        assert_eq!(
-            match crate::workspace_links::first_root_owning("/repo/src/lib.rs", root_refs) {
-                Some(crate::workspace_links::FileLinkResolution::Owned { root, link }) =>
-                    Some((roots[root].chat.clone(), link.path)),
-                _ => None,
-            },
-            Some((Some("parent".into()), "src/lib.rs".into()))
-        );
-    }
-
-    #[test]
-    fn canvas_terminal_uses_the_selected_project_folder() {
-        let mut state = AppState::new();
-        state.local_device_id = Some("local".into());
-        state.apply_spaces(vec![
-            space("s1", "local", "/Users/me/proj", 1),
-            space("remote-space", "remote", "/remote/proj", 2),
-        ]);
-        state.selected_chat = None;
-        state.no_project = false;
-        state.selected_space = Some("s1".into());
-
-        assert_eq!(state.panel_session_key(), "space-canvas:s1");
-        assert_eq!(state.terminal_open_cwd().as_deref(), Some("/Users/me/proj"));
-        assert_eq!(
-            state.terminal_open_cwd_for("space-canvas:s1").as_deref(),
-            Some("/Users/me/proj")
-        );
-        // Project id is known, row not in the list yet — do not send `~`.
-        state.spaces.clear();
-        assert_eq!(state.terminal_open_cwd(), None);
-        state.apply_spaces(vec![
-            space("s1", "local", "/Users/me/proj", 1),
-            space("remote-space", "remote", "/remote/proj", 2),
-        ]);
-        assert_eq!(state.terminal_open_cwd().as_deref(), Some("/Users/me/proj"));
-        assert_eq!(
-            state.terminal_target_device(&state.panel_session_key()),
-            None,
-            "local project stays on this engine"
-        );
-
-        state.selected_space = Some("remote-space".into());
-        assert_eq!(
-            state
-                .terminal_target_device("space-canvas:remote-space")
-                .as_deref(),
-            Some("remote")
-        );
-
-        state.no_project = true;
-        state.selected_space = None;
-        state.selected_device = Some("remote".into());
-        assert_eq!(state.panel_session_key(), "space-canvas:");
-        assert_eq!(state.terminal_open_cwd().as_deref(), Some("~"));
-        assert_eq!(
-            state.terminal_target_device("space-canvas:").as_deref(),
-            Some("remote")
-        );
-
-        let mut row = chat("chat-1", 0, None);
-        row.device_id = "remote".into();
-        state.chats = vec![row];
-        state.selected_chat = Some("chat-1".into());
-        assert_eq!(state.panel_session_key(), "chat-1");
-        assert_eq!(state.terminal_open_cwd(), None);
-        assert_eq!(
-            state.terminal_target_device("chat-1").as_deref(),
-            Some("remote")
-        );
-    }
-
-    #[test]
     fn projectless_preference_survives_restart_and_space_refreshes() {
         let dir = tempfile::tempdir().unwrap();
         let defaults = crate::settings::composer::ComposerDefaults {
@@ -7521,168 +7382,6 @@ mod tests {
             assert!(state.selected_space_row().is_none());
             assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
         }
-    }
-
-    #[gpui::test]
-    fn projectless_selection_clears_project_and_survives_device_switch(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let state = cx.new(|_| AppState::new());
-        state.update(cx, |state, cx| {
-            state.apply_spaces(vec![
-                space("s1", "dev", "/a", 1),
-                space("s2", "remote", "/b", 2),
-            ]);
-            state.select_space(Some("s1".into()), cx);
-            state.select_space(None, cx);
-            assert!(state.selected_space.is_none());
-            state.select_device("remote".into(), cx);
-            assert!(state.no_project);
-            assert!(state.selected_space.is_none());
-            assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
-            state.select_space(Some("s2".into()), cx);
-            assert!(!state.no_project);
-            assert_eq!(state.selected_space_row().unwrap().id, "s2");
-            state.selected_device = Some("dev".into());
-            state.select_space(None, cx);
-            assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
-            state.select_space(Some("s2".into()), cx);
-            state.select_device("empty-device".into(), cx);
-            assert!(state.selected_space.is_none());
-            assert_eq!(state.effective_device_id().as_deref(), Some("empty-device"));
-        });
-    }
-
-    #[gpui::test]
-    fn canvas_reopens_on_its_own_target_after_visiting_chats(cx: &mut gpui::TestAppContext) {
-        let state = cx.new(|_| AppState::new());
-        state.update(cx, |state, cx| {
-            state.apply_spaces(vec![
-                space("s1", "dev", "/a", 1),
-                space("s2", "remote", "/b", 2),
-            ]);
-            let mut remote = chat("remote-chat", 1, None);
-            remote.device_id = "remote".into();
-            remote.space_id = Some("s2".into());
-            let mut loose = chat("loose-chat", 2, None);
-            loose.device_id = "remote".into();
-            state.apply_chats(vec![remote, loose.clone()]);
-            state.select_space(Some("s1".into()), cx);
-
-            // Chats imply their own target while open…
-            state.select_chat(Some("remote-chat".into()), cx);
-            assert_eq!(state.selected_space.as_deref(), Some("s2"));
-            state.select_chat(Some("loose-chat".into()), cx);
-            assert!(state.no_project);
-            // …and the canvas returns to where it was left.
-            state.select_chat(None, cx);
-            assert!(!state.no_project);
-            assert_eq!(state.selected_space.as_deref(), Some("s1"));
-            assert_eq!(state.effective_device_id().as_deref(), Some("dev"));
-
-            // A projectless canvas survives a project chat, and a chat deleted
-            // elsewhere lands back on it too.
-            state.select_space(None, cx);
-            state.select_device("remote".into(), cx);
-            state.select_chat(Some("remote-chat".into()), cx);
-            state.apply_chats(vec![loose]);
-            assert!(state.selected_chat.is_none());
-            assert!(state.no_project);
-            assert!(state.selected_space.is_none());
-            assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
-        });
-    }
-
-    #[test]
-    fn chats_in_space_filters_and_orders() {
-        let mut state = AppState::new();
-        state.apply_spaces(vec![space("s1", "dev", "/a", 1)]);
-        let mut in_space_new = chat("new", 5, None);
-        in_space_new.space_id = Some("s1".into());
-        let mut in_space_old = chat("old", 1, Some(50)); // active but created first
-        in_space_old.space_id = Some("s1".into());
-        let mut other = chat("other", 2, None);
-        other.space_id = Some("s2".into());
-        let mut archived = chat("gone", 0, None);
-        archived.space_id = Some("s1".into());
-        archived.archived = true;
-        let dangling = chat("dangling", 3, None); // no space id
-        state.apply_chats(vec![in_space_new, in_space_old, other, archived, dangling]);
-        let ids: Vec<&str> = state
-            .chats_in_space("s1")
-            .iter()
-            .map(|c| c.id.as_str())
-            .collect();
-        assert_eq!(ids, ["old", "new"]);
-        // The overview shows every live-space chat (idle included) PLUS
-        // project-less chats (first-class since the project selectors);
-        // chats of unknown spaces stay hidden. Completed ("old") outranks
-        // idle ("new"/"dangling").
-        let now = Utc::now();
-        let overview: Vec<&str> = state
-            .overview_chats(now)
-            .iter()
-            .map(|(_, c)| c.id.as_str())
-            .collect();
-        assert_eq!(overview, ["old", "new", "dangling"]);
-    }
-
-    #[test]
-    fn project_filter_and_projects_span_a_repository_across_devices() {
-        let mut state = AppState::new();
-        state.local_device_id = Some("laptop".into());
-        let mut remote = space("remote", "metal", "/w/marigold", 1);
-        remote.repository_id = Some("commit:abc".into());
-        let mut local = space("local", "laptop", "/h/marigold", 2);
-        local.repository_id = Some("commit:abc".into());
-        let other = space("other", "laptop", "/h/notes", 3);
-        state.apply_spaces(vec![remote, local, other]);
-        let in_space = |id: &str, space: &str| {
-            let mut chat = chat(id, 0, None);
-            chat.space_id = Some(space.into());
-            chat
-        };
-        state.apply_chats(vec![
-            in_space("on-remote", "remote"),
-            in_space("on-local", "local"),
-            in_space("on-other", "other"),
-        ]);
-
-        // One project per repository, its checkouts local-first.
-        let projects: Vec<Vec<&str>> = state
-            .projects()
-            .iter()
-            .map(|members| members.iter().map(|s| s.id.as_str()).collect())
-            .collect();
-        assert_eq!(projects, vec![vec!["local", "remote"], vec!["other"]]);
-
-        // Filtering on either checkout shows the whole repository's chats.
-        for filter in ["remote", "local"] {
-            let mut ids: Vec<&str> = state
-                .sidebar_chats(Utc::now(), Some(filter))
-                .iter()
-                .map(|(_, c)| c.id.as_str())
-                .collect();
-            ids.sort();
-            assert_eq!(ids, ["on-local", "on-remote"], "filter {filter}");
-        }
-        let other_only: Vec<&str> = state
-            .sidebar_chats(Utc::now(), Some("other"))
-            .iter()
-            .map(|(_, c)| c.id.as_str())
-            .collect();
-        assert_eq!(other_only, ["on-other"]);
-
-        // A two-device project tags both hosts; a one-device one keeps the
-        // plain host tag.
-        let marigold = state.projects().into_iter().next().unwrap();
-        let (tag, _) = state.project_device_tag(&marigold, Utc::now());
-        assert!(tag.starts_with("@ ") && tag.contains(" · "), "{tag}");
-        let notes = state.projects().into_iter().nth(1).unwrap();
-        assert_eq!(
-            state.project_device_tag(&notes, Utc::now()).0,
-            state.space_device_tag(notes[0], Utc::now()).0
-        );
     }
 
     #[test]
@@ -7908,21 +7607,6 @@ mod tests {
     }
 
     #[test]
-    fn identical_spaces_frames_report_no_change() {
-        let mut state = AppState::new();
-        assert!(state.apply_spaces(vec![]));
-        assert!(!state.apply_spaces(vec![]));
-        let frame = vec![space("s2", "dev", "/b", 2), space("s1", "dev", "/a", 1)];
-        assert!(state.apply_spaces(frame.clone()));
-        assert_eq!(state.selected_space.as_deref(), Some("s1"));
-        assert!(!state.apply_spaces(frame.clone()));
-        // A vanished selection still heals (and reports it) on an unchanged list.
-        state.selected_space = Some("gone".into());
-        assert!(state.apply_spaces(frame));
-        assert_eq!(state.selected_space.as_deref(), Some("s1"));
-    }
-
-    #[test]
     fn identical_connectivity_frames_report_no_change() {
         use zeron_proto::{Connectivity, ConnectivityState};
         let mut state = AppState::new();
@@ -8103,41 +7787,6 @@ mod tests {
         assert!(state.pending_side_chat.is_none());
         state.apply_chats(vec![]);
         assert_eq!(state.selected_chat, None);
-    }
-
-    #[test]
-    fn jump_slots_count_the_rows_the_sidebar_draws() {
-        let now = Utc::now();
-        let mut state = AppState::new();
-        let mut in_space = chat("a", 0, Some(3));
-        in_space.space_id = Some("s1".into());
-        let mut other_space = chat("b", 1, Some(2));
-        other_space.space_id = Some("s2".into());
-        let mut archived = chat("gone", 2, Some(1));
-        archived.space_id = Some("s1".into());
-        archived.archived = true;
-        state.apply_spaces(vec![
-            space("s1", "d1", "/tmp/s1", 0),
-            space("s2", "d1", "/tmp/s2", 1),
-        ]);
-        state.apply_chats(vec![in_space, other_space, archived]);
-
-        // The archived row is not in the active list, so no slot reaches it.
-        let order: Vec<&str> = state
-            .sidebar_chats(now, None)
-            .iter()
-            .map(|(_, c)| c.id.as_str())
-            .collect();
-        assert_eq!(order.len(), 2);
-        assert!(!order.contains(&"gone"));
-
-        // A project filter renumbers: the visible rows only.
-        let filtered: Vec<&str> = state
-            .sidebar_chats(now, Some("s2"))
-            .iter()
-            .map(|(_, c)| c.id.as_str())
-            .collect();
-        assert_eq!(filtered, ["b"]);
     }
 
     #[test]

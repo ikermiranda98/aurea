@@ -12114,11 +12114,9 @@ impl Render for Composer {
                         .children(voice_track),
                 )
         };
-        let new_thread_target_selectors = (new_thread_chrome_opacity > 0.0).then(|| {
-            self.pickers.update(cx, |pickers, cx| {
-                pickers.render_new_thread_target_selectors(cx)
-            })
-        });
+        // Aurea: no project or device to pick for a new chat (projectless,
+        // this machine only).
+        let new_thread_target_selectors: Option<gpui::AnyElement> = None;
         let new_thread_git_selectors = (new_thread_chrome_opacity > 0.0)
             .then(|| {
                 self.pickers.update(cx, |pickers, cx| {

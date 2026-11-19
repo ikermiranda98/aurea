@@ -365,7 +365,6 @@ fn matches_query(query: &str, text: &str) -> bool {
 fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
     [
         Command::NewChat,
-        Command::NewProject,
         Command::Trading,
         Command::Settings,
         Command::Theme(if is_dark {
@@ -2284,7 +2283,6 @@ mod tests {
             commands_for("", true, false),
             vec![
                 Command::NewChat,
-                Command::NewProject,
                 Command::Trading,
                 Command::Settings,
                 Command::Theme(AppearanceMode::Light)
@@ -2292,7 +2290,7 @@ mod tests {
         );
         assert_eq!(
             commands_for("new", true, false),
-            vec![Command::NewChat, Command::NewProject]
+            vec![Command::NewChat]
         );
         assert_eq!(
             commands_for("settings", true, false),
