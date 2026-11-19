@@ -2292,8 +2292,10 @@ impl SidebarViewRow {
     }
 }
 
-const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 3] =
-    [("Organize", 0..3), ("Sort", 3..5), ("Show", 5..12)];
+/// Aurea's sidebar is one list of projectless chats on this machine: no
+/// Organize group, and Show keeps the agent and the archive.
+const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 2] =
+    [("Sort", 3..5), ("Show", 5..7)];
 
 const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 12] = [
     SidebarViewRow::ByDevice,
@@ -2301,13 +2303,13 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 12] = [
     SidebarViewRow::InOneList,
     SidebarViewRow::LastUpdated,
     SidebarViewRow::Created,
+    SidebarViewRow::ShowHarness,
+    SidebarViewRow::ShowArchived,
     SidebarViewRow::ShowBranch,
     SidebarViewRow::ShowPullRequest,
-    SidebarViewRow::ShowHarness,
     SidebarViewRow::ShowProjectIcon,
     SidebarViewRow::ShowProjectLabel,
     SidebarViewRow::ShowProjectFilter,
-    SidebarViewRow::ShowArchived,
 ];
 
 // list items stay tightly related at 2px, while section boundaries use 12px
@@ -4428,13 +4430,13 @@ impl Shell {
             "None",
             "Last updated",
             "Created",
+            "Agent",
+            "Archived",
             "Branch",
             "Pull request",
-            "Harness",
             "Project icon",
             "Location",
             "Project filter",
-            "Archived",
         ];
         let icons = [
             icons::LAPTOP,
@@ -4442,14 +4444,14 @@ impl Shell {
             icons::LIST,
             icons::CLOCK_CIRCLE,
             icons::CALENDAR,
+            icons::BOT,
+            icons::ARCHIVE_MINIMALISTIC,
             icons::GIT_BRANCH,
             icons::PULL_REQUEST,
-            icons::BOT,
             icons::PROJECT_DEFAULT,
             // Location names the host: the remote glyph sidebar rows wear.
             icons::REMOTE_SERVER,
             icons::FOLDER,
-            icons::ARCHIVE_MINIMALISTIC,
         ];
         let selected = [
             organization == SidebarOrganization::ByDevice,
@@ -4457,21 +4459,19 @@ impl Shell {
             organization == SidebarOrganization::InOneList,
             sort == SidebarSort::LastUpdated,
             sort == SidebarSort::Created,
+            show_harness,
+            self.settings.sidebar_show_archived,
             show_branch,
             show_pr,
-            show_harness,
             self.settings.sidebar_show_project_icon,
             self.settings.sidebar_show_project_label,
             self.settings.sidebar_show_project_filter,
-            self.settings.sidebar_show_archived,
         ];
-        let values = [
-            labels[selected[..3].iter().position(|v| *v).unwrap_or(0)].to_string(),
-            labels[3 + selected[3..5].iter().position(|v| *v).unwrap_or(0)].to_string(),
-        ];
+        // The Sort group shows its current choice beside its name.
+        let values = [labels[3 + selected[3..5].iter().position(|v| *v).unwrap_or(0)].to_string()];
         let mut groups: Vec<AnyElement> = Vec::new();
         for (group, (label, range)) in SIDEBAR_VIEW_GROUPS.iter().enumerate() {
-            if group == 2 {
+            if group == 1 {
                 groups.push(popover::menu_separator().into_any_element());
             }
             let open = submenu == Some(group);

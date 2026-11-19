@@ -2549,6 +2549,9 @@ impl Shell {
         let transcript_events = cx.subscribe(&transcript, Self::on_transcript_event);
         let data_dir = boot.data_dir.clone();
         let mut settings = settings::current(cx);
+        // Aurea's sidebar is one list (no projects or other devices to group
+        // by); a profile saved under Zeron's grouping falls back to it.
+        settings.sidebar_organization = settings::SidebarOrganization::InOneList;
         state.update(cx, |state, cx| {
             state.watch_clock_transitions(cx);
             state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
