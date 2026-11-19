@@ -75,11 +75,11 @@ SUITE_INPUTS: dict[str, list[str]] = {
 # The workspace packages each suite builds and tests (their dependencies are added).
 SUITE_PACKAGES: dict[str, list[str]] = {
     "core": ["zeron-harness", "zeron-engine", "zeron-sync", "zeron-update", "zeron-doc", "zeron-preview",
-             "zeron-mcp", "zeron-proto", "zeron-rpc", "zeron-orb",
+             "zeron-mcp", "zeron-proto", "zeron-rpc",
              "zeron-cli", "zeron-launch", "zeron-notify"],
     "ui": ["zeron-ui"],
     "windows": ["zeron-ui", "zeron-harness", "zeron", "zeron-update", "zeron-proto", "zeron-engine"],
-    "macos": ["zeron-update", "zeron-preview", "zeron-ui", "zeron-text", "zeron"],
+    "macos": ["zeron-update", "zeron-preview", "zeron-ui", "zeron"],
 }
 
 # A ../ path that names something (a bare "../.." names no file); "/../x" as in

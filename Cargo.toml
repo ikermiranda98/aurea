@@ -2,12 +2,10 @@
 resolver = "2"
 members = [
     "crates/voice",
-    "crates/orb",
     "crates/veil",
     "crates/term",
     "crates/term-link",
     "crates/theme",
-    "crates/audio",
     "crates/proto",
     "crates/preview",
     "crates/preview-label",
@@ -27,7 +25,6 @@ members = [
     "crates/syntax",
     "crates/markdown",
     "crates/mcp",
-    "crates/text",
     "crates/visual",
     "crates/visual-gpu",
     "crates/zatex",
@@ -42,11 +39,9 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
-zeron-orb = { path = "crates/orb" }
 zeron-veil = { path = "crates/veil" }
 zeron-term = { path = "crates/term" }
 zeron-term-link = { path = "crates/term-link" }
-zeron-audio = { path = "crates/audio" }
 zeron-proto = { path = "crates/proto" }
 zeron-preview = { path = "crates/preview" }
 zeron-preview-label = { path = "crates/preview-label" }
@@ -67,7 +62,6 @@ zeron-syntax = { path = "crates/syntax" }
 zeron-markdown = { path = "crates/markdown" }
 zeron-theme = { path = "crates/theme" }
 zeron-mcp = { path = "crates/mcp" }
-zeron-text = { path = "crates/text" }
 zatex = { path = "crates/zatex" }
 zeron-visual = { path = "crates/visual" }
 zeron-visual-gpu = { path = "crates/visual-gpu" }
