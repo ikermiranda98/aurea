@@ -21,7 +21,6 @@ mod linux;
 mod macos;
 
 mod shortcut;
-pub(crate) use shortcut::capture_allowed;
 pub use shortcut::{set_recording, set_shortcut, validate_shortcut};
 
 pub const fn is_desktop() -> bool {

@@ -16,7 +16,7 @@ mod appshots_page;
 use crate::settings::search::{SearchAnchor, SettingId};
 use crate::settings::widgets;
 use crate::settings::{
-    ComposerSendBehavior, KeyEquivalents, KeymapConfig, SavePolicy,
+    ComposerSendBehavior, KeyEquivalents, KeymapConfig,
     ShortcutId, canonical_key, combo_from_keystroke, display_combo, key_equivalents,
 };
 use crate::state::AppState;

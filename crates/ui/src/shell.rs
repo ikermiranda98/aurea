@@ -24,10 +24,10 @@ use gpui::{
 
 use gpui_tokio::Tokio;
 use zeron_engine::InstanceLock;
-use zeron_proto::{AuthState, ChatConfig, HarnessId, WorkspaceScope};
+use zeron_proto::{AuthState, WorkspaceScope};
 use zeron_rpc::methods;
 
-use crate::changes::{Changes, ChangesEvent, DiscardWorkingTreeRequest};
+use crate::changes::DiscardWorkingTreeRequest;
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
 use crate::loaders;
@@ -59,8 +59,6 @@ use crate::transcript::{self, Transcript, TranscriptEvent};
 
 mod actions_ui;
 mod chat_dropzone;
-#[cfg(test)]
-mod chat_rename_tests;
 mod command_palette;
 mod files_panel;
 mod harness_updates;
@@ -84,30 +82,10 @@ mod thread_search;
 mod trading_gate;
 use side_chats::SideChatTab;
 mod tabs;
+#[cfg(test)]
 use tabs::NewSessionTarget;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
-
-/// The sidebar line speaks for the whole connection, and whether its glyph
-/// is the amber dot (else the reconnect spinner). One chat's sync reads in
-/// its own composer and transcript, so the two never tell different
-/// stories. A failed local save is the exception, whichever chat it hit:
-/// it outranks the network.
-fn connection_pill_caption(conn: &zeron_proto::Connectivity) -> Option<(&'static str, bool)> {
-    use zeron_proto::{ChatSyncState, ConnectivityState as S};
-    if conn
-        .chats
-        .iter()
-        .any(|chat| chat.sync_state == ChatSyncState::StorageError)
-    {
-        return Some(("Changes could not be saved", true));
-    }
-    match conn.state {
-        S::Disabled | S::Connected => None,
-        S::Offline => Some(("Offline — sends are saved", true)),
-        S::Reconnecting => Some(("Reconnecting…", false)),
-    }
-}
 
 actions!(
     shell,
@@ -131,6 +109,7 @@ actions!(
 /// Restore a default focus only after an in-flight handoff has had a frame to
 /// claim the window. A synchronous focus-lost fallback can otherwise steal
 /// focus from controls that are mounting in response to the same input event.
+#[cfg(test)]
 pub(crate) fn restore_focus_if_empty_on_next_frame<T: 'static>(
     focus: FocusHandle,
     window: &mut Window,
@@ -1071,17 +1050,6 @@ pub fn resort_offsets(
     offsets
 }
 
-/// Height changes do not constitute a list reorder. In particular, sidebar
-/// disclosures animate their own height and must not also trigger FLIP offsets
-/// on every following keyed section.
-fn sidebar_key_order_changed(old: &[(String, f32)], new: &[(String, f32)]) -> bool {
-    old.len() != new.len()
-        || old
-            .iter()
-            .zip(new)
-            .any(|((old_key, _), (new_key, _))| old_key != new_key)
-}
-
 /// Exact active-session row height. Harness identity lives on the title line
 /// and the Working glyph lives in the status corner, so neither adds a third
 /// line. Compact rows omit the metadata line and its preceding gap entirely;
@@ -1112,14 +1080,9 @@ fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool) -
 
 /// Flex gap between sidebar list items.
 const SIDEBAR_LIST_GAP: f32 = 2.0;
-/// Fixed vertical slot occupied by one active sidebar card.
-#[cfg(test)]
-const SIDEBAR_SESSION_SLOT: f32 = 61.0 + SIDEBAR_LIST_GAP;
 const SIDEBAR_DRAG_SCROLL_BAND: f32 = 48.0;
 const SIDEBAR_DRAG_SCROLL_MAX: f32 = 12.0;
 const SIDEBAR_DRAG_SCROLL_FRAME_MS: u64 = 16;
-const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
-
 /// Active and archived sessions share harness/title geometry.
 const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
 /// Compact-row time slot while a text jump hint ("Ctrl+9") stands in for the
@@ -1127,10 +1090,6 @@ const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
 /// default-size pixels; scaled with the UI font via `ui_rems`.
 const COMPACT_JUMP_HINT_WIDTH: f32 = 42.0;
 const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
-/// The sidebar footer's profile and settings buttons share one hit target.
-const SIDEBAR_FOOTER_BUTTON_SIZE: f32 = 28.0;
-const SIDEBAR_FOOTER_AVATAR_SIZE: f32 = 16.0;
-
 /// Keep the fade short so only the last few glyphs recede. Tracking clipped
 /// content lets the shared paint-time overflow gate leave fitting labels intact.
 pub(crate) fn sidebar_faded_label(
@@ -1156,11 +1115,6 @@ pub(crate) fn sidebar_faded_label(
     .fade_right(true)
     .fade_label_overflow(&overflow)
 }
-/// Square action beside the account trigger in the sidebar footer.
-const SIDEBAR_FOOTER_ACTION_SIZE: f32 = SIDEBAR_FOOTER_BUTTON_SIZE;
-/// Breathing room between the account trigger and its adjacent action.
-const SIDEBAR_FOOTER_ACTION_GAP: f32 = 4.0;
-
 /// A chat row's inline title editor, swapped in for its faded title while
 /// the chat is renamed in place: the title's 13/17 type in an accent-ringed
 /// field.
@@ -1196,9 +1150,6 @@ pub(crate) fn chat_title_editor(
 /// Ramp height of the sidebar's scroll-edge fade (the gpui
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
 const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
-
-/// Target of the sidebar's "Star on GitHub" banner (same as the landing page).
-const GITHUB_REPO_URL: &str = "https://github.com/zeronsh/comet";
 
 /// New-thread controls float over the tail of a top-anchored image hero. The
 /// hero reaches below the composer, giving its lower mask room to dissolve
@@ -1261,13 +1212,6 @@ struct SidebarSessionDrag {
     visible_ids: std::sync::Arc<Vec<String>>,
     filter: Option<String>,
     profile_key: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum SidebarSessionDrop {
-    Pinned(usize),
-    Regular,
-    Section(String),
 }
 
 struct SidebarSessionTransfer {
@@ -1374,16 +1318,6 @@ struct SidebarSectionDragState {
     pointer: Point<Pixels>,
     siblings: std::collections::HashMap<String, SidebarSessionSlide>,
     generation: u64,
-}
-
-type SidebarKeyedRow = (String, f32, AnyElement);
-
-struct SidebarSessionRows {
-    custom_count: usize,
-    regular_count: usize,
-    rows: Vec<SidebarKeyedRow>,
-    pinned_count: usize,
-    moving_row: Option<(AnyElement, f32)>,
 }
 
 /// Ghost chip following the pointer while a surface tab drags.
@@ -1784,15 +1718,6 @@ fn resolve_shell_escape(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AccountMenuAction {
-    EnableSync,
-    SyncInProgress,
-    /// Postponed switch wizard (or legacy restart fallback) — reopen it.
-    RestartPending,
-    SignOut,
-}
-
 #[derive(Debug, Clone)]
 enum DiscardWorkingTreeFlow {
     Confirm(DiscardWorkingTreeRequest),
@@ -1901,69 +1826,6 @@ fn local_work_phrase(chats: usize, spaces: usize) -> Option<String> {
     }
 }
 
-fn account_menu_action(scope: Option<WorkspaceScope>, flow: SyncFlow) -> Option<AccountMenuAction> {
-    match scope {
-        Some(WorkspaceScope::Local) => match flow {
-            SyncFlow::Idle => Some(AccountMenuAction::EnableSync),
-            SyncFlow::Enabling | SyncFlow::Canceling => Some(AccountMenuAction::SyncInProgress),
-            SyncFlow::SwitchOffer { .. } | SyncFlow::RestartPending { .. } => {
-                Some(AccountMenuAction::RestartPending)
-            }
-            SyncFlow::ImportFailed { .. } => Some(AccountMenuAction::RestartPending),
-            SyncFlow::Switching { .. }
-            | SyncFlow::Importing { .. }
-            | SyncFlow::ImportDone { .. } => Some(AccountMenuAction::SyncInProgress),
-            SyncFlow::SignOutConfirm
-            | SyncFlow::SigningOut
-            | SyncFlow::SignedOutRestartRequired => None,
-        },
-        Some(WorkspaceScope::Synced) => match flow {
-            SyncFlow::SignedOutRestartRequired => None,
-            // A pending import failure must stay reachable: this is the only
-            // surface that can reopen the retry dialog on a synced runtime.
-            SyncFlow::ImportFailed { .. } => Some(AccountMenuAction::RestartPending),
-            _ if flow.is_switch_lifecycle() => Some(AccountMenuAction::SyncInProgress),
-            _ => Some(AccountMenuAction::SignOut),
-        },
-        Some(WorkspaceScope::Development) | None => None,
-    }
-}
-
-/// The sidebar footer's profile label and the account menu's identity line.
-/// Anything without a signed-in account reads "Local"; the menu carries the
-/// storage/sync detail.
-fn sidebar_account_identity(
-    scope: Option<WorkspaceScope>,
-    flow: SyncFlow,
-    user: Option<&zeron_proto::UserProfile>,
-) -> (SharedString, SharedString) {
-    match scope {
-        Some(WorkspaceScope::Local) => {
-            let identity = if matches!(flow, SyncFlow::RestartPending { .. }) {
-                "Sync ready after restart"
-            } else {
-                "Stored on this device"
-            };
-            ("Local".into(), identity.into())
-        }
-        Some(WorkspaceScope::Development) => {
-            ("Development".into(), "Authentication disabled".into())
-        }
-        Some(WorkspaceScope::Synced) | None => match user {
-            Some(user) => {
-                let name = user
-                    .name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or(&user.email);
-                (name.to_owned().into(), user.email.clone().into())
-            }
-            None => ("Local".into(), "Not signed in".into()),
-        },
-    }
-}
-
 fn sync_flow_after_auth(
     flow: SyncFlow,
     scope: Option<WorkspaceScope>,
@@ -2026,28 +1888,6 @@ struct SubagentTab {
     _events: Subscription,
 }
 
-/// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
-/// State and event handlers stay on Shell. Explicit Shell notifications still
-/// invalidate the sidebar, including selection, menus, theme and navigation.
-struct SidebarPane {
-    shell: gpui::WeakEntity<Shell>,
-    _observation: Subscription,
-}
-
-impl Render for SidebarPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::transcript::record_view_frame("sidebar");
-        let Some(shell) = self.shell.upgrade() else {
-            return div().into_any_element();
-        };
-        let inner = shell.update(cx, |shell, cx| {
-            let theme = Theme::of(cx).clone();
-            shell.render_chat_sidebar(&theme, cx)
-        });
-        div().size_full().child(inner).into_any_element()
-    }
-}
-
 /// A button in the "Check for Updates…" dialog.
 #[derive(Debug, Clone, Copy)]
 enum UpdatePromptButton {
@@ -2068,7 +1908,6 @@ enum PendingExit {
 
 pub struct Shell {
     state: Entity<AppState>,
-    sidebar_pane: Entity<SidebarPane>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
     /// Measured height of the bottom chrome stack (status strip + composer +
@@ -2617,14 +2456,8 @@ impl Shell {
         let transcript_invalidation = cx.observe_self(|shell, cx| {
             shell.transcript.update(cx, |_, cx| cx.notify());
         });
-        let shell = cx.entity();
-        let sidebar_pane = cx.new(|cx| SidebarPane {
-            shell: shell.downgrade(),
-            _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
-        });
         Self {
             state,
-            sidebar_pane,
             transcript,
             composer,
             // Seed with the compact composer stack's rough height so the
@@ -3318,12 +3151,6 @@ impl Shell {
         } else {
             fit.sidebar_limit
         }
-    }
-
-    /// Does the selected space's folder have git? Owner-stamped and synced —
-    /// gates the Changes pane, its toggle, and Cmd-B with zero RPCs.
-    fn space_git_detected(&self, cx: &App) -> bool {
-        self.state.read(cx).selected_space_git()
     }
 
     /// The current chat's changes-pane flag (per-session, in-memory), gated on
@@ -4780,7 +4607,7 @@ impl Shell {
                 &page,
                 // The code size lives in the typography global; with no file
                 // editors there is nothing else to push it into.
-                |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
+                |_this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
                     AppearanceSettingsEvent::CodeFontSizeChanged(_) => cx.notify(),
                 },
             ));
@@ -5734,15 +5561,6 @@ impl Shell {
         cx.notify();
     }
 
-    fn request_sign_out(&mut self, cx: &mut Context<Self>) {
-        self.close_user_menu(cx);
-        if self.state.read(cx).workspace_scope != Some(WorkspaceScope::Synced) {
-            return;
-        }
-        self.sync_flow = SyncFlow::SignOutConfirm;
-        cx.notify();
-    }
-
     fn confirm_sign_out(&mut self, cx: &mut Context<Self>) {
         self.start_local_runtime_transition(true, cx);
     }
@@ -5864,23 +5682,6 @@ impl Shell {
             }
             SyncFlow::ImportFailed { .. } => {
                 self.sync_flow = SyncFlow::ImportFailed { notice_open: false };
-            }
-            _ => return,
-        }
-        cx.notify();
-    }
-
-    fn reopen_sync_notice(&mut self, cx: &mut Context<Self>) {
-        self.close_user_menu(cx);
-        match self.sync_flow {
-            SyncFlow::RestartPending { .. } => {
-                self.sync_flow = SyncFlow::RestartPending { notice_open: true };
-            }
-            SyncFlow::SwitchOffer { .. } => {
-                self.sync_flow = SyncFlow::SwitchOffer { notice_open: true };
-            }
-            SyncFlow::ImportFailed { .. } => {
-                self.sync_flow = SyncFlow::ImportFailed { notice_open: true };
             }
             _ => return,
         }
@@ -7773,7 +7574,7 @@ impl Shell {
         } else {
             format!("chat-{id}")
         };
-        let pr_device = self
+        let _pr_device = self
             .state
             .read(cx)
             .chats
@@ -7871,7 +7672,7 @@ impl Shell {
                     format!("{row_id}-working"),
                     2.0,
                     theme.glyph,
-                    self.sidebar_pane.entity_id(),
+                    cx.entity_id(),
                     cx,
                 )
                 .into_any_element()
@@ -7982,7 +7783,7 @@ impl Shell {
                             format!("{row_id}-working"),
                             2.0,
                             theme.glyph,
-                            self.sidebar_pane.entity_id(),
+                            cx.entity_id(),
                             cx,
                         )
                         .into_any_element()
@@ -8530,768 +8331,6 @@ impl Shell {
             .into_any_element()
     }
 
-    fn render_pinned_session_group(
-        items: Vec<AnyElement>,
-        extra_gap: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let count = items.len();
-        let row_centers = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Pixels>::new()));
-        div()
-            .on_children_prepainted({
-                let row_centers = row_centers.clone();
-                move |bounds, _, _| {
-                    *row_centers.borrow_mut() = bounds.iter().map(|row| row.center().y).collect();
-                }
-            })
-            .id("sidebar-pinned-sessions")
-            .flex()
-            .flex_col()
-            .gap(px(SIDEBAR_LIST_GAP))
-            .on_drag_move::<SidebarSessionDrag>(cx.listener(
-                move |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
-                    let payload = event.drag(cx).clone();
-                    if !event.bounds.contains(&event.event.position)
-                        || !this.sidebar_scroll.bounds().contains(&event.event.position)
-                        || payload.visible_ids.len() != count
-                    {
-                        return;
-                    }
-                    let rel_y = f32::from(event.event.position.y) - f32::from(event.bounds.top());
-                    if !payload.visible_ids.contains(&payload.chat_id) {
-                        let top =
-                            f32::from(event.bounds.bottom() - this.sidebar_scroll.bounds().top())
-                                - extra_gap
-                                + SIDEBAR_LIST_GAP
-                                - f32::from(this.sidebar_scroll.offset().y);
-                        if let Some(drag) = this.sidebar_session_transfer.as_mut() {
-                            drag.preview = Some(SidebarSessionGap {
-                                group: "pinned".into(),
-                                index: count,
-                                pinned: true,
-                                top,
-                            });
-                        }
-                    }
-                    if payload.visible_ids.contains(&payload.chat_id)
-                        && let Some(over) =
-                            spaces::row_drop_index(rel_y, &this.sidebar_pinned_heights, false)
-                    {
-                        this.update_pinned_session_drag(&payload, over, cx);
-                    }
-                },
-            ))
-            .on_drop::<SidebarSessionDrag>(cx.listener(
-                move |this, payload: &SidebarSessionDrag, window, cx| {
-                    if payload.visible_ids.len() == count {
-                        let index = this
-                            .sidebar_session_transfer
-                            .as_ref()
-                            .filter(|_| !payload.visible_ids.contains(&payload.chat_id))
-                            .and_then(|drag| drag.preview.as_ref())
-                            .filter(|gap| gap.pinned)
-                            .map(|gap| gap.index)
-                            .or_else(|| this.pinned_session_drag.as_ref().map(|drag| drag.over))
-                            .unwrap_or_else(|| {
-                                row_centers
-                                    .borrow()
-                                    .iter()
-                                    .position(|center| window.mouse_position().y < *center)
-                                    .unwrap_or(count)
-                            });
-                        this.finish_sidebar_session_transfer(
-                            payload,
-                            SidebarSessionDrop::Pinned(index),
-                            cx,
-                        );
-                    } else {
-                        this.cancel_sidebar_session_transfer(cx);
-                    }
-                },
-            ))
-            .children(items)
-            .when(extra_gap > 0.0, |el| {
-                let height = extra_gap - if count > 0 { SIDEBAR_LIST_GAP } else { 0.0 };
-                el.child(
-                    div()
-                        .flex_none()
-                        .h(px(height.max(0.0)))
-                        .mb(px(height.min(0.0))),
-                )
-            })
-            .into_any_element()
-    }
-
-    /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
-    /// section (folder + device rows, add-space), the global Active sessions
-    /// list, the notice strip, and the UserMenu (§1.6).
-    /// Global connection health and any chat's storage failure (see
-    /// [`connection_pill_caption`]). No surface,
-    /// no border (v0.2.12 feedback): a bare spinner + faint caption while
-    /// reconnecting; an amber dot only when the OS says offline. The
-    /// transport error belongs in logs, not the sidebar.
-    fn render_connection_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (caption, warning) = connection_pill_caption(&self.state.read(cx).connectivity)?;
-        let label: SharedString = caption.into();
-        let glyph = if warning {
-            div()
-                .size(px(5.0))
-                .rounded_full()
-                .bg(theme.warning)
-                .into_any_element()
-        } else {
-            loaders::mini_mono_spinner(
-                "connection-spinner",
-                2.0,
-                theme.text_muted,
-                self.sidebar_pane.entity_id(),
-                cx,
-            )
-            .into_any_element()
-        };
-        Some(
-            crate::motion::fade_in(
-                "connection-pill",
-                div()
-                    .id("connection-pill")
-                    .mx(px(Theme::SPACE_SM + 4.0))
-                    .mb(px(Theme::SPACE_SM))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(glyph)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_faint)
-                            .child(label),
-                    ),
-            )
-            .into_any_element(),
-        )
-    }
-
-    fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        self.reconcile_session_hover_card(cx);
-        if self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
-            !cx.has_active_drag() || !self.sidebar_session_transfer_is_valid(&drag.payload, cx)
-        }) {
-            self.cancel_sidebar_session_transfer(cx);
-        }
-        // A release outside the sidebar ends GPUI's drag without calling the
-        // sidebar drop handler. Heal the ephemeral slide state here.
-        if self.pinned_session_drag.is_some()
-            && (!cx.has_active_drag() || !self.pinned_session_drag_is_valid(cx))
-        {
-            self.cancel_pinned_session_drag(cx);
-        }
-        if self.sidebar_section_drag.is_some()
-            && (!cx.has_active_drag() || !self.sidebar_section_drag_is_valid(cx))
-        {
-            self.cancel_sidebar_section_drag(cx);
-        }
-
-        // Keyed rows: (stable key, estimated height, element) — the key + height
-        // list drives the §1.6 resort FLIP diff below (attention-bucket
-        // promotions glide; cleared rows just go).
-        let session_rows = self.render_active_rows(theme, cx);
-        let moving_row = session_rows
-            .moving_row
-            .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));
-        let pinned_count = session_rows.pinned_count;
-        let custom_count = session_rows.custom_count;
-        let regular_start = pinned_count + custom_count;
-        let mut keyed = session_rows.rows;
-        let regular_count = session_rows.regular_count;
-        let ungrouped = self.settings.sidebar_organization == SidebarOrganization::InOneList;
-        let regular_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
-            + keyed
-                .iter()
-                .skip(regular_start)
-                .map(|(_, height, _)| height)
-                .sum::<f32>()
-            + SIDEBAR_LIST_GAP * keyed.len().saturating_sub(regular_start + 1) as f32;
-        let regular_body_height =
-            if keyed.len() == regular_start && self.sidebar_session_transfer.is_some() {
-                spaces::SIDEBAR_DISCLOSURE_BODY_INSET
-                    + 48.0
-                    + self.sidebar_transfer_extra_gap("regular")
-            } else {
-                regular_body_height
-            };
-        let pinned_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
-            + self.sidebar_transfer_extra_gap("pinned")
-            + keyed
-                .iter()
-                .take(pinned_count)
-                .map(|(_, height, _)| height)
-                .sum::<f32>()
-            + SIDEBAR_LIST_GAP * pinned_count.saturating_sub(1) as f32;
-
-        // Resort glide (§1.6 View Transitions parity): when the ORDER of a live
-        // list changes (new activity resort, grouping flip), surviving rows
-        // glide from their old y to the new one — layout is already at the new
-        // position; the offset is a paint-only relative inset animated to 0
-        // over 260ms cubic-bezier(0.22,1,0.36,1). New rows fade in; removals
-        // just go (matching the original). First fill and chat switches (which
-        // don't reorder) never animate.
-        let mut order: Vec<(String, f32)> = Vec::with_capacity(keyed.len() + 2);
-        let show_pinned_section = pinned_count > 0 || self.sidebar_session_transfer.is_some();
-        if show_pinned_section {
-            order.push((
-                "sidebar-pinned-header".to_string(),
-                spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
-                    + if self.pinned_open {
-                        spaces::SIDEBAR_DISCLOSURE_BODY_INSET - SIDEBAR_LIST_GAP
-                    } else {
-                        0.0
-                    },
-            ));
-        }
-        for (ix, (key, height, _)) in keyed.iter().enumerate() {
-            if ungrouped && ix == regular_start {
-                order.push((
-                    "sidebar-sessions-header".into(),
-                    spaces::SIDEBAR_DISCLOSURE_HEADER_HEIGHT
-                        + if show_pinned_section || custom_count > 0 {
-                            12.0
-                        } else {
-                            0.0
-                        }
-                        + if self.sessions_open {
-                            spaces::SIDEBAR_DISCLOSURE_BODY_INSET - SIDEBAR_LIST_GAP
-                        } else {
-                            0.0
-                        },
-                ));
-            }
-            if ungrouped && ix >= regular_start && !self.sessions_open {
-                continue;
-            }
-            if ix < pinned_count && !self.pinned_open {
-                continue;
-            }
-            order.push((key.clone(), *height));
-        }
-        if self.pinned_session_drag.is_none()
-            && self.sidebar_session_transfer.is_none()
-            && self.sidebar_section_drag.is_none()
-            && self.sidebar_prev_order != order
-        {
-            let key_order_changed = sidebar_key_order_changed(&self.sidebar_prev_order, &order);
-            if !self.sidebar_prev_order.is_empty() {
-                // A disclosure already animates its own body height. Applying
-                // FLIP offsets when only keyed heights change double-counts
-                // that movement, leaving gaps and momentary overlaps between
-                // the first group, following groups, and Archived.
-                let offsets = if key_order_changed {
-                    resort_offsets(&self.sidebar_prev_order, &order, SIDEBAR_LIST_GAP)
-                } else {
-                    std::collections::HashMap::new()
-                };
-                let prev_keys: std::collections::HashSet<&str> = self
-                    .sidebar_prev_order
-                    .iter()
-                    .map(|(k, _)| k.as_str())
-                    .collect();
-                let new_keys: std::collections::HashSet<String> = order
-                    .iter()
-                    .filter(|(k, _)| !prev_keys.contains(k.as_str()))
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                if key_order_changed && (!offsets.is_empty() || !new_keys.is_empty()) {
-                    self.resort_epoch += 1;
-                    self.sidebar_resort = offsets;
-                    self.sidebar_new_keys = new_keys;
-                }
-            }
-            self.sidebar_prev_order = order;
-        }
-        let epoch = self.resort_epoch;
-        let pinned_drag = self
-            .pinned_session_drag
-            .as_ref()
-            .filter(|_| {
-                self.sidebar_session_transfer
-                    .as_ref()
-                    .is_none_or(|drag| drag.preview.as_ref().is_none_or(|gap| gap.pinned))
-            })
-            .map(|drag| (drag.from, drag.over, drag.prev_over, drag.epoch));
-        // A lifted custom section leaves an empty slot behind and paints in
-        // the list's movement layer; its siblings slide around the gap.
-        let section_offsets = self
-            .sidebar_section_drag_offsets()
-            .filter(|(_, offsets)| offsets.len() == custom_count);
-        let lifted_section = section_offsets.as_ref().and_then(|(from, _)| {
-            let height = self.sidebar_section_drag.as_ref()?.heights[*from];
-            let (_, _, slot) = keyed.get_mut(pinned_count + from)?;
-            let placeholder = div().flex_none().h(px(height)).into_any_element();
-            let section = std::mem::replace(slot, placeholder);
-            self.render_lifted_sidebar_section(section, theme)
-        });
-        let list_items: Vec<AnyElement> = keyed
-            .into_iter()
-            .enumerate()
-            .map(|(ix, (key, _, element))| {
-                if let Some((_, offsets)) = &section_offsets
-                    && let Some(offset) =
-                        ix.checked_sub(pinned_count).and_then(|ix| offsets.get(ix))
-                {
-                    return div()
-                        .relative()
-                        .top(px(*offset))
-                        .child(element)
-                        .into_any_element();
-                }
-                if ix < pinned_count
-                    && let Some((from, over, prev_over, drag_epoch)) = pinned_drag
-                {
-                    // Its actual row is drawn once in the sidebar's movement layer.
-                    if ix == from {
-                        return element;
-                    }
-                    let start = crate::terminal::panel::slide_offset(ix, from, prev_over)
-                        * (self
-                            .sidebar_pinned_heights
-                            .get(from)
-                            .copied()
-                            .unwrap_or(61.0)
-                            + SIDEBAR_LIST_GAP);
-                    let target = crate::terminal::panel::slide_offset(ix, from, over)
-                        * (self
-                            .sidebar_pinned_heights
-                            .get(from)
-                            .copied()
-                            .unwrap_or(61.0)
-                            + SIDEBAR_LIST_GAP);
-                    if self.reduced_motion {
-                        return div()
-                            .relative()
-                            .top(px(target))
-                            .child(element)
-                            .into_any_element();
-                    }
-                    return div()
-                        .child(element)
-                        .with_animation(
-                            (
-                                "pinned-session-slide",
-                                (ix as u64) | ((drag_epoch as u64) << 32),
-                            ),
-                            TAB_SLIDE.animation(),
-                            move |el, t| el.relative().top(px(motion::lerp(start, target, t))),
-                        )
-                        .into_any_element();
-                }
-                if self.sidebar_session_transfer.is_some() {
-                    return element;
-                }
-                if let Some(dy) = self.sidebar_resort.get(&key).copied() {
-                    let id = SharedString::from(format!("resort-{epoch}-{key}"));
-                    div()
-                        .child(element)
-                        .with_animation(id, RESORT.animation(), move |el, t| {
-                            el.relative().top(px(dy * (1.0 - t)))
-                        })
-                        .into_any_element()
-                } else if self.sidebar_new_keys.contains(&key) {
-                    let id = SharedString::from(format!("row-in-{epoch}-{key}"));
-                    motion::fade_quick(id, div().child(element)).into_any_element()
-                } else {
-                    element
-                }
-            })
-            .collect();
-
-        // t3code's archived accordion, below the active list.
-        let archived_section = self.render_archived_section(theme, cx);
-
-        // The space filter lives ABOVE the scroll region (fixed) so its
-        // dropdown can float without being clipped by the list's overflow.
-        let filter_row = self.render_spaces_filter(theme, cx);
-        let active_list = if !list_items.is_empty() {
-            let mut pinned_items = list_items;
-            let mut custom_items = pinned_items.split_off(pinned_count);
-            let regular_items = custom_items.split_off(custom_count);
-            let regular_empty = regular_items.is_empty();
-            let pinned_group = show_pinned_section
-                .then(|| self.render_pinned_section(pinned_items, pinned_body_height, theme, cx));
-            let section_bounds = self.sidebar_section_bounds.clone();
-            div()
-                .id("sidebar-active-sessions")
-                .flex()
-                .flex_col()
-                .gap(px(SIDEBAR_LIST_GAP))
-                .pb(px(Theme::SPACE_SM))
-                .when_some(pinned_group, |el, group| el.child(group))
-                // Each section's painted slot measures the reorder's hit
-                // testing and displacement.
-                .when(!custom_items.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(SIDEBAR_LIST_GAP))
-                            .on_children_prepainted(move |bounds, _, _| {
-                                *section_bounds.borrow_mut() = bounds;
-                            })
-                            .children(custom_items),
-                    )
-                })
-                .when(
-                    !regular_items.is_empty() || self.sidebar_session_transfer.is_some(),
-                    |el| {
-                        el.child(
-                            self.render_sessions_section(
-                                div()
-                                    .id("sidebar-regular-sessions")
-                                    .debug_selector(|| "sidebar-regular-sessions".into())
-                                    .on_drag_move::<SidebarSessionDrag>(cx.listener(
-                                        move |this,
-                                              event: &gpui::DragMoveEvent<SidebarSessionDrag>,
-                                              _,
-                                              _| {
-                                            if regular_empty
-                                                && event.bounds.contains(&event.event.position)
-                                            {
-                                                let top = f32::from(
-                                                    event.bounds.top()
-                                                        - this.sidebar_scroll.bounds().top()
-                                                        - this.sidebar_scroll.offset().y,
-                                                );
-                                                if let Some(drag) =
-                                                    this.sidebar_session_transfer.as_mut()
-                                                {
-                                                    drag.preview = Some(SidebarSessionGap {
-                                                        group: "regular".into(),
-                                                        index: 0,
-                                                        pinned: false,
-                                                        top,
-                                                    });
-                                                }
-                                                return;
-                                            }
-                                            if event.bounds.contains(&event.event.position)
-                                                && let Some(drag) =
-                                                    this.sidebar_session_transfer.as_mut()
-                                                && drag
-                                                    .preview
-                                                    .as_ref()
-                                                    .is_some_and(|gap| gap.pinned)
-                                            {
-                                                drag.preview = None;
-                                            }
-                                        },
-                                    ))
-                                    .on_drop::<SidebarSessionDrag>(cx.listener(
-                                        |this, payload, _, cx| {
-                                            this.finish_sidebar_session_transfer(
-                                                payload,
-                                                SidebarSessionDrop::Regular,
-                                                cx,
-                                            );
-                                        },
-                                    ))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(SIDEBAR_LIST_GAP))
-                                    .when(regular_items.is_empty(), |el| {
-                                        el.h(px(48.0 + self.sidebar_transfer_extra_gap("regular")))
-                                            .justify_center()
-                                            .px(px(10.0))
-                                            .text_color(theme.text_muted)
-                                            .text_size(crate::typography::ui_rems(12.0))
-                                            .child("Drop here to unpin")
-                                    })
-                                    .children(regular_items)
-                                    .into_any_element(),
-                                regular_body_height,
-                                regular_count,
-                                show_pinned_section || custom_count > 0,
-                                theme,
-                                cx,
-                            ),
-                        )
-                    },
-                )
-                .into_any_element()
-        } else {
-            div()
-                .px(px(Theme::SPACE_SM))
-                .pb(px(Theme::SPACE_SM))
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_faint)
-                .child(SharedString::from("No sessions yet"))
-                .into_any_element()
-        };
-
-        // The (filtered) Sessions list scrolls inside an EdgeFade scope —
-        // a true per-glyph gradient at active overflow edges. Glass-safe
-        // (no painted overlay can fade content over see-through blur) and
-        // equivalent on opaque themes: alpha→0 reveals the surface tone
-        // underneath, same as the gradient overlays it replaced. Overflow
-        // is read at PAINT time via the scroll handle — render-time gating
-        // rode the previous frame's offset, so the last frame of a content
-        // shrink (row archived while scrolled) left a phantom fade stuck
-        // over an unscrollable list (user report).
-        let sidebar_lists = crate::edge_fade::edge_faded(
-            SIDEBAR_GLASS_FADE_BAND,
-            true,
-            true,
-            div().relative().flex_1().min_h_0().child(crate::overscroll::overscroll(
-                "sidebar-overscroll",
-                crate::overscroll::OverscrollSource::Handle(self.sidebar_scroll.clone()),
-                div()
-                    .id("sidebar-lists")
-                    .relative()
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.sidebar_scroll)
-                    .on_drag_move::<SidebarSessionDrag>(cx.listener(
-                        move |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
-                            if let Some(transfer) = this.sidebar_session_transfer.as_mut() {
-                                transfer.viewport = Some(event.bounds);
-                            }
-                            if !event.bounds.contains(&event.event.position) {
-                                if let Some(transfer) = this.sidebar_session_transfer.as_mut() {
-                                    transfer.preview = None;
-                                }
-                                return;
-                            }
-                            let payload = event.drag(cx).clone();
-                            this.track_pinned_session_drag_pointer(
-                                payload,
-                                f32::from(event.event.position.y),
-                                f32::from(event.bounds.top()),
-                                f32::from(event.bounds.bottom()),
-                                cx,
-                            );
-                        },
-                    ))
-                    // Empty space and Archived are not transfer targets.
-                    .on_drop::<SidebarSessionDrag>(cx.listener(
-                        |this, _: &SidebarSessionDrag, _, cx| {
-                            this.cancel_sidebar_session_transfer(cx);
-                        },
-                    ))
-                    // A section reorder lands wherever it is released in the list.
-                    .on_drag_move::<SidebarSectionDrag>(cx.listener(
-                        |this, event: &gpui::DragMoveEvent<SidebarSectionDrag>, _, cx| {
-                            this.track_sidebar_section_drag(event.event.position, cx);
-                        },
-                    ))
-                    .on_drop::<SidebarSectionDrag>(cx.listener(
-                        |this, payload: &SidebarSectionDrag, _, cx| {
-                            this.finish_sidebar_section_drag(payload, cx);
-                        },
-                    ))
-                    .px(px(Theme::SPACE_SM))
-                    .flex()
-                    .flex_col()
-                    // No "Sessions" header (user request) — the list
-                    // is the whole column; a little air stands in.
-                    .pt(px(SIDEBAR_LIST_PAD_TOP))
-                    .child(active_list)
-                    .children(archived_section)
-                    .children(moving_row)
-                    .children(lifted_section),
-            )),
-        )
-        .fade_overflow_y(&self.sidebar_scroll);
-
-        let update_strip = self.render_update_strip(theme, cx);
-        // Stacked above the update strip, the banner needs its own gap; alone
-        // it leans on the user-menu block's padding like the strip does.
-        let github_star_banner = self.render_github_star_banner(update_strip.is_some(), theme, cx);
-
-        div()
-            .w(px(self.sidebar_content_width()))
-            .h_full()
-            .flex()
-            .flex_col()
-            // (No titlebar strip: the unified window titlebar spans the whole
-            // window above this column.)
-            .child(filter_row)
-            .child(sidebar_lists)
-            // Global connection pill (durable-by-design UI truth): appears
-            // whenever the edge posture is degraded; hidden while healthy —
-            // appearing IS the signal.
-            .when_some(self.render_connection_pill(theme, cx), |el, pill| {
-                el.child(pill)
-            })
-            // "Star on GitHub" banner until dismissed (persisted), then the
-            // update strip — both above the user menu, below the lists.
-            .when_some(github_star_banner, |el, banner| el.child(banner))
-            .when_some(update_strip, |el, strip| el.child(strip))
-            .child(
-                div()
-                    .p(px(Theme::SPACE_SM))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .child(self.render_sidebar_footer_row(theme, cx)),
-            )
-            .into_any_element()
-    }
-
-    /// "Star on GitHub" banner, styled like the update strip. Clicking it
-    /// opens the repository; either that or the close button dismisses it for
-    /// good — the choice is persisted so it never returns on the next launch.
-    fn render_github_star_banner(
-        &self,
-        above_update_strip: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if self.settings.github_star_banner_dismissed {
-            return None;
-        }
-        let tone = theme.accent;
-        let chip_bg_hover = theme.accent.opacity(0.16);
-        let close_bg_hover = theme.accent.opacity(0.22);
-        Some(
-            div()
-                .id("github-star-banner")
-                .mx(px(Theme::SPACE_SM))
-                .when(above_update_strip, |el| el.mb(px(Theme::SPACE_XS)))
-                .pl(px(Theme::SPACE_SM))
-                .pr(px(Theme::SPACE_XS))
-                .py(px(4.0))
-                .rounded(px(Theme::CONTROL_RADIUS))
-                .bg(theme.accent_wash)
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(crate::typography::ui_rems(11.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(tone)
-                .cursor_pointer()
-                .hover(move |s| s.bg(chip_bg_hover))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    cx.open_url(GITHUB_REPO_URL);
-                    this.dismiss_github_star_banner(cx);
-                }))
-                // Glyphs sit below the line box's optical center: nudge the
-                // star half a pixel down so it centers on the cap height.
-                .child(
-                    icon(icons::STAR_BOLD)
-                        .flex_none()
-                        .relative()
-                        .top(px(0.5))
-                        .size(px(12.0))
-                        .text_color(tone),
-                )
-                .child(div().flex_1().min_w_0().truncate().child("Star on GitHub"))
-                .child(
-                    div()
-                        .id("github-star-banner-dismiss")
-                        .flex_none()
-                        .size(px(18.0))
-                        .rounded(px(4.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(close_bg_hover))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.dismiss_github_star_banner(cx);
-                        }))
-                        .tooltip(crate::settings::widgets::text_tooltip("Dismiss"))
-                        .child(icon(icons::CLOSE).size(px(10.0)).text_color(tone)),
-                )
-                .into_any_element(),
-        )
-    }
-
-    fn dismiss_github_star_banner(&mut self, cx: &mut Context<Self>) {
-        self.settings.github_star_banner_dismissed = true;
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
-    /// Update strip: shown above the user menu whenever this app's release
-    /// checker ([`crate::app_update`]) has found a newer version. Self-updating
-    /// installs (macOS bundles, Windows installs, Linux managed installs) show
-    /// the background download and then "restart to apply"; installs that
-    /// can't replace themselves explain why; advisory installs point at
-    /// `zeron update` or the GitHub releases page and dismiss per version.
-    fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let update = crate::app_update::AppUpdate::global(cx)?;
-        let (label, action) = update.read(cx).strip()?;
-        let failed = matches!(
-            update.read(cx).flow(),
-            crate::app_update::Flow::Failed { .. }
-        );
-        let tone = if failed { theme.danger } else { theme.accent };
-        // Follow the selected spectrum with a low-emphasis glass tint rather
-        // than painting the bright text accent as a solid slab.
-        let (chip_bg, chip_bg_hover) = if failed {
-            (theme.danger.opacity(0.14), theme.danger.opacity(0.22))
-        } else {
-            (theme.accent_wash, theme.accent.opacity(0.16))
-        };
-
-        let mut strip = div()
-            .id("update-strip")
-            .mx(px(Theme::SPACE_SM))
-            // No bottom margin: the user-menu block below carries its own
-            // SPACE_SM padding — doubling it read as a hole (user report).
-            .px(px(Theme::SPACE_SM))
-            .py(px(6.0))
-            .rounded(px(Theme::CONTROL_RADIUS))
-            .bg(chip_bg)
-            .flex()
-            .flex_row()
-            .items_center()
-            .text_size(crate::typography::ui_rems(11.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(tone)
-            .child(div().flex_1().min_w_0().child(label));
-        if action != crate::app_update::StripAction::None {
-            strip = strip
-                .cursor_pointer()
-                .hover(move |s| s.bg(chip_bg_hover))
-                .on_click(
-                    cx.listener(move |this, _, _, cx| this.on_update_strip_click(action, cx)),
-                );
-        }
-        Some(strip.into_any_element())
-    }
-
-    /// Download → the background stage; Restart → swap + relaunch; Explain →
-    /// the update dialog; advisory installs open their destination (if any),
-    /// then dismiss for this version.
-    fn on_update_strip_click(
-        &mut self,
-        action: crate::app_update::StripAction,
-        cx: &mut Context<Self>,
-    ) {
-        use crate::app_update::{AppUpdate, StripAction};
-        let Some(update) = AppUpdate::global(cx) else {
-            return;
-        };
-        match action {
-            StripAction::None => {}
-            StripAction::Download => update.update(cx, |update, cx| update.start_download(cx)),
-            StripAction::Restart => {
-                if let Some(staged) = update.read(cx).staged() {
-                    self.apply_staged_update(staged, cx);
-                }
-            }
-            StripAction::Explain => update.update(cx, |update, cx| update.show_result(cx)),
-            StripAction::Advise { open_releases } => {
-                if open_releases {
-                    cx.open_url(zeron_update::RELEASES_PAGE);
-                }
-                update.update(cx, |update, cx| update.dismiss_advisory(cx));
-            }
-        }
-    }
-
     /// Swap the staged update over the installed one, arm the detached
     /// relauncher, and quit — the relauncher starts the new version once this
     /// process (and its engine lock / IPC port) is gone.
@@ -9546,363 +8585,6 @@ impl Shell {
                 )
                 .into_any_element(),
         )
-    }
-
-    /// The sidebar's bottom row: account menu on the left, settings toggle on
-    /// the right. Shared by the chat sidebar and the settings page so both
-    /// sit in one position. Local runtimes advertise their storage boundary
-    /// and offer sync; synced runtimes offer sign-out.
-    /// Account, settings, and the Pull requests entry. Chat and Settings both
-    /// render this exact row so the footer holds still across the swap.
-    fn render_sidebar_footer_row(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .id("sidebar-footer-row")
-            .debug_selector(|| "sidebar-footer-row".into())
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(SIDEBAR_FOOTER_ACTION_GAP))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(self.render_sidebar_footer(theme, cx)),
-            )
-            .into_any_element()
-    }
-
-    fn render_trading_button(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let active = matches!(self.route, Route::Trading);
-        div()
-            .id("open-trading")
-            .role(gpui::Role::Button)
-            .aria_label("Mesa de trading")
-            .tab_index(0)
-            .debug_selector(|| "open-trading".into())
-            .focus_visible(|style| style.border_2().border_color(theme.accent))
-            .size(px(SIDEBAR_FOOTER_ACTION_SIZE))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(8.0))
-            .text_color(if active { theme.accent } else { theme.text_muted })
-            .bg(if active {
-                theme.accent.opacity(0.10)
-            } else {
-                motion::hover_blend(
-                    "open-trading",
-                    theme.glass_hover().opacity(0.0),
-                    theme.glass_hover(),
-                )
-            })
-            .on_hover(motion::hover_listener("open-trading"))
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.settings_focus_pending = false;
-                this.open_trading(cx);
-            }))
-            .tooltip(crate::settings::widgets::text_tooltip("Mesa de trading"))
-            .child(icon(icons::WALLET).size(px(15.0)).text_color(if active {
-                theme.accent
-            } else {
-                motion::hover_blend("open-trading", theme.text_muted, theme.text)
-            }))
-            .into_any_element()
-    }
-
-    fn render_sidebar_footer(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let (user_line, menu_identity) = {
-            let state = self.state.read(cx);
-            sidebar_account_identity(state.workspace_scope, self.sync_flow, state.auth_user())
-        };
-        self.render_user_menu(user_line, menu_identity, theme, cx)
-    }
-
-    fn render_user_menu(
-        &mut self,
-        user_line: SharedString,
-        menu_identity: SharedString,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        // The trading desk sits just left of Settings, in the same action group.
-        let trading = self.render_trading_button(theme, cx);
-        let theme = &theme.for_popup();
-        let open = self.user_menu.is_open();
-        // Aurea is local-only: no sign-in, sync or sign-out rows.
-        let action: Option<AccountMenuAction> = None;
-        // The profile pill hugs avatar + name (shrinking so long names fade
-        // out); the gap between it and the settings button is not interactive.
-        let initial: SharedString = user_line
-            .trim()
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".into())
-            .into();
-        let mut trigger = div()
-            .id("user-menu")
-            .debug_selector(|| "user-menu".into())
-            .role(gpui::Role::Button)
-            .aria_label(format!("Account menu: {user_line}"))
-            .aria_expanded(open)
-            .tab_index(0)
-            .focus_visible(|s| s.border_2().border_color(theme.accent))
-            .relative()
-            .h(px(SIDEBAR_FOOTER_BUTTON_SIZE))
-            .min_w_0()
-            .flex_shrink_1()
-            .w_full()
-            .rounded(px(8.0))
-            .px(px(Theme::SPACE_SM))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .text_size(crate::typography::ui_rems(13.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(if open {
-                theme.text
-            } else {
-                motion::hover_blend("user-menu-trigger", theme.text.opacity(0.8), theme.text)
-            })
-            .cursor_pointer()
-            // user-menu.tsx trigger: hover `bg-white/[0.04]`, open state
-            // (`data-[state=open]`) the slightly stronger `bg-white/[0.06]`;
-            // the hover wash fades over `transition-colors`.
-            .bg(if open {
-                theme.glass_hover()
-            } else {
-                motion::hover_blend(
-                    "user-menu-trigger",
-                    theme.glass_hover().opacity(0.0),
-                    theme.glass_hover().opacity(0.8),
-                )
-            })
-            .on_hover(motion::hover_listener("user-menu-trigger"))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.user_menu.note_trigger_press()),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                // A press that found the menu open closes it (the card's
-                // mouse-down-out already began the close) — never reopen.
-                if this.user_menu.take_press_was_open() {
-                    this.close_user_menu(cx);
-                } else {
-                    this.user_menu.open(());
-                }
-                cx.notify();
-            }))
-            .child(
-                // Avatar: white circle, initial in near-black (zeron user-menu.tsx).
-                div()
-                    .size(px(SIDEBAR_FOOTER_AVATAR_SIZE))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(theme.text)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(px(10.0))
-                    .line_height(px(SIDEBAR_FOOTER_AVATAR_SIZE))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.bg)
-                    .child(div().w_full().text_center().child(initial)),
-            )
-            .child(sidebar_faded_label(
-                "user-menu-label".into(),
-                false,
-                div().line_height(px(17.0)).child(user_line),
-            ));
-        if self.user_menu.get().is_some() {
-            let closing = self.user_menu.closing_since();
-
-            let menu = popover::popover_card(theme)
-                .w(px(self.sidebar_content_width()
-                    - 2.0 * Theme::SPACE_SM
-                    - SIDEBAR_FOOTER_ACTION_SIZE
-                    - SIDEBAR_FOOTER_ACTION_GAP))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.close_user_menu(cx);
-                }))
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .px(px(8.0))
-                        .pt(px(6.0))
-                        .pb(px(4.0))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
-                        .truncate()
-                        .child(menu_identity),
-                )
-                .when_some(action, |menu, action| {
-                    let row = match action {
-                        AccountMenuAction::EnableSync => {
-                            popover::menu_row(theme, false, "user-menu-enable-sync")
-                                .id("user-menu-enable-sync")
-                                .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
-                                .child(
-                                    icon(icons::GLOBAL)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Enable sync"))
-                                .into_any_element()
-                        }
-                        AccountMenuAction::SyncInProgress => {
-                            popover::menu_row(theme, false, "user-menu-sync-progress")
-                                .id("user-menu-sync-progress")
-                                .opacity(0.6)
-                                .child(
-                                    icon(icons::GLOBAL)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Sync setup in progress"))
-                                .into_any_element()
-                        }
-                        AccountMenuAction::RestartPending => {
-                            popover::menu_row(theme, false, "user-menu-sync-restart")
-                                .id("user-menu-sync-restart")
-                                .on_click(cx.listener(|this, _, _, cx| this.reopen_sync_notice(cx)))
-                                .child(
-                                    icon(icons::RESTART)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Finish sync setup"))
-                                .into_any_element()
-                        }
-                        AccountMenuAction::SignOut => {
-                            popover::menu_row(theme, false, "user-menu-signout")
-                                .id("user-menu-signout")
-                                .on_click(cx.listener(|this, _, _, cx| this.request_sign_out(cx)))
-                                .child(
-                                    icon(icons::LOGOUT_2)
-                                        .size(px(16.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Sign out"))
-                                .into_any_element()
-                        }
-                    };
-                    menu.child(row)
-                })
-                // macOS keeps "Check for Updates…" in the app menu under
-                // About; elsewhere there is no app menu, so it lives here.
-                .when(
-                    !cfg!(target_os = "macos") && crate::app_update::AppUpdate::global(cx).is_some(),
-                    |menu| {
-                    menu.child(
-                        popover::menu_row(theme, false, "user-menu-check-updates")
-                            .id("user-menu-check-updates")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.close_user_menu(cx);
-                                crate::app_update::check_for_updates(cx);
-                            }))
-                            .child(
-                                icon(icons::REFRESH)
-                                    .size(px(16.0))
-                                    .text_color(theme.text_muted),
-                            )
-                            .child(SharedString::from("Check for updates")),
-                    )
-                })
-                .into_any_element();
-            // Opens upward, left-aligned with the pill: the card is as wide as
-            // the footer row, so it covers the row instead of the pane beside it.
-            trigger = trigger.child(popover::anchored_menu_above(
-                "user-menu-popover",
-                menu,
-                closing,
-            ));
-        }
-        // Settings is a toggle: while its page is up the button keeps the
-        // hover wash + full-strength glyph, and a click returns to chat.
-        let settings_open = matches!(self.route, Route::Settings(_));
-        let settings_tooltip: SharedString = format!(
-            "{} · {}",
-            if settings_open {
-                "Close settings"
-            } else {
-                "Settings"
-            },
-            crate::settings::badge_combo("mod-,")
-        )
-        .into();
-        div()
-            .w_full()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(4.0))
-            .child(trigger)
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(2.0))
-                    .child(trading)
-                    .child(
-                        div()
-                            .id("settings-trigger")
-                            .debug_selector(|| "settings-trigger".into())
-                            .role(gpui::Role::Button)
-                            .aria_label(if settings_open {
-                                "Close settings"
-                            } else {
-                                "Settings"
-                            })
-                            .aria_toggled(if settings_open {
-                                gpui::Toggled::True
-                            } else {
-                                gpui::Toggled::False
-                            })
-                            .tooltip(move |_, cx| {
-                                let text = settings_tooltip.clone();
-                                cx.new(|_| SurfaceTabTooltip { text }).into()
-                            })
-                            .tab_index(0)
-                            .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
-                            .flex_none()
-                            .rounded(px(8.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .bg(if settings_open {
-                                theme.glass_hover()
-                            } else {
-                                motion::hover_blend(
-                                    "settings-trigger",
-                                    theme.glass_hover().opacity(0.0),
-                                    theme.glass_hover(),
-                                )
-                            })
-                            .on_hover(motion::hover_listener("settings-trigger"))
-                            .focus_visible(|s| s.border_2().border_color(theme.accent))
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
-                            .child(icon(icons::SETTINGS).size(px(15.0)).text_color(
-                                if settings_open {
-                                    theme.text
-                                } else {
-                                    motion::hover_blend(
-                                        "settings-trigger",
-                                        theme.text_muted,
-                                        theme.text,
-                                    )
-                                },
-                            )),
-                    ),
-            )
-            .into_any_element()
     }
 
     /// Signing out, as a dialog over the app. Every step of signing in is a
@@ -11603,7 +10285,7 @@ impl Shell {
             }));
         for (ix, (surface, title, dirty, detail)) in rows.into_iter().enumerate() {
             let is_active = surface == active;
-            let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
+            let _file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
             let harness_icon = match surface {
                 RightSurface::SideChat(id) => self.side_chats.get(&id).and_then(|tab| {
                     tab.state
@@ -13301,53 +11983,6 @@ mod tests {
     }
 
     #[test]
-    fn connection_pill_is_global_only() {
-        use zeron_proto::{ChatConnectivity, ChatSyncState as S, Connectivity, ConnectivityState};
-
-        let chat = |chat_id: &str, sync_state| ChatConnectivity {
-            chat_id: chat_id.into(),
-            sync_state,
-            connected: false,
-            delivery_live: false,
-            pending_pushes: 3,
-        };
-        // A slow open or a sustained per-chat stall reads in that chat's own
-        // composer and transcript; the sidebar line stays quiet.
-        let mut conn = Connectivity {
-            state: ConnectivityState::Connected,
-            chats: [S::Waiting, S::Connecting, S::Offline, S::Unknown, S::Local]
-                .into_iter()
-                .enumerate()
-                .map(|(i, state)| chat(&format!("chat-{i}"), state))
-                .collect(),
-            ..Connectivity::default()
-        };
-        assert_eq!(connection_pill_caption(&conn), None);
-        conn.state = ConnectivityState::Disabled;
-        assert_eq!(connection_pill_caption(&conn), None);
-        conn.state = ConnectivityState::Reconnecting;
-        assert_eq!(
-            connection_pill_caption(&conn),
-            Some(("Reconnecting…", false))
-        );
-        conn.state = ConnectivityState::Offline;
-        assert_eq!(
-            connection_pill_caption(&conn),
-            Some(("Offline — sends are saved", true))
-        );
-        // A failed local save outranks the network, whichever chat it hit
-        // (not only the selected one).
-        conn.chats.push(chat("background", S::StorageError));
-        for state in [ConnectivityState::Offline, ConnectivityState::Connected] {
-            conn.state = state;
-            assert_eq!(
-                connection_pill_caption(&conn),
-                Some(("Changes could not be saved", true))
-            );
-        }
-    }
-
-    #[test]
     fn narrowest_sidebar_keeps_its_options_button_beside_the_titlebar_controls() {
         for is_macos in [true, false] {
             let cluster_end = cluster_buttons_start(is_macos, false, 0)
@@ -13941,111 +12576,6 @@ mod tests {
     }
 
     #[test]
-    fn account_actions_follow_the_attached_workspace_scope() {
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Local), SyncFlow::Idle),
-            Some(AccountMenuAction::EnableSync)
-        );
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Synced), SyncFlow::Idle),
-            Some(AccountMenuAction::SignOut)
-        );
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Development), SyncFlow::Idle),
-            None
-        );
-    }
-
-    #[test]
-    fn sidebar_footer_names_the_account_or_falls_back_to_local() {
-        let named = zeron_proto::UserProfile {
-            id: "u".into(),
-            email: "wing@example.com".into(),
-            name: Some("Wing".into()),
-        };
-        let unnamed = zeron_proto::UserProfile {
-            name: Some("  ".into()),
-            ..named.clone()
-        };
-        let label = |scope, user| sidebar_account_identity(scope, SyncFlow::Idle, user).0;
-        assert_eq!(label(Some(WorkspaceScope::Synced), Some(&named)), "Wing");
-        assert_eq!(
-            label(Some(WorkspaceScope::Synced), Some(&unnamed)),
-            "wing@example.com"
-        );
-        assert_eq!(label(None, None), "Local");
-        assert_eq!(label(Some(WorkspaceScope::Synced), None), "Local");
-        // Local-only storage stays "Local" even with a cached profile.
-        assert_eq!(label(Some(WorkspaceScope::Local), Some(&named)), "Local");
-    }
-
-    #[test]
-    fn local_sign_in_offers_the_in_place_switch() {
-        let signed_in = AuthState::SignedIn {
-            user: zeron_proto::UserProfile {
-                id: "user-1".into(),
-                email: "user@example.com".into(),
-                name: None,
-            },
-            org_id: Some("org-1".into()),
-        };
-
-        assert_eq!(
-            sync_flow_after_auth(
-                SyncFlow::Enabling,
-                Some(WorkspaceScope::Local),
-                Some(&signed_in),
-            ),
-            SyncFlow::SwitchOffer { notice_open: true }
-        );
-        assert_eq!(
-            sync_flow_after_auth(
-                SyncFlow::Idle,
-                Some(WorkspaceScope::Local),
-                Some(&signed_in),
-            ),
-            SyncFlow::SwitchOffer { notice_open: true },
-            "another viewport derives the pending switch from AuthStatus"
-        );
-        assert_eq!(
-            sync_flow_after_auth(
-                SyncFlow::SwitchOffer { notice_open: false },
-                Some(WorkspaceScope::Local),
-                Some(&signed_in),
-            ),
-            SyncFlow::SwitchOffer { notice_open: false },
-            "shared auth updates do not reopen a postponed wizard"
-        );
-        assert_eq!(
-            sync_flow_after_auth(
-                SyncFlow::RestartPending { notice_open: false },
-                Some(WorkspaceScope::Local),
-                Some(&signed_in),
-            ),
-            SyncFlow::RestartPending { notice_open: false },
-            "the quit fallback survives shared auth updates too"
-        );
-        assert_eq!(
-            account_menu_action(
-                Some(WorkspaceScope::Local),
-                SyncFlow::SwitchOffer { notice_open: false },
-            ),
-            Some(AccountMenuAction::RestartPending)
-        );
-        for notice_open in [true, false] {
-            assert_eq!(
-                sync_flow_after_auth(
-                    SyncFlow::SwitchOffer { notice_open },
-                    Some(WorkspaceScope::Local),
-                    Some(&AuthState::SignedOut),
-                ),
-                SyncFlow::Idle,
-                "revoked credentials cancel the pending switch"
-            );
-        }
-    }
-
-    #[test]
     fn import_summary_errors_are_a_failure_not_a_success() {
         // Clean summary → done with counts.
         let clean = serde_json::json!({
@@ -14088,49 +12618,6 @@ mod tests {
         assert_eq!(
             local_work_phrase(1, 2).as_deref(),
             Some("the 1 session and 2 projects")
-        );
-    }
-
-    #[test]
-    fn dismissed_import_failure_stays_reachable_on_a_synced_runtime() {
-        let signed_in = AuthState::SignedIn {
-            user: zeron_proto::UserProfile {
-                id: "user-1".into(),
-                email: "user@example.com".into(),
-                name: None,
-            },
-            org_id: Some("org-1".into()),
-        };
-
-        // "Later" postpones the failure notice; it must not evaporate.
-        let dismissed = SyncFlow::ImportFailed { notice_open: false };
-        assert_eq!(
-            sync_flow_after_auth(dismissed, Some(WorkspaceScope::Synced), Some(&signed_in)),
-            dismissed,
-            "a postponed import failure survives auth/scope updates"
-        );
-
-        // …and the account menu on the SYNCED runtime still exposes the
-        // re-entry point. This is the whole point: after the switch there is
-        // no local runtime left to re-derive an offer from, so this menu row
-        // is the only path back to the retry dialog.
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Synced), dismissed),
-            Some(AccountMenuAction::RestartPending),
-            "retry must remain reachable after dismissal"
-        );
-        assert_eq!(
-            account_menu_action(
-                Some(WorkspaceScope::Synced),
-                SyncFlow::ImportFailed { notice_open: true },
-            ),
-            Some(AccountMenuAction::RestartPending)
-        );
-
-        // Resolving the failure restores the normal synced menu.
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Synced), SyncFlow::Idle),
-            Some(AccountMenuAction::SignOut)
         );
     }
 
@@ -14379,16 +12866,6 @@ mod tests {
     #[test]
     fn sidebar_harness_geometry_reflects_row_hierarchy() {
         assert_eq!(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP, Theme::SPACE_SM);
-    }
-
-    #[test]
-    fn sidebar_height_change_is_not_a_reorder() {
-        let open = keys(&[("first-group", 105.0), ("second-group", 240.0)]);
-        let collapsed = keys(&[("first-group", 40.0), ("second-group", 240.0)]);
-        assert!(!sidebar_key_order_changed(&open, &collapsed));
-
-        let reordered = keys(&[("second-group", 240.0), ("first-group", 40.0)]);
-        assert!(sidebar_key_order_changed(&collapsed, &reordered));
     }
 
     #[test]
@@ -15119,64 +13596,6 @@ mod exit_regressions {
     }
 
     #[gpui::test]
-    fn sidebar_settings_trigger_toggles_the_settings_route(cx: &mut TestAppContext) {
-        // Just the footer row: the full shell's settings modal would cover it.
-        struct FooterHost(Entity<Shell>);
-        impl Render for FooterHost {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                self.0.update(cx, |shell, cx| {
-                    div()
-                        .w(px(256.0))
-                        .child(shell.render_sidebar_footer(&Theme::default(), cx))
-                })
-            }
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let (host, cx) = cx.add_window_view(|_, cx| {
-            FooterHost(cx.new(|cx| {
-                let state = cx.new(|_| AppState::new());
-                Shell::new(
-                    state,
-                    EngineBootConfig {
-                        data_dir: dir.path().into(),
-                        ipc_port: 0,
-                        edge_url: "http://127.0.0.1:1".into(),
-                        edge_token: None,
-                        org_id: None,
-                        workos_client_id: None,
-                        default_harness: zeron_proto::HarnessId::Mock,
-                    },
-                    cx,
-                )
-            }))
-        });
-        let shell = host.read_with(cx, |host, _| host.0.clone());
-        for expect_open in [true, false] {
-            cx.update(|window, cx| window.draw(cx).clear());
-            assert!(cx.debug_bounds("user-menu-label").is_some());
-            let trigger = cx.debug_bounds("settings-trigger").unwrap().center();
-            cx.simulate_click(trigger, gpui::Modifiers::default());
-            shell.read_with(cx, |shell, _| {
-                if expect_open {
-                    assert!(matches!(
-                        shell.route,
-                        Route::Settings(SettingsSection::General)
-                    ));
-                } else {
-                    assert!(matches!(shell.route, Route::Chat));
-                }
-            });
-        }
-    }
-
-    #[gpui::test]
     fn opening_terminals_focuses_the_terminal_once(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -15333,87 +13752,6 @@ mod exit_regressions {
             })
             .unwrap();
         }
-    }
-
-    #[gpui::test]
-    fn projectless_new_session_restores_opt_out_and_clears_sidebar_filter(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        crate::settings::composer::ComposerDefaults {
-            device: Some("remote".into()),
-            no_project: true,
-            ..Default::default()
-        }
-        .save(dir.path())
-        .unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |state, _| {
-                    state.apply_spaces(vec![zeron_proto::Space {
-                        id: "repo".into(),
-                        device_id: "local".into(),
-                        path: "/repo".into(),
-                        name: None,
-                        git_detected: false,
-                        git_checked_at: None,
-                        checkout_id: None,
-                        repository_id: None,
-                        github_repo: None,
-                        icon: None,
-                        created_at: Utc::now(),
-                    }]);
-                    // Boot opened an existing project session after loading defaults.
-                    state.selected_chat = Some("existing-project-chat".into());
-                    state.no_project = false;
-                });
-                shell.settings.space_filter = None;
-                shell.open_new_session(None, cx);
-                assert!(shell.state.read(cx).no_project);
-                assert!(shell.state.read(cx).selected_space.is_none());
-                assert_eq!(
-                    shell.state.read(cx).effective_device_id().as_deref(),
-                    Some("remote")
-                );
-
-                // An explicit filter may select its project, but opting out again
-                // must remove that filter before the first send can hide the chat.
-                shell.set_space_filter(Some("repo".into()), cx);
-                shell
-                    .state
-                    .update(cx, |state, cx| state.select_space(None, cx));
-                shell.on_state_changed(&shell.state.clone(), cx);
-                assert!(shell.settings.space_filter.is_none());
-                assert!(shell.state.read(cx).no_project);
-            })
-            .unwrap();
     }
 
     #[gpui::test]
@@ -16997,25 +15335,6 @@ mod settings_modal_regressions {
                 );
             })
             .unwrap();
-    }
-
-    /// Signed in to an organization the edge offers Cloud (Cloud's settings
-    /// need both).
-    fn sign_in(state: &Entity<AppState>, cx: &mut App) {
-        state.update(cx, |state, _| {
-            state.auth = Some(zeron_proto::AuthState::SignedIn {
-                user: zeron_proto::UserProfile {
-                    id: "user-a".into(),
-                    email: "user@example.com".into(),
-                    name: None,
-                },
-                org_id: Some("org-a".into()),
-            });
-            state.cloud_status = Some(zeron_proto::CloudStatus {
-                available: true,
-                ..Default::default()
-            });
-        });
     }
 
 }

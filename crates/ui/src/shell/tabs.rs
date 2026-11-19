@@ -327,8 +327,8 @@ impl Shell {
         let fit = self.horizontal_fit();
         // Aurea: the pane is the desk's, chat or not (user request).
         let _ = on_canvas;
-        let right_pane_visible = ((fit.right && (self.right_pane_open(cx) || self.tween_active(self.right_tween)))
-                || self.fit_exit_width(1).is_some());
+        let right_pane_visible = (fit.right && (self.right_pane_open(cx) || self.tween_active(self.right_tween)))
+                || self.fit_exit_width(1).is_some();
         let takeover = right_pane_visible
             && (self.right_pane_expanded || self.tween_active(self.main_takeover_tween));
         // In takeover the title hides and the strip owns the whole band, so
@@ -492,7 +492,7 @@ impl Shell {
                         ),
                 );
             }
-            let files_panel_label = if self.files_panel_open(cx) && fit.files {
+            let _files_panel_label = if self.files_panel_open(cx) && fit.files {
                 "Hide files panel"
             } else {
                 "Show files panel"

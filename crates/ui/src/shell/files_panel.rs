@@ -1,12 +1,6 @@
 //! Session-owned explorer chrome, independent of the surface tab host.
 
 use super::*;
-use crate::settings::{FILES_PANEL_MAX, FILES_PANEL_MIN};
-
-pub(super) struct FilesPanelResize;
-
-/// Files kept per chat for the command palette's Recent Files.
-const RECENT_FILES_PER_CHAT: usize = 20;
 
 impl Shell {
 }

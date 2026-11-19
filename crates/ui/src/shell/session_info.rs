@@ -8,15 +8,12 @@
 //! and opening it floats it over the transcript instead.
 use super::*;
 
-use crate::project_actions::{ProjectActionsStatus, action_icon};
 
 /// The card's width, its inset from the column's right edge, and the
 /// least gap the reading column keeps from it.
 pub(super) const SESSION_CARD_WIDTH: f32 = 272.0;
 const SESSION_CARD_INSET: f32 = 12.0;
 const SESSION_CARD_GAP: f32 = 24.0;
-/// The gap between the session card and the lanes card under it.
-const SESSION_CARDS_GAP: f32 = 8.0;
 /// The transcript's own side gutters (its rows pad 48px each side).
 const TRANSCRIPT_GUTTER: f32 = 48.0;
 
@@ -86,10 +83,6 @@ pub(super) struct SessionPreviews {
     bar: popover::MenuScrollbarState,
 }
 
-/// The ports card lists this many, then pages in [`PORTS_PAGE`] at a time.
-const PORTS_INITIAL: usize = 3;
-const PORTS_PAGE: usize = 10;
-
 impl Shell {
     /// The card's reserve at the main column's LIVE width (see
     /// [`session_card_reserve`]): while the sidebar or a pane animates, the
@@ -108,38 +101,6 @@ impl Shell {
         self.session_info_reserve(cx).is_some()
     }
 
-    /// Beside the transcript it shows unless hidden; over it, only while
-    /// opened.
-    pub(super) fn session_info_visible(&self, cx: &App) -> bool {
-        if self.session_info_fits(cx) {
-            !self.settings.session_info_hidden
-        } else {
-            self.session_info_overlay
-        }
-    }
-
-    /// The toggle's mouse-down: note whether the card showed, so the click
-    /// that follows closes it rather than reopening it. Reads the last
-    /// painted state, which the overlay's click-outside dismissal (handled
-    /// on the same press, in either order) leaves alone.
-    pub(super) fn note_session_info_press(&mut self) {
-        self.session_info_pressed_open = Some(self.session_info_shown);
-    }
-
-    pub(super) fn toggle_session_info(&mut self, cx: &mut Context<Self>) {
-        let show = !self
-            .session_info_pressed_open
-            .take()
-            .unwrap_or(self.session_info_shown);
-        if self.session_info_fits(cx) {
-            self.settings.session_info_hidden = !show;
-            self.schedule_save(cx);
-        } else {
-            self.session_info_overlay = show;
-        }
-        cx.notify();
-    }
-
     /// Show the card: beside the transcript when it fits there, else over it.
     pub(super) fn show_session_info(&mut self, cx: &mut Context<Self>) {
         if !self.session_info_fits(cx) {
@@ -149,52 +110,6 @@ impl Shell {
             self.schedule_save(cx);
         }
         cx.notify();
-    }
-
-    /// Dismiss the card floating over the transcript; one shown beside it
-    /// stays put.
-    pub(super) fn close_session_info_overlay(&mut self, cx: &mut Context<Self>) {
-        if self.session_info_overlay {
-            self.session_info_overlay = false;
-            cx.notify();
-        }
-    }
-
-    /// This frame's card: docked beside the transcript (else floating over
-    /// it), its reveal, 0 (hidden) → 1 (shown), and the room the transcript
-    /// holds free for it. The reveal eases on the shell's resize clock
-    /// whenever the card shows or hides, by toggle or by the column crossing
-    /// the fit, and the reserve eases with it. A switch between chats lands
-    /// it directly, with the destination's panels.
-    pub(super) fn session_info_frame(&mut self, has_selection: bool, cx: &App) -> (bool, f32, f32) {
-        let reserve = self.session_info_reserve(cx);
-        if let Some(reserve) = reserve {
-            // An overlay opened on a tighter column ends once the card fits.
-            self.session_info_overlay = false;
-            self.session_info_last_reserve = reserve;
-        }
-        let shown = has_selection && self.session_info_visible(cx);
-        if shown {
-            self.session_info_docked = reserve.is_some();
-        }
-        let target = if shown { 1.0 } else { 0.0 };
-        if std::mem::take(&mut self.session_info_snap) {
-            self.session_info_tween = None;
-        } else if shown != self.session_info_shown {
-            let from = self.eval_tween(self.session_info_tween, 1.0 - target);
-            self.session_info_tween = Some(WidthTween::new(from, target));
-        }
-        self.session_info_shown = shown;
-        let reveal = self.eval_tween(self.session_info_tween, target);
-        // Hiding as the column stops fitting, the card keeps its docked look
-        // and the transcript eases back from the last room it held.
-        let docked = self.session_info_docked;
-        let reserve = if docked {
-            reserve.unwrap_or(self.session_info_last_reserve) * reveal
-        } else {
-            0.0
-        };
-        (docked, reveal, reserve)
     }
 
 }

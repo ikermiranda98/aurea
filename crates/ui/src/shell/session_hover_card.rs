@@ -105,24 +105,6 @@ fn time_label(time_ago: &str) -> String {
 }
 
 impl Shell {
-    /// Reconcile from the container as well as the row: an unmounted row
-    /// cannot report hover-out or run its paint-time hit test. Runs in the
-    /// sidebar's render, which follows every shell notify; the shell itself
-    /// only dismisses the card while the sidebar is hidden.
-    pub(super) fn reconcile_session_hover_card(&mut self, cx: &mut Context<Self>) {
-        let Some(target) = self.session_hover_card.target() else {
-            return;
-        };
-        if !self.sidebar_hover_card_row_visible(target, cx)
-            || self
-                .rename_input_for(target, ChatRenameSurface::Sidebar)
-                .is_some()
-            || cx.has_active_drag()
-        {
-            self.dismiss_session_card(cx);
-        }
-    }
-
     /// Row hover in or out (the row's own hover listener forwards here).
     pub(super) fn hover_session_card(
         &mut self,

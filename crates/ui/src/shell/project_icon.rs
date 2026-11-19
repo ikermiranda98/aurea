@@ -1,57 +1,6 @@
 //! Repository artwork is fetched once per project/connection, off the render thread.
 use super::*;
-use crate::image_media::{MediaImage, decode_project_icon, release_media};
-
-pub(super) const ICON_PATHS: &[&str] = &[
-    "public/apple-touch-icon.png",
-    "apple-touch-icon.png",
-    "public/favicon.svg",
-    "favicon.svg",
-    "public/favicon.png",
-    "public/icon.png",
-    "public/logo.png",
-    "favicon.png",
-    "app/icon.png",
-    "src/app/icon.png",
-    "public/favicon.ico",
-    "favicon.ico",
-    "app/favicon.ico",
-    "static/favicon.ico",
-    "src-tauri/icons/icon.png",
-    "assets/icon.png",
-    "src/assets/icon.png",
-];
-
-fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
-    // A project can point at a subdirectory; match the remote workspace RPC's
-    // checkout-root resolution, including linked worktrees with a .git file.
-    let canonical = root.canonicalize().ok()?;
-    let root = canonical
-        .ancestors()
-        .find(|path| path.join(".git").exists())
-        .unwrap_or(&canonical);
-    for path in ICON_PATHS {
-        let path = root.join(path);
-        if !path.is_file() {
-            continue;
-        }
-        let bytes = std::fs::File::open(&path).ok().and_then(|file| {
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            file.take(zeron_proto::MAX_WORKSPACE_IMAGE_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-                .ok()?;
-            Some(bytes)
-        })?;
-        let mime = if path.extension().is_some_and(|e| e == "svg") {
-            "image/svg+xml"
-        } else {
-            "image/png"
-        };
-        return decode_project_icon(mime, bytes).ok();
-    }
-    None
-}
+use crate::image_media::MediaImage;
 
 // Curated badge tones: (dark appearance, light appearance). Keep the ordering
 // stable so projects retain their assigned color. These are explicit colors,
@@ -302,45 +251,5 @@ impl ProjectIcons {
         // Aurea has no workspace files to read artwork from: the monogram.
         let _ = (profile, &self.entries);
         monogram(&name, &seed, selected, Theme::of(cx))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn png(path: &std::path::Path, width: u32) {
-        image::RgbaImage::new(width, 2).save(path).unwrap();
-    }
-    #[test]
-    fn sidebar_project_icon_priority_and_missing_fallback() {
-        let temp = tempfile::tempdir().unwrap();
-        assert!(load_local_icon(temp.path()).is_none());
-        png(&temp.path().join("favicon.png"), 3);
-        assert_eq!(load_local_icon(temp.path()).unwrap().width, 3.0);
-        std::fs::create_dir(temp.path().join("public")).unwrap();
-        png(&temp.path().join("public/apple-touch-icon.png"), 7);
-        assert_eq!(load_local_icon(temp.path()).unwrap().width, 7.0);
-        std::fs::write(temp.path().join(".git"), "gitdir: /unused-test-checkout").unwrap();
-        std::fs::create_dir_all(temp.path().join("src/nested")).unwrap();
-        assert_eq!(
-            load_local_icon(&temp.path().join("src/nested"))
-                .unwrap()
-                .width,
-            7.0
-        );
-        // A corrupt first match uses the default rather than showing unrelated lower-priority art.
-        std::fs::write(temp.path().join("public/apple-touch-icon.png"), b"invalid").unwrap();
-        assert!(load_local_icon(temp.path()).is_none());
-    }
-    #[test]
-    fn sidebar_project_icons_support_svg_and_ico() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("favicon.svg"), br##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8"><rect width="12" height="8" fill="#f00"/></svg>"##).unwrap();
-        assert_eq!(load_local_icon(temp.path()).unwrap().width, 12.0);
-        std::fs::remove_file(temp.path().join("favicon.svg")).unwrap();
-        image::RgbaImage::new(16, 16)
-            .save(temp.path().join("favicon.ico"))
-            .unwrap();
-        assert_eq!(load_local_icon(temp.path()).unwrap().width, 16.0);
     }
 }

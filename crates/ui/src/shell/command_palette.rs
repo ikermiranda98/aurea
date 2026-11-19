@@ -1233,67 +1233,6 @@ mod tests {
         );
     }
 
-    /// The engine side of a shell under test: requests out, replies in.
-    struct FakeEngine {
-        runtime: tokio::runtime::Runtime,
-        requests: tokio::sync::mpsc::Receiver<String>,
-        replies: tokio::sync::mpsc::Sender<String>,
-    }
-
-    impl FakeEngine {
-        /// Every request sent so far for `method`; other methods are
-        /// answered with an empty object (or a ready search index).
-        fn take(&mut self, method: &str, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
-            let mut found = Vec::new();
-            loop {
-                cx.executor().advance_clock(std::time::Duration::from_millis(80));
-                cx.run_until_parked();
-                let Ok(request) = self.requests.try_recv() else {
-                    return found;
-                };
-                let request: serde_json::Value = serde_json::from_str(&request).unwrap();
-                if request["method"] == method {
-                    found.push(request);
-                } else if request["method"] == methods::WARM_WORKSPACE_SEARCH {
-                    self.reply(&request, serde_json::json!({ "state": "ready" }));
-                } else {
-                    self.reply(&request, serde_json::json!({}));
-                }
-            }
-        }
-
-        fn reply(&self, request: &serde_json::Value, ok: serde_json::Value) {
-            self.send(serde_json::json!({ "id": request["id"], "ok": ok }));
-        }
-
-        fn fail(&self, request: &serde_json::Value, err: &str) {
-            self.send(serde_json::json!({ "id": request["id"], "err": err }));
-        }
-
-        fn send(&self, reply: serde_json::Value) {
-            // The client's reader task runs on this runtime: let it drain.
-            self.runtime.block_on(async {
-                self.replies.send(reply.to_string()).await.unwrap();
-                while self.replies.capacity() < self.replies.max_capacity() {
-                    tokio::task::yield_now().await;
-                }
-            });
-        }
-    }
-
-    fn type_query(window: gpui::WindowHandle<Shell>, query: &str, cx: &mut TestAppContext) {
-        window
-            .update(cx, |shell, _, cx| {
-                shell
-                    .command_palette
-                    .as_ref()
-                    .unwrap()
-                    .search
-                    .update(cx, |input, cx| input.set_text(query, cx));
-            })
-            .unwrap();
-    }
-
     /// A shell with the real app keymap and two sidebar sessions.
     fn keyed_palette_window(
         cx: &mut TestAppContext,

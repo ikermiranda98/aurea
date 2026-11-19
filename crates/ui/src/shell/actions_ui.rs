@@ -1,12 +1,11 @@
 use super::*;
 
 use zeron_proto::{
-    ProjectAction, ProjectActionDraft, ProjectActionIcon, ProjectActionRun, ProjectActionsSnapshot,
+    ProjectActionDraft, ProjectActionRun, ProjectActionsSnapshot,
 };
 
 use crate::project_actions::{
-    ACTION_ICONS, ProjectActionEditor, ProjectActionsKey, ProjectActionsStatus, action_icon,
-    draft_from_action,
+    ACTION_ICONS, ProjectActionsKey, ProjectActionsStatus, action_icon,
 };
 
 #[derive(Clone)]
@@ -76,13 +75,6 @@ impl Shell {
             chat_id: chat.id.clone(),
             target_device_id,
         })
-    }
-
-    fn close_project_actions_menu(&mut self, cx: &mut Context<Self>) {
-        if self.project_actions.menu.begin_close() {
-            popover::reap_popup(cx, |shell: &mut Shell| &mut shell.project_actions.menu);
-        }
-        cx.notify();
     }
 
 
@@ -291,111 +283,6 @@ impl Shell {
             .ok();
         }));
         cx.notify();
-    }
-
-    pub(super) fn run_project_action(
-        &mut self,
-        key: &ProjectActionsKey,
-        action: ProjectAction,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(context) = self.project_action_context(cx) else {
-            return;
-        };
-        if context.key != *key
-            || self.project_actions.active.as_ref() != Some(key)
-            || !self
-                .project_actions
-                .active_status()
-                .is_some_and(ProjectActionsStatus::can_run)
-        {
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        self.close_project_actions_menu(cx);
-
-        let panel = self.terminal_panel(cx);
-        let tab = panel.update(cx, |panel, cx| {
-            panel.reserve_tab_for_chat(context.chat_id.clone(), action.name.clone(), cx)
-        });
-        self.panels
-            .update(&context.chat_id, |panels| panels.terminal_open = true);
-        self.terminal_tween = None;
-        self.terminal_tween_task = None;
-        panel.update(cx, |panel, cx| {
-            panel.set_open(true, cx);
-            panel.select_tab_by_key(tab, cx);
-        });
-
-        let params = project_action_params(
-            serde_json::json!({
-                "spaceId": context.key.space_id,
-                "chatId": context.chat_id,
-                "actionId": action.id,
-                "cols": 80,
-                "rows": 24,
-            }),
-            &context.target_device_id,
-        );
-        let key = context.key.clone();
-        let chat_id = context.chat_id.clone();
-        let target = context.target_device_id.clone();
-        let action_id = action.id.clone();
-        cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call_as::<ProjectActionRun>(methods::RUN_PROJECT_ACTION, params)
-                .await;
-            match result {
-                Ok(run) => {
-                    let terminal_id = run.terminal.id.clone();
-                    let attached = panel.update(cx, |panel, cx| {
-                        panel.attach_reserved_session(
-                            &chat_id,
-                            tab,
-                            run.terminal,
-                            target.clone(),
-                            cx,
-                        )
-                    });
-                    if !attached {
-                        let _ = engine
-                            .client()
-                            .call(
-                                methods::CLOSE_TERMINAL,
-                                project_action_params(
-                                    serde_json::json!({ "terminalId": terminal_id }),
-                                    &target,
-                                ),
-                            )
-                            .await;
-                    }
-                    this.update(cx, |shell, cx| {
-                        shell
-                            .settings
-                            .last_project_action_by_space_id
-                            .insert(key.space_id, action_id);
-                        shell.schedule_save(cx);
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                Err(err) => {
-                    let message = err.to_string();
-                    panel.update(cx, |panel, cx| {
-                        panel.fail_reserved_tab(&chat_id, tab, &message, cx)
-                    });
-                    this.update(cx, |shell, cx| {
-                        shell.project_actions.mark_unavailable(&key, message);
-                        cx.notify();
-                    })
-                    .ok();
-                }
-            }
-        })
-        .detach();
     }
 
 

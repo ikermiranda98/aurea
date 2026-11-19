@@ -1866,19 +1866,6 @@ fn selection_scope(key: &str) -> &str {
     }
 }
 
-pub(crate) fn clear_selection_surface(prefix: &str) {
-    REGISTRY.with(|r| {
-        r.borrow_mut()
-            .retain(|entry| !entry.key.starts_with(prefix))
-    });
-    if let Some(anchor) = super::selection::anchor_key().filter(|key| key.starts_with(prefix)) {
-        // Closing a surface can happen before mouse-up. Retire its active
-        // drag too, without disturbing a selection owned by another view.
-        super::selection::end_active_drag();
-        super::selection::clear_if_owner(&anchor);
-    }
-}
-
 pub fn selection_surface_reset(prefix: String) -> impl IntoElement {
     canvas(
         |_, _, _| (),
@@ -4532,4 +4519,17 @@ mod tests {
 #[cfg(feature = "browser-fixture")]
 pub fn fixture_link(target: &str) -> Option<(gpui::Point<gpui::Pixels>, gpui::FocusHandle)> {
     super::link_interaction::fixture_link(target)
+}
+
+/// Retire a closing surface's selection rows (tests drive it directly).
+#[cfg(test)]
+pub(crate) fn clear_selection_surface(prefix: &str) {
+    REGISTRY.with(|r| {
+        r.borrow_mut()
+            .retain(|entry| !entry.key.starts_with(prefix))
+    });
+    if let Some(anchor) = super::selection::anchor_key().filter(|key| key.starts_with(prefix)) {
+        super::selection::end_active_drag();
+        super::selection::clear_if_owner(&anchor);
+    }
 }
