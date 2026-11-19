@@ -1151,8 +1151,8 @@ fn device_presentation_at(devices: &[Device], now: DateTime<Utc>) -> Vec<(Device
             metadata.last_seen_at = None;
             (
                 metadata,
-                crate::settings::devices::device_online(device.last_seen_at, now),
-                crate::settings::devices::format_last_seen(device.last_seen_at, now),
+                crate::device_presence::device_online(device.last_seen_at, now),
+                crate::device_presence::format_last_seen(device.last_seen_at, now),
             )
         })
         .collect()
@@ -2862,7 +2862,7 @@ impl AppState {
             return true;
         }
         match self.devices.iter().find(|d| d.id == device_id) {
-            Some(d) => crate::settings::devices::device_online(d.last_seen_at, now),
+            Some(d) => crate::device_presence::device_online(d.last_seen_at, now),
             None => true,
         }
     }
@@ -3598,7 +3598,7 @@ impl AppState {
             // Whole seconds `<= DEVICE_ONLINE_WINDOW_SECS` stay online.
             .map(|at| {
                 at + chrono::TimeDelta::seconds(
-                    crate::settings::devices::DEVICE_ONLINE_WINDOW_SECS + 1,
+                    crate::device_presence::DEVICE_ONLINE_WINDOW_SECS + 1,
                 )
             });
         let grace = self.pending_sends.values().map(|pending| {
@@ -7482,7 +7482,7 @@ mod tests {
         let mut local = device("local", "Local");
         local.last_seen_at = Some(now - TimeDelta::seconds(65));
         let offline =
-            seen + TimeDelta::seconds(crate::settings::devices::DEVICE_ONLINE_WINDOW_SECS + 1);
+            seen + TimeDelta::seconds(crate::device_presence::DEVICE_ONLINE_WINDOW_SECS + 1);
         let mut probe = AppState::new();
         probe.devices = vec![remote.clone()];
         assert!(probe.device_online("remote", offline - TimeDelta::milliseconds(1)));

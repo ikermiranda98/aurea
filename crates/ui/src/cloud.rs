@@ -251,7 +251,7 @@ pub fn retry_action(status: &CloudStatus) -> CloudAction {
 
 /// "5m ago" for a Unix-ms timestamp.
 pub fn ago(ms: i64, now: DateTime<Utc>) -> String {
-    crate::settings::devices::format_last_seen(DateTime::from_timestamp_millis(ms), now)
+    crate::device_presence::format_last_seen(DateTime::from_timestamp_millis(ms), now)
 }
 
 /// One provider's standing for Cloud.

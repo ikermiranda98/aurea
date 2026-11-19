@@ -39,9 +39,6 @@ use crate::rail;
 use crate::settings::accounts::AccountsPage;
 use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
-use crate::settings::billing::BillingPage;
-use crate::settings::cloud::CloudPage;
-use crate::settings::devices::DevicesPage;
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
@@ -2162,11 +2159,6 @@ pub struct Shell {
     trading_page: Option<Entity<crate::trading::TradingSurface>>,
     /// B7: the close gate's state for this window (`shell/trading_gate.rs`).
     trading_gate: trading_gate::TradingGate,
-    devices_page: Option<Entity<DevicesPage>>,
-    /// Rebuilt per visit and dropped on leaving, which stops its GitHub
-    /// polling and status re-checks.
-    cloud_page: Option<Entity<CloudPage>>,
-    billing_page: Option<Entity<BillingPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
@@ -2681,9 +2673,6 @@ impl Shell {
             nav,
             trading_page: None,
             trading_gate: Default::default(),
-            devices_page: None,
-            cloud_page: None,
-            billing_page: None,
             archived_page: None,
             appearance_page: None,
             notifications_page: None,
@@ -4851,20 +4840,6 @@ impl Shell {
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
         }
-        // Cloud status is read once per visit (re-picking the page it already
-        // shows is not a new visit: it would only flash).
-        if section == SettingsSection::Cloud
-            && self.route != Route::Settings(SettingsSection::Cloud)
-        {
-            self.cloud_page = None;
-        }
-        // Billing too: a fresh read per visit (it then follows open Stripe
-        // pages until they land).
-        if section == SettingsSection::Billing
-            && self.route != Route::Settings(SettingsSection::Billing)
-        {
-            self.billing_page = None;
-        }
         if !matches!(self.route, Route::Settings(_)) {
             self.settings_focus_pending = true;
             self.settings_return_route = self.route;
@@ -4904,10 +4879,6 @@ impl Shell {
             return false;
         };
         match section.canonical() {
-            SettingsSection::Devices => self
-                .devices_page
-                .as_ref()
-                .is_some_and(|page| page.read(cx).has_escape_surface()),
             SettingsSection::Harnesses => self
                 .harnesses_page
                 .as_ref()
@@ -4944,10 +4915,6 @@ impl Shell {
             return false;
         };
         match section.canonical() {
-            SettingsSection::Devices => self
-                .devices_page
-                .as_ref()
-                .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
             SettingsSection::Harnesses => self
                 .harnesses_page
                 .as_ref()
@@ -5043,35 +5010,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match section {
-            SettingsSection::Devices => {
-                if self.devices_page.is_none() {
-                    let state = self.state.clone();
-                    self.devices_page = Some(cx.new(|cx| DevicesPage::new(state, cx)));
-                }
-                match &self.devices_page {
-                    Some(page) => page.clone().into_any_element(),
-                    None => Empty.into_any_element(),
-                }
-            }
-            SettingsSection::Cloud => {
-                if self.cloud_page.is_none() {
-                    let state = self.state.clone();
-                    self.cloud_page = Some(cx.new(|cx| CloudPage::new(state, cx)));
-                }
-                match &self.cloud_page {
-                    Some(page) => page.clone().into_any_element(),
-                    None => Empty.into_any_element(),
-                }
-            }
-            SettingsSection::Billing => {
-                if self.billing_page.is_none() {
-                    let state = self.state.clone();
-                    self.billing_page = Some(cx.new(|cx| BillingPage::new(state, cx)));
-                }
-                match &self.billing_page {
-                    Some(page) => page.clone().into_any_element(),
-                    None => Empty.into_any_element(),
-                }
+            // Devices, Zeron Cloud and Billing are gone from Aurea.
+            SettingsSection::Devices | SettingsSection::Cloud | SettingsSection::Billing => {
+                Empty.into_any_element()
             }
             SettingsSection::Harnesses => {
                 if self.harnesses_page.is_none() {
@@ -12602,15 +12543,6 @@ impl Render for Shell {
         self.clock
             .arm(wake, now, |shell: &mut Shell| &mut shell.clock, cx);
         settings::wallpaper::preload(cx);
-        // Settings → Cloud lives only while shown: dropping it cancels a
-        // GitHub sign-in poll and its slow status re-checks.
-        if self.cloud_page.is_some() && self.route != Route::Settings(SettingsSection::Cloud) {
-            self.cloud_page = None;
-        }
-        // Leaving Billing stops its checks on open Stripe pages.
-        if self.billing_page.is_some() && self.route != Route::Settings(SettingsSection::Billing) {
-            self.billing_page = None;
-        }
         self.navigation_focus
             .remember(&self.shortcut_focus, window, cx);
         if let Some(command) = self.pending_workspace_command.take() {
@@ -17380,111 +17312,6 @@ mod settings_modal_regressions {
         });
     }
 
-    /// Settings → Cloud is rebuilt per visit and dropped on leaving, which is
-    /// what stops its GitHub polling and status re-checks.
-    #[gpui::test]
-    fn cloud_settings_page_lives_only_while_shown(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
-        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
-        shell.update(cx, |shell, cx| {
-            shell.debug_gate = Some(GatePhase::Ready);
-            sign_in(&shell.state, cx);
-            shell.open_settings(SettingsSection::Cloud, cx)
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
-        let first = shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.route, Route::Settings(SettingsSection::Cloud));
-            shell.cloud_page.clone().expect("Cloud page mounts")
-        });
-        shell.update(cx, |shell, cx| {
-            shell.open_settings(SettingsSection::Devices, cx)
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
-        shell.read_with(cx, |shell, _| assert!(shell.cloud_page.is_none()));
-        shell.update(cx, |shell, cx| {
-            shell.open_settings(SettingsSection::Cloud, cx)
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
-        let second = shell.read_with(cx, |shell, _| {
-            let second = shell.cloud_page.clone().expect("Cloud page remounts");
-            assert_ne!(first.entity_id(), second.entity_id());
-            second
-        });
-        // Picking Cloud again while it shows keeps the page (no flash).
-        shell.update(cx, |shell, cx| {
-            shell.open_settings(SettingsSection::Cloud, cx)
-        });
-        cx.run_until_parked();
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(
-                shell.cloud_page.as_ref().map(|page| page.entity_id()),
-                Some(second.entity_id())
-            );
-        });
-        drop((first, second));
-        shell.update(cx, |shell, cx| shell.close_settings(cx));
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
-        shell.read_with(cx, |shell, _| assert!(shell.cloud_page.is_none()));
-    }
-
-    #[gpui::test]
-    fn escape_closes_what_is_open_inside_settings_before_settings(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
-        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
-        shell.update(cx, |shell, cx| {
-            // No engine in tests: render the workspace, not the boot gate.
-            shell.debug_gate = Some(GatePhase::Ready);
-            shell.open_settings(SettingsSection::Devices, cx)
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        // A dialog that does not hold focus (the rename input was never
-        // clicked) still closes before Settings does.
-        let devices = shell.read_with(cx, |shell, _| shell.devices_page.clone().unwrap());
-        devices.update(cx, |page, cx| {
-            page.open_rename("device-1".into(), "Studio".into(), cx)
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
-        cx.simulate_keystrokes("escape");
-        assert!(!devices.update(cx, |page, cx| page.dismiss_on_escape(cx)));
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.route, Route::Settings(SettingsSection::Devices));
-        });
-
-        // So does the account menu opened from the settings footer.
-        shell.update(cx, |shell, cx| {
-            shell.user_menu.open(());
-            cx.notify();
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
-        cx.simulate_keystrokes("escape");
-        shell.read_with(cx, |shell, _| {
-            assert!(!shell.user_menu.is_open());
-            assert_eq!(shell.route, Route::Settings(SettingsSection::Devices));
-        });
-        // The exit animation's reap runs on wall-clock time; stand in for it.
-        shell.update(cx, |shell, cx| {
-            shell.user_menu = popover::Popup::default();
-            cx.notify();
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-
-        // With nothing left open, Escape leaves Settings.
-        cx.simulate_keystrokes("escape");
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.route, Route::Chat);
-            assert_eq!(shell.settings.settings_section, SettingsSection::Devices);
-        });
-    }
 }
 
 /// Native visual QA of the pull request board and detail with isolated data.

@@ -25,7 +25,6 @@ use crate::appearance::{self, AppearanceMode};
 use crate::icons::{self, icon};
 use crate::motion;
 use crate::popover::{self, Loadable};
-use crate::settings::cloud::CloudPage;
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::{NewThreadBackgroundEffect, widgets};
 use crate::state::{AppState, EngineHandle};
@@ -189,10 +188,6 @@ pub struct Onboarding {
     agents_engine: Option<EngineHandle>,
     _observe_state: Subscription,
     _observe_agents: Option<Subscription>,
-    /// Settings → Cloud's GitHub block, built when the GitHub step is
-    /// reached (it also turns Cloud on for the account).
-    github_page: Option<Entity<CloudPage>>,
-    _observe_github: Option<Subscription>,
     effect_select: widgets::SelectState,
     /// The page column as last laid out: the wallpaper clears around it the
     /// way the new-chat wallpaper clears around the composer.
@@ -242,8 +237,6 @@ impl Onboarding {
             agents_engine: None,
             _observe_state: observe_state,
             _observe_agents: None,
-            github_page: None,
-            _observe_github: None,
             effect_select: Default::default(),
             column_bounds: Default::default(),
             wallpaper: Default::default(),
@@ -267,12 +260,6 @@ impl Onboarding {
         {
             self.load(cx);
         }
-        if step == Step::Github && self.github_page.is_none() {
-            let state = self.state.clone();
-            let page = cx.new(|cx| CloudPage::new_github_only(state, cx));
-            self._observe_github = Some(cx.observe(&page, |_, _, cx| cx.notify()));
-            self.github_page = Some(page);
-        }
         cx.notify();
     }
 
@@ -283,9 +270,9 @@ impl Onboarding {
     }
 
     fn github_connected(&self, cx: &Context<Self>) -> bool {
-        self.github_page
-            .as_ref()
-            .is_some_and(|page| page.read(cx).github_connected())
+        // No Zeron Cloud in Aurea, so never a GitHub link to check.
+        let _ = cx;
+        false
     }
 
     fn finish(&mut self, add_project: bool, cx: &mut Context<Self>) {
@@ -1098,11 +1085,6 @@ impl Onboarding {
                 "Connect GitHub",
                 "Cloud agents work in your repositories on machines of their own. Connect GitHub so they can clone and push — or skip and do it later in Settings → Cloud.",
             ))
-            .children(
-                self.github_page
-                    .clone()
-                    .map(|page| div().mt(px(24.0)).child(page)),
-            )
             .into_any_element()
     }
 
