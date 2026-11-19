@@ -75,10 +75,6 @@ settings_index! {
         "esc interrupt cancel halt run keyboard"),
     (ThreadNaming, General, None, "Thread naming",
         "titles rename sessions model"),
-    (WorktreeLocation, General, Some("Git"), "Custom worktree location",
-        "folder directory path checkout branches"),
-    (CommitCredit, General, Some("Git"), "Credit Zeron in commits",
-        "co-author coauthor attribution bot commit message"),
     (ColorScheme, Appearance, None, "Color scheme",
         "system light dark mode"),
     (LightTheme, Appearance, None, "Light theme",
@@ -788,14 +784,9 @@ mod tests {
             !matches!(section, SettingsSection::Cloud | SettingsSection::Billing)
         };
         assert_eq!(top("credits"), Target::Setting(SettingId::Credits));
-        // Signed out, Billing's credits are gone: only General's near
-        // spelling ("Credit Zeron in commits") is left.
+        // Signed out, Billing's credits are gone, and nothing else is near.
         let hits = search("credits", signed_out);
-        assert!(!hits.is_empty() && hits.iter().all(|hit| signed_out(hit.entry.section)));
-        assert_eq!(
-            hits[0].entry.target,
-            Target::Setting(SettingId::CommitCredit)
-        );
+        assert!(hits.iter().all(|hit| signed_out(hit.entry.section)));
     }
 
     #[test]
