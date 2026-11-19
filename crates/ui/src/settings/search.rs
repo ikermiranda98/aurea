@@ -135,10 +135,6 @@ settings_index! {
         "question waiting approval audio sound"),
     (ErrorSound, Notifications, Some("Sounds"), "Errors and disconnections",
         "failure offline audio sound"),
-    (CodexVoiceDevice, Voice, None, "Codex voice device",
-        "remote host machine"),
-    (CodexVoiceStyle, Voice, None, "Codex voice style",
-        "speech tone"),
     (Dictation, Voice, None, "Dictation",
         "speech to text transcribe talk"),
     (Microphone, Voice, None, "Microphone",
@@ -824,7 +820,8 @@ mod tests {
             Target::Page(SettingsSection::Notifications)
         );
         assert_eq!(top("microphnoe"), Target::Setting(SettingId::Microphone));
-        assert_eq!(top("dictatoin"), Target::Setting(SettingId::Dictation));
+        // The page is now titled "Dictation" itself, so it ranks first.
+        assert_eq!(top("dictatoin"), Target::Page(SettingsSection::Voice));
         // A word cut short still counts, as far as it is typed.
         assert_eq!(top("wallpapr"), Target::Setting(SettingId::WallpaperColors));
         let hit = &search("wallpapr folder", |_| true)[0];

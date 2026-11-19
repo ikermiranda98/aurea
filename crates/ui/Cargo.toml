@@ -117,9 +117,6 @@ name = "session-card-fixture"
 required-features = ["appshots-fixture"]
 
 [dependencies]
-zeron-voice-media.workspace = true
-zeron-voice-session.workspace = true
-zeron-orb.workspace = true
 zeron-veil.workspace = true
 zeron-voice = { path = "../voice" }
 url = "2"

@@ -101,8 +101,6 @@ mod trading_gate;
 use side_chats::SideChatTab;
 mod tabs;
 use tabs::NewSessionTarget;
-mod voice_stage;
-use voice_stage::VOICE_STAGE_ORB_SCALE;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
@@ -755,7 +753,7 @@ impl SettingsSection {
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Files => "Files",
             SettingsSection::Notifications => "Notifications",
-            SettingsSection::Voice => "Voice",
+            SettingsSection::Voice => "Dictation",
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::General => "General",
             SettingsSection::Appshots => "Appshots",
@@ -2099,24 +2097,6 @@ pub struct Shell {
     sidebar_pane: Entity<SidebarPane>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
-    /// The window's voice orchestrator: independent of the selected chat.
-    voice: Entity<crate::voice::VoiceController>,
-    /// Sidebar footer orb (session live) and the full-window stage's orb.
-    voice_footer_orb: Entity<crate::orb::Orb>,
-    voice_stage_orb: Entity<crate::orb::Orb>,
-    /// Above the composer, only while the orchestrator's own chat is open.
-    voice_composer_orb: Entity<crate::orb::Orb>,
-    /// The stage caption's streaming veil (shared with mobile).
-    voice_caption: zeron_veil::CaptionVeil,
-    voice_stage_focus: FocusHandle,
-    voice_stage_was_open: bool,
-    /// Last rendered route, used to distinguish navigation from staying in Settings.
-    voice_stage_route: Route,
-    voice_stage_changed_at: Option<std::time::Instant>,
-    /// The chat selected when the stage opened; picking another closes it.
-    voice_stage_selection: Option<String>,
-    _voice_observation: gpui::Subscription,
-    _voice_catalog: gpui::Subscription,
     /// Measured height of the bottom chrome stack (status strip + composer +
     /// terminal dock) the full-height transcript scrolls under. Paint-time
     /// measurement schedules another frame whenever this value changes.
@@ -2552,32 +2532,6 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
-        let voice = cx.new(|_| crate::voice::VoiceController::default());
-        let voice_footer_orb = cx.new(|_| {
-            crate::orb::Orb::new()
-                .size(crate::orb::OrbSize::Inline)
-                .state_transition(Duration::from_millis(300))
-                .visible(false)
-        });
-        let voice_stage_orb = cx.new(|_| {
-            crate::orb::Orb::new()
-                .size(crate::orb::OrbSize::Hero)
-                .state_transition(Duration::from_millis(300))
-                .scale(VOICE_STAGE_ORB_SCALE)
-                .visible(false)
-        });
-        let voice_composer_orb = cx.new(|_| {
-            crate::orb::Orb::new()
-                .size(crate::orb::OrbSize::Avatar)
-                .state_transition(Duration::from_millis(300))
-                .visible(false)
-        });
-        let voice_observation = cx.observe(&voice, |_: &mut Shell, _, cx| cx.notify());
-        // Settings → Agents installed or toggled Codex: voice follows.
-        let voice_catalog =
-            cx.observe_global::<crate::pickers::HarnessCatalogChanged>(|this: &mut Shell, cx| {
-                this.check_voice_codex(true, cx)
-            });
         let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)
@@ -2734,18 +2688,6 @@ impl Shell {
             sidebar_pane,
             transcript,
             composer,
-            voice,
-            voice_footer_orb,
-            voice_stage_orb,
-            voice_composer_orb,
-            voice_caption: zeron_veil::CaptionVeil::new(voice_stage::STAGE_CAPTION_CHARS),
-            voice_stage_focus: cx.focus_handle(),
-            voice_stage_was_open: false,
-            voice_stage_route: Route::Chat,
-            voice_stage_changed_at: None,
-            voice_stage_selection: None,
-            _voice_observation: voice_observation,
-            _voice_catalog: voice_catalog,
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
@@ -3031,16 +2973,6 @@ impl Shell {
     // ---- splash ----
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
-        // Voice is an orchestrator over every thread: navigation keeps it,
-        // only losing the engine that hosts it ends the session.
-        if self.voice.read(cx).chat_id.is_some()
-            && state
-                .read(cx)
-                .engine()
-                .is_none_or(|engine| !self.voice.read(cx).belongs_to(engine))
-        {
-            self.voice.update(cx, |voice, cx| voice.cancel(cx));
-        }
         self.prune_file_explorers(cx);
         self.refresh_harness_update_watch(cx);
         self.sync_search_warm(cx);
@@ -6115,38 +6047,8 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
-            SettingsSection::Voice => {
-                let card = crate::dictation::card(cx);
-                let state = self.state.read(cx);
-                let mut hosts = vec![(None, "This device".to_owned(), true, "Local".to_owned())];
-                for device in &state.devices {
-                    if state.local_device_id.as_deref() == Some(&device.id) {
-                        continue;
-                    }
-                    let online = state.device_online(&device.id, chrono::Utc::now());
-                    let compatible = device.supports(zeron_proto::voice::remote::CAPABILITY);
-                    let detail = if !online {
-                        "Offline"
-                    } else if !compatible {
-                        "Update Zeron to use remote voice"
-                    } else {
-                        "Available"
-                    };
-                    hosts.push((
-                        Some(device.id.clone()),
-                        device.name.clone(),
-                        online && compatible,
-                        detail.into(),
-                    ));
-                }
-                let live = self.voice.read(cx).is_live();
-                card.update(cx, |card, cx| card.set_hosts(hosts, live, cx));
-                if let Some(snapshot) = &self.voice.read(cx).snapshot {
-                    let voices = snapshot.voices.clone();
-                    card.update(cx, |card, cx| card.set_voices(&voices, cx));
-                }
-                card.into_any_element()
-            }
+            // Dictation only: the local Parakeet v3 model, downloaded on demand.
+            SettingsSection::Voice => crate::dictation::card(cx).into_any_element(),
             SettingsSection::Shortcuts | SettingsSection::General | SettingsSection::Appshots => {
                 if self.shortcuts_page.is_none() {
                     let state = self.state.clone();
@@ -6672,7 +6574,6 @@ impl Shell {
     /// the keys it records before they can dispatch.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
         self.command_palette.is_some()
-            || self.voice.read(cx).stage_open
             || self.section_dialog.is_some()
             || self.section_menu.is_some()
             || self.add_space.is_some()
@@ -8056,7 +7957,7 @@ impl Shell {
             .as_ref()
             .is_some_and(|background| std::path::Path::new(&background.path).is_file());
         let island_target = if matches!(self.route, Route::Chat)
-            && (self.state.read(cx).selected_chat.is_none() || self.voice.read(cx).stage_open)
+            && self.state.read(cx).selected_chat.is_none()
             && self.settings.sidebar_collapsed
             && over_artwork
         {
@@ -8731,7 +8632,6 @@ impl Shell {
                     // carries the titlebar clearance inside the scroll.
                     .flex()
                     .flex_col()
-                    .opacity(self.voice_stage_underlay_opacity(cx))
                     .child(div().flex_1().min_h_0().child(outlet)),
             )
             .child(
@@ -11049,7 +10949,6 @@ impl Shell {
             crate::settings::badge_combo("mod-,")
         )
         .into();
-        let voice_trigger = self.render_voice_trigger(theme, cx);
         div()
             .w_full()
             .flex()
@@ -11063,7 +10962,6 @@ impl Shell {
                     .flex_none()
                     .items_center()
                     .gap(px(2.0))
-                    .children(voice_trigger)
                     .child(trading)
                     .child(pull_requests)
                     .child(
@@ -11264,11 +11162,6 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.keystroke.key == "escape" && self.voice.read(cx).stage_open {
-            self.set_voice_stage_open(false, cx);
-            cx.stop_propagation();
-            return;
-        }
         if event.keystroke.key == "escape" && self.sidebar_session_transfer.is_some() {
             cx.stop_active_drag(window);
             self.cancel_sidebar_session_transfer(cx);
@@ -12138,7 +12031,6 @@ impl Shell {
                         .absolute()
                         .inset_0(),
                     )
-                    .children(self.render_voice_composer_orb(composer_width, cx))
                     .child(status)
                     .when(has_spaces || no_project || has_appshots, |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
@@ -13830,7 +13722,6 @@ impl Render for Shell {
             files.update(cx, |files, cx| files.suspend_tree_interactions(cx));
         }
         settings::wallpaper::preload(cx);
-        self.sync_voice_stage(window, cx);
         // Settings → Cloud lives only while shown: dropping it cancels a
         // GitHub sign-in poll and its slow status re-checks.
         if self.cloud_page.is_some() && self.route != Route::Settings(SettingsSection::Cloud) {
@@ -14021,9 +13912,6 @@ impl Render for Shell {
                         // Coming back to the app (often after sleep) checks
                         // at once when a check is due by the wall clock.
                         update.read(cx).poke();
-                    }
-                    if window.is_window_active() && !this.voice.read(cx).offered() {
-                        this.check_voice_codex(true, cx);
                     }
                     if !window.is_window_active() {
                         this.reset_command_palette_key_state();
@@ -14408,8 +14296,6 @@ impl Render for Shell {
                 }
                 if let Route::Settings(section) = self.route {
                     let settings_page = self.render_settings_page(section, window, cx);
-                    // A call started from Settings opens its stage here too.
-                    let voice_stage = self.render_voice_stage(window, cx);
                     let overlays = self.render_overlays(window.viewport_size(), window, cx);
                     let border_color = Theme::of(cx).border;
                     let sidebar_tone =
@@ -14428,7 +14314,6 @@ impl Render for Shell {
                         .size_full()
                         .relative()
                         .child(settings_page)
-                        .children(voice_stage)
                         .child(drag)
                         .children(overlays);
                     break 'ready root
@@ -14543,9 +14428,6 @@ impl Render for Shell {
                 };
                 let files_panel = self.render_files_panel(window, cx);
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
-                // Full-window voice stage: above the page chrome, below dialogs.
-                let voice_stage = self.render_voice_stage(window, cx);
-                let under_stage = self.voice_stage_underlay_opacity(cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
                 let border_color = Theme::of(cx).border;
                 // No inset cards (user request): the conversation column sits
@@ -14571,7 +14453,6 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .overflow_hidden()
-                    .opacity(under_stage)
                     .child(main)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zeron
@@ -14640,7 +14521,6 @@ impl Render for Shell {
                                     .h_full()
                                     .flex_none()
                                     .relative()
-                                    .opacity(under_stage)
                                     .child(
                                         div()
                                             .h_full()
@@ -14658,12 +14538,8 @@ impl Render for Shell {
                             .top_0()
                             .left_0()
                             .right_0()
-                            .opacity(under_stage)
                             .child(title_bar),
                     )
-                    // The stage covers the conversation's titlebar but never
-                    // the cluster: the sidebar toggle and navigation stay live.
-                    .children(voice_stage)
                     .child(self.render_titlebar_cluster(cx))
                     .children(self.render_sidebar_options_titlebar(cx))
                     .children(overlays);
@@ -16901,7 +16777,6 @@ mod exit_regressions {
                 settings::update(SavePolicy::Immediate, cx, |settings| {
                     settings.dictation_enabled = true;
                     settings.dictation_input = Some("coreaudio:usb".into());
-                    settings.codex_voice = Some("ember".into());
                     settings.transcript_compact_mode = true;
                     settings.code_fences_fit_content = true;
                     settings.diff_split = true;
@@ -16914,7 +16789,6 @@ mod exit_regressions {
                 let saved = settings::current(cx);
                 assert!(saved.dictation_enabled);
                 assert_eq!(saved.dictation_input.as_deref(), Some("coreaudio:usb"));
-                assert_eq!(saved.codex_voice.as_deref(), Some("ember"));
                 assert!(saved.transcript_compact_mode);
                 assert!(saved.code_fences_fit_content);
                 assert!(saved.diff_split);
@@ -16925,13 +16799,11 @@ mod exit_regressions {
                 // once the Shell has nothing newer of its own.
                 settings::update(SavePolicy::Immediate, cx, |settings| {
                     settings.dictation_enabled = false;
-                    settings.codex_voice = None;
                     settings.sidebar_width = 320.0;
                 });
                 shell.schedule_save(cx);
                 let saved = settings::current(cx);
                 assert!(!saved.dictation_enabled);
-                assert_eq!(saved.codex_voice, None);
                 assert_eq!(saved.sidebar_width, 320.0);
                 assert_eq!(shell.settings.sidebar_width, 320.0);
             })
@@ -19974,38 +19846,6 @@ mod settings_modal_regressions {
                 "the drop mentions the chat: {text:?}"
             );
             assert!(shell.sidebar_session_transfer.is_none());
-        });
-    }
-
-    #[gpui::test]
-    fn voice_stage_opens_over_settings(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
-        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
-        shell.update(cx, |shell, cx| {
-            shell.debug_gate = Some(GatePhase::Ready);
-            shell.reduced_motion = true;
-            shell.open_settings(SettingsSection::Voice, cx);
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(cx.debug_bounds("voice-stage").is_none());
-
-        shell.update(cx, |shell, cx| {
-            shell.voice.update(cx, |voice, _| {
-                voice.phase = zeron_proto::voice::VoicePhase::Active
-            });
-            shell.set_voice_stage_open(true, cx);
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        let stage = cx
-            .debug_bounds("voice-stage")
-            .expect("stage renders in Settings");
-        shell.read_with(cx, |shell, cx| {
-            assert!(matches!(shell.route, Route::Settings(_)));
-            assert!(shell.voice.read(cx).stage_open);
-            // The settings sidebar stays usable beside the stage.
-            assert_eq!(f32::from(stage.origin.x), shell.settings.sidebar_width);
         });
     }
 

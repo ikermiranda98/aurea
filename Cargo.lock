@@ -13364,37 +13364,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeron-client"
-version = "0.3.7"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "futures",
- "loro",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "tracing",
- "uuid",
- "zeron-doc",
- "zeron-preview",
- "zeron-proto",
- "zeron-rpc",
- "zeron-sync",
- "zeron-term-link",
- "zeron-visual",
- "zeron-voice-session",
-]
-
-[[package]]
 name = "zeron-doc"
 version = "0.3.7"
 dependencies = [
@@ -13845,7 +13814,6 @@ dependencies = [
  "zeron-harness",
  "zeron-markdown",
  "zeron-notify",
- "zeron-orb",
  "zeron-proto",
  "zeron-rpc",
  "zeron-syntax",
@@ -13856,8 +13824,6 @@ dependencies = [
  "zeron-visual",
  "zeron-visual-gpu",
  "zeron-voice",
- "zeron-voice-media",
- "zeron-voice-session",
 ]
 
 [[package]]

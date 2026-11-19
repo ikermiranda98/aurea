@@ -52,7 +52,6 @@ mod new_thread_background_mask;
 mod notice;
 pub use zeron_notify as notify;
 pub mod onboarding;
-pub mod orb;
 pub mod overscroll;
 pub mod pickers;
 pub mod popover;
@@ -86,7 +85,6 @@ pub mod trading;
 pub mod transcript;
 pub mod typography;
 pub mod visuals;
-pub mod voice;
 mod workspace_links;
 
 use std::path::PathBuf;
