@@ -57,23 +57,21 @@ impl Step {
     }
 
     /// The way on. `github`: the GitHub step is in the flow (signed in).
+    /// Aurea's way on: no sign-in, sync or GitHub steps (local-only desk).
     fn next(self, github: bool) -> Step {
+        let _ = github;
         match self {
             Step::Welcome => Step::Appearance,
-            Step::Appearance => Step::Sync,
-            Step::Sync if github => Step::Github,
-            Step::Sync | Step::Github => Step::Providers,
+            Step::Appearance | Step::Sync | Step::Github => Step::Providers,
             Step::Providers | Step::Done => Step::Done,
         }
     }
 
     fn previous(self, github: bool) -> Step {
+        let _ = github;
         match self {
             Step::Welcome | Step::Appearance => Step::Welcome,
-            Step::Sync => Step::Appearance,
-            Step::Github => Step::Sync,
-            Step::Providers if github => Step::Github,
-            Step::Providers => Step::Sync,
+            Step::Sync | Step::Github | Step::Providers => Step::Appearance,
             Step::Done => Step::Providers,
         }
     }
@@ -81,18 +79,18 @@ impl Step {
     /// Place among the numbered steps; the welcome and the ending aren't
     /// counted, nor the GitHub step when signed out.
     fn number(self, github: bool) -> Option<usize> {
+        let _ = github;
         match self {
             Step::Appearance => Some(1),
-            Step::Sync => Some(2),
-            Step::Github => Some(3),
-            Step::Providers => Some(if github { 4 } else { 3 }),
-            Step::Welcome | Step::Done => None,
+            Step::Providers => Some(2),
+            Step::Sync | Step::Github | Step::Welcome | Step::Done => None,
         }
     }
 
     /// How many numbered steps there are.
     fn total(github: bool) -> usize {
-        if github { 4 } else { 3 }
+        let _ = github;
+        2
     }
 
     fn key(self) -> &'static str {
@@ -1194,29 +1192,11 @@ impl Onboarding {
     }
 
     fn render_done(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let state = self.state.read(cx);
-        let has_projects = !state.spaces.is_empty();
-        let sync = if state.signed_in() {
-            state
-                .auth_user()
-                .map(|user| format!("Signed in as {}", user.email))
-                .unwrap_or_else(|| "Signed in".into())
-        } else {
-            format!("Only on {}", this_device())
-        };
         let look = format!(
             "{} · {}",
             appearance::mode(cx).label(),
             appearance::accent(cx).label()
         );
-        // Signed in: whether Cloud agents can reach GitHub yet.
-        let github = self.github_in_flow(cx).then(|| {
-            if self.github_connected(cx) {
-                "Connected".to_string()
-            } else {
-                "Not yet · Settings → Cloud".to_string()
-            }
-        });
         let agents = match agents_summary(&self.harnesses) {
             AgentsSummary::Installed(names) => short_names(&names),
             AgentsSummary::NoneInstalled => "None yet".into(),
@@ -1266,7 +1246,7 @@ impl Onboarding {
                     .line_height(px(28.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(SharedString::from("You're all set")),
+                    .child(SharedString::from("Todo listo")),
             )
             .child(
                 div()
@@ -1276,20 +1256,16 @@ impl Onboarding {
                     .text_size(crate::typography::ui_rems(13.0))
                     .line_height(px(19.0))
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(if has_projects {
-                        "Pick a project and start a chat."
-                    } else {
-                        "Add a project to start your first chat. A project is a folder on one of your devices."
-                    })),
+                    .child(SharedString::from(
+                        "Abre la mesa de trading o empieza un chat con el agente.",
+                    )),
             )
             .child(
                 widgets::section_card(theme)
                     .mt(px(28.0))
                     .w(px(400.0))
-                    .child(line("Appearance", look, true))
-                    .child(line("Sync", sync, false))
-                    .when_some(github, |card, github| card.child(line("GitHub", github, false)))
-                    .child(line("Agents", agents, false)),
+                    .child(line("Apariencia", look, true))
+                    .child(line("Agente", agents, false)),
             )
             .child(
                 div()
@@ -1299,23 +1275,10 @@ impl Onboarding {
                     .mt(px(28.0))
                     .items_center()
                     .gap(px(14.0))
-                    .map(|el| {
-                        if has_projects {
-                            el.child(
-                                wide_button(theme, "onboarding-finish", "Empezar a usar Aurea")
-                                    .on_click(cx.listener(|this, _, _, cx| this.finish(false, cx))),
-                            )
-                        } else {
-                            el.child(
-                                wide_button(theme, "onboarding-add-project", "Add a project")
-                                    .on_click(cx.listener(|this, _, _, cx| this.finish(true, cx))),
-                            )
-                            .child(
-                                quiet_link(theme, "onboarding-later", "I'll do this later")
-                                    .on_click(cx.listener(|this, _, _, cx| this.finish(false, cx))),
-                            )
-                        }
-                    }),
+                    .child(
+                        wide_button(theme, "onboarding-finish", "Empezar a usar Aurea")
+                            .on_click(cx.listener(|this, _, _, cx| this.finish(false, cx))),
+                    ),
             )
             .into_any_element()
     }
@@ -1407,41 +1370,24 @@ mod tests {
 
     #[test]
     fn steps_walk_forward_and_back() {
-        let walk = |github: bool| {
-            let mut step = Step::Welcome;
+        // Aurea: no sign-in, sync or GitHub steps, signed in or not.
+        use Step::*;
+        for github in [false, true] {
+            let mut step = Welcome;
             let mut seen = vec![step];
-            while step != Step::Done {
+            while step != Done {
                 step = step.next(github);
                 seen.push(step);
             }
-            seen
-        };
-        use Step::*;
-        // Signed out: no GitHub step, three numbered.
-        assert_eq!(walk(false), [Welcome, Appearance, Sync, Providers, Done]);
-        assert_eq!(
-            [Welcome, Appearance, Sync, Providers, Done].map(|s| s.number(false)),
-            [None, Some(1), Some(2), Some(3), None]
-        );
-        assert_eq!(Step::total(false), 3);
-        assert_eq!(Providers.previous(false), Sync);
-        // Signed in: GitHub after sync, four numbered.
-        assert_eq!(
-            walk(true),
-            [Welcome, Appearance, Sync, Github, Providers, Done]
-        );
-        assert_eq!(
-            [Appearance, Sync, Github, Providers].map(|s| s.number(true)),
-            [Some(1), Some(2), Some(3), Some(4)]
-        );
-        assert_eq!(Step::total(true), 4);
-        assert_eq!(Providers.previous(true), Github);
-        assert_eq!(Github.previous(true), Sync);
-        assert_eq!(Done.previous(true), Providers);
-        assert_eq!(Appearance.previous(true), Welcome);
-        assert_eq!(Step::parse("agents"), Providers);
-        assert_eq!(Step::parse("github"), Github);
-        assert_eq!(Step::parse("1"), Welcome);
+            assert_eq!(seen, [Welcome, Appearance, Providers, Done]);
+            assert_eq!(
+                [Welcome, Appearance, Providers, Done].map(|s| s.number(github)),
+                [None, Some(1), Some(2), None]
+            );
+            assert_eq!(Step::total(github), 2);
+            assert_eq!(Providers.previous(github), Appearance);
+            assert_eq!(Done.previous(github), Providers);
+        }
     }
 
     #[test]
