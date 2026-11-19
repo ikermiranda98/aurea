@@ -543,14 +543,7 @@ impl Shell {
                         .mr(px(-5.0))
                         .py(px(2.0))
                         .rounded(px(5.0))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(crate::theme::ink(0.08)))
                         .tooltip(crate::settings::widgets::text_tooltip("Branch changes"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.close_session_info_overlay(cx);
-                            this.add_branch_diff_surface(window, cx);
-                        }))
                         .child(stat(format!("+{adds}"), crate::changes::add_color(&theme)))
                         .child(stat(format!("−{dels}"), crate::changes::del_color(&theme)))
                 }))

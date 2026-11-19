@@ -195,7 +195,8 @@ pub(super) enum Tab {
 }
 
 impl Tab {
-    pub(super) const ALL: [Tab; 4] = [Tab::All, Tab::Threads, Tab::Commands, Tab::Files];
+    // Aurea has no workspace files: the Files tab is gone from the bar.
+    pub(super) const ALL: [Tab; 3] = [Tab::All, Tab::Threads, Tab::Commands];
 
     fn label(self) -> &'static str {
         match self {
@@ -724,16 +725,10 @@ impl Shell {
         };
         let sections = match (palette.tab, query.is_empty()) {
             (Tab::All, true) => vec![
-                recent_files(ALL_TAB_LIMIT),
                 commands(Section::QuickActions),
                 recent_threads(ALL_TAB_LIMIT),
             ],
-            (Tab::All, false) => vec![
-                threads(ALL_TAB_LIMIT),
-                commands(Section::Commands),
-                files(ALL_TAB_LIMIT),
-                in_files(ALL_TAB_LIMIT),
-            ],
+            (Tab::All, false) => vec![threads(ALL_TAB_LIMIT), commands(Section::Commands)],
             (Tab::Threads, true) => vec![recent_threads(THREADS_TAB_LIMIT)],
             (Tab::Threads, false) => vec![threads(THREADS_TAB_LIMIT)],
             (Tab::Commands, true) => vec![commands(Section::QuickActions)],
@@ -904,25 +899,8 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_chat.is_empty() {
-            return;
-        }
-        if is_dir {
-            self.add_files_surface(window, cx);
-            if let Some(files) = self.files.get(&self.panel_key(cx)).cloned() {
-                files.update(cx, |files, cx| files.reveal_file_explicit(path, cx));
-            }
-            return;
-        }
-        let key = self.panel_key(cx);
-        let was_open = self.panels.get(&key).changes_open;
-        let from = self.right_target(cx);
-        self.panels.update(&key, |panel| panel.changes_open = true);
-        if !was_open {
-            self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
-        }
-        let owner = (self.active_chat.clone(), self.state.clone());
-        self.add_file_surface_at(owner, path, location, window, cx);
+        // The file editor and explorer are gone in Aurea.
+        let _ = (path, is_dir, location, window, cx);
     }
 
     fn command_shortcut(&self, command: &Command) -> Option<String> {
@@ -1731,52 +1709,6 @@ mod tests {
             .unwrap();
     }
 
-    #[gpui::test]
-    fn empty_state_lists_recent_files_actions_and_threads(cx: &mut TestAppContext) {
-        let (window, _dir) = palette_window(cx);
-        window
-            .update(cx, |shell, window, cx| {
-                shell.state.update(cx, |state, cx| {
-                    state.apply_chats(vec![
-                        chat("focused", None, false, 0),
-                        chat("side", Some("focused"), false, 1),
-                        chat("older", None, false, 3),
-                        chat("newer", None, false, 2),
-                        chat("archived", None, true, 1),
-                    ]);
-                    state.select_chat(Some("focused".into()), cx);
-                });
-                shell.active_chat = "focused".into();
-                for path in ["src/a.rs", "README.md", "src/a.rs", "docs/b.md"] {
-                    shell.note_recent_file("focused", path);
-                }
-                shell.note_recent_file("newer", "elsewhere.rs");
-                shell.toggle_command_palette(window, cx);
-                let sections = sections(shell, cx);
-                let file = |path: &str| RowKind::File {
-                    path: path.into(),
-                    is_dir: false,
-                };
-                assert_eq!(sections[0].0, Section::RecentFiles);
-                assert_eq!(
-                    sections[0].1,
-                    [file("docs/b.md"), file("src/a.rs"), file("README.md")]
-                );
-                assert_eq!(sections[1].0, Section::QuickActions);
-                assert!(
-                    sections[1]
-                        .1
-                        .contains(&RowKind::Command(Command::ArchiveThread))
-                );
-                assert_eq!(sections[2].0, Section::RecentThreads);
-                assert_eq!(
-                    sections[2].1,
-                    [RowKind::Chat("newer".into()), RowKind::Chat("older".into())]
-                );
-            })
-            .unwrap();
-    }
-
     #[test]
     fn archive_is_offered_only_with_a_focused_chat() {
         assert!(!commands_for("archive", true, false).contains(&Command::ArchiveThread));
@@ -2069,67 +2001,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn file_search_refreshes_partial_results_until_indexed(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = file_search_palette(cx);
-        type_query(window, "needle", cx);
-        let first = answer_file_index(&mut engine, "building", cx);
-        engine.reply(&first, serde_json::json!([]));
-        cx.run_until_parked();
-        let empty = palette_section(window, Section::Files, cx).unwrap();
-        assert!(empty.rows.is_empty());
-        assert_eq!(empty.status.as_deref(), Some("Indexing…"));
-        assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
-
-        cx.executor().advance_clock(FILE_INDEX_RETRY);
-        let second = answer_file_index(&mut engine, "building", cx);
-        assert_eq!(second["params"], first["params"]);
-        engine.reply(
-            &second,
-            serde_json::json!([name_match("needle.rs", "file")]),
-        );
-        cx.run_until_parked();
-        let partial = palette_section(window, Section::Files, cx).unwrap();
-        assert_eq!(partial.rows.len(), 1);
-        assert_eq!(partial.status.as_deref(), Some("Indexing…"));
-        let selected = partial.rows[0].key();
-        window
-            .update(cx, |shell, _, cx| {
-                shell.select_palette_tab(Tab::Files, cx);
-                shell.command_palette.as_mut().unwrap().active = Some(selected.clone());
-            })
-            .unwrap();
-
-        cx.executor().advance_clock(FILE_INDEX_RETRY);
-        // Even though the index is ready now, search again: the previous
-        // answer was obtained while it was still building.
-        let third = answer_file_index(&mut engine, "ready", cx);
-        assert_eq!(third["params"], first["params"]);
-        assert_eq!(palette_section(window, Section::Files, cx), Some(partial));
-        engine.reply(
-            &third,
-            serde_json::json!([
-                name_match("another-needle.rs", "file"),
-                name_match("needle.rs", "file")
-            ]),
-        );
-        cx.run_until_parked();
-        let complete = palette_section(window, Section::Files, cx).unwrap();
-        assert_eq!(complete.rows.len(), 2);
-        assert_eq!(complete.status, None);
-        window
-            .read_with(cx, |shell, cx| {
-                let sections = shell.palette_sections(cx);
-                let rows = flat_rows(&sections);
-                let palette = shell.command_palette.as_ref().unwrap();
-                assert_eq!(rows[palette.active_position(&rows)].key(), selected);
-            })
-            .unwrap();
-        cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
-        assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
-    }
-
-    #[gpui::test]
     fn changing_query_cancels_file_index_retries(cx: &mut TestAppContext) {
         let (window, _dir, mut engine) = file_search_palette(cx);
         type_query(window, "needle", cx);
@@ -2174,131 +2045,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn file_search_on_an_older_host_keeps_the_legacy_search(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = file_search_palette(cx);
-        type_query(window, "needle", cx);
-        let warm = engine.take(methods::WARM_WORKSPACE_SEARCH, cx);
-        assert_eq!(warm.len(), 1);
-        engine.fail(&warm[0], "unknown method: WarmWorkspaceSearch");
-        let search = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
-        assert_eq!(search.len(), 1);
-        engine.reply(
-            &search[0],
-            serde_json::json!([name_match("needle.rs", "file")]),
-        );
-        cx.run_until_parked();
-        let files = palette_section(window, Section::Files, cx).unwrap();
-        assert_eq!(files.rows.len(), 1);
-        assert_eq!(files.status, None);
-        cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
-        assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
-    }
-
-    #[gpui::test]
-    fn file_index_retries_stop_on_warm_or_search_error(cx: &mut TestAppContext) {
-        for fail_warm in [false, true] {
-            let (window, _dir, mut engine) = file_search_palette(cx);
-            type_query(window, "needle", cx);
-            let first = answer_file_index(&mut engine, "building", cx);
-            engine.reply(&first, serde_json::json!([name_match("needle.rs", "file")]));
-            cx.run_until_parked();
-            cx.executor().advance_clock(FILE_INDEX_RETRY);
-            let request = if fail_warm {
-                let warm = engine.take(methods::WARM_WORKSPACE_SEARCH, cx);
-                assert_eq!(warm.len(), 1);
-                warm.into_iter().next().unwrap()
-            } else {
-                answer_file_index(&mut engine, "building", cx)
-            };
-            engine.fail(&request, "search failed");
-            cx.run_until_parked();
-            let files = palette_section(window, Section::Files, cx).unwrap();
-            assert!(files.rows.is_empty());
-            assert_eq!(files.status.as_deref(), Some("Search failed"));
-            cx.executor().advance_clock(Duration::from_secs(10));
-            assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
-            assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
-        }
-    }
-
-    #[gpui::test]
-    fn file_names_need_a_focused_chat_and_two_characters(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = engine_palette(cx, false);
-        type_query(window, "co", cx);
-        assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
-        assert!(palette_section(window, Section::Files, cx).is_none());
-
-        let (window, _dir, mut engine) = engine_palette(cx, true);
-        type_query(window, "c", cx);
-        assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
-        type_query(window, "co", cx);
-        let requests = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0]["params"]["chatId"], "focused");
-        assert_eq!(requests[0]["params"]["query"], "co");
-        let searching = palette_section(window, Section::Files, cx).unwrap();
-        assert!(searching.rows.is_empty());
-        assert_eq!(searching.status.as_deref(), Some("Searching…"));
-
-        engine.reply(
-            &requests[0],
-            serde_json::json!([
-                name_match("src/composer.rs", "file"),
-                name_match("src", "directory")
-            ]),
-        );
-        cx.run_until_parked();
-        let files = palette_section(window, Section::Files, cx).unwrap();
-        assert_eq!(files.status, None);
-        assert_eq!(
-            files
-                .rows
-                .into_iter()
-                .map(|row| row.kind)
-                .collect::<Vec<_>>(),
-            [
-                RowKind::File {
-                    path: "src/composer.rs".into(),
-                    is_dir: false
-                },
-                RowKind::File {
-                    path: "src".into(),
-                    is_dir: true
-                },
-            ]
-        );
-    }
-
-    #[gpui::test]
-    fn stale_file_answers_are_dropped(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = engine_palette(cx, true);
-        type_query(window, "ab", cx);
-        let first = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
-        type_query(window, "abc", cx);
-        let second = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
-        engine.reply(
-            &second[0],
-            serde_json::json!([name_match("abc.rs", "file")]),
-        );
-        cx.run_until_parked();
-        engine.reply(&first[0], serde_json::json!([name_match("ab.rs", "file")]));
-        cx.run_until_parked();
-        let files = palette_section(window, Section::Files, cx).unwrap();
-        assert_eq!(
-            files
-                .rows
-                .into_iter()
-                .map(|row| row.kind)
-                .collect::<Vec<_>>(),
-            [RowKind::File {
-                path: "abc.rs".into(),
-                is_dir: false
-            }]
-        );
-    }
-
-    #[gpui::test]
     fn arriving_files_keep_the_selected_row(cx: &mut TestAppContext) {
         let (window, _dir, mut engine) = engine_palette(cx, true);
         type_query(window, "deploy", cx);
@@ -2324,34 +2070,6 @@ mod tests {
         assert!(before.is_some());
     }
 
-    #[gpui::test]
-    fn activating_a_file_row_opens_it_for_the_focused_chat(cx: &mut TestAppContext) {
-        let (window, _dir, _engine) = engine_palette(cx, true);
-        window
-            .update(cx, |shell, window, cx| {
-                let row = PaletteRow::new(
-                    Section::Files,
-                    RowKind::File {
-                        path: "src/composer.rs".into(),
-                        is_dir: false,
-                    },
-                );
-                shell.activate_palette_row(row, window, cx);
-                assert!(shell.command_palette.is_none());
-                assert!(
-                    shell
-                        .file_surface_paths
-                        .values()
-                        .any(|path| path == "src/composer.rs")
-                );
-                assert_eq!(
-                    shell.recent_files("focused").next().map(String::as_str),
-                    Some("src/composer.rs")
-                );
-            })
-            .unwrap();
-    }
-
     fn content_match(path: &str, line: u64) -> serde_json::Value {
         serde_json::json!({
             "path": path, "line": line, "column": 4,
@@ -2361,132 +2079,6 @@ mod tests {
 
     fn content_answer(matches: Vec<serde_json::Value>, indexing: bool) -> serde_json::Value {
         serde_json::json!({ "matches": matches, "truncated": false, "indexing": indexing })
-    }
-
-    #[gpui::test]
-    fn content_matches_arrive_after_the_debounce(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = engine_palette(cx, true);
-        type_query(window, "needle", cx);
-        let requests = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        assert_eq!(requests.len(), 1);
-        let params = &requests[0]["params"];
-        assert_eq!(params["chatId"], "focused");
-        assert_eq!(params["query"], "needle");
-        assert_eq!(params["limit"], CONTENT_TAB_LIMIT);
-        assert_eq!(params["perFileLimit"], CONTENT_MATCHES_PER_FILE);
-
-        let matches = (1..=8)
-            .map(|line| content_match("src/lib.rs", line))
-            .collect();
-        engine.reply(&requests[0], content_answer(matches, false));
-        cx.run_until_parked();
-        let in_files = palette_section(window, Section::InFiles, cx).unwrap();
-        assert_eq!(in_files.status, None);
-        assert_eq!(in_files.rows.len(), ALL_TAB_LIMIT);
-        let RowKind::Content(first) = &in_files.rows[0].kind else {
-            panic!("content row expected");
-        };
-        assert_eq!((first.line, first.ranges.as_slice()), (1, &[(4, 10)][..]));
-        window
-            .update(cx, |shell, _, cx| shell.select_palette_tab(Tab::Files, cx))
-            .unwrap();
-        assert_eq!(
-            palette_section(window, Section::InFiles, cx)
-                .unwrap()
-                .rows
-                .len(),
-            8
-        );
-    }
-
-    #[gpui::test]
-    fn content_search_reports_indexing_and_hides_when_empty(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = engine_palette(cx, true);
-        type_query(window, "needle", cx);
-        let requests = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        engine.reply(&requests[0], content_answer(Vec::new(), true));
-        cx.run_until_parked();
-        assert_eq!(
-            palette_section(window, Section::InFiles, cx)
-                .unwrap()
-                .status
-                .as_deref(),
-            Some("Indexing…")
-        );
-
-        type_query(window, "needles", cx);
-        let requests = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        engine.reply(&requests[0], content_answer(Vec::new(), false));
-        cx.run_until_parked();
-        assert!(palette_section(window, Section::InFiles, cx).is_none());
-    }
-
-    #[gpui::test]
-    fn content_search_refreshes_partial_results_until_indexed(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = engine_palette(cx, true);
-        type_query(window, "needle", cx);
-        let first = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        engine.reply(&first[0], content_answer(Vec::new(), true));
-        cx.run_until_parked();
-        assert!(
-            engine
-                .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                .is_empty()
-        );
-
-        cx.executor().advance_clock(CONTENT_INDEX_RETRY);
-        let second = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        assert_eq!(second.len(), 1);
-        assert_eq!(second[0]["params"], first[0]["params"]);
-        engine.reply(
-            &second[0],
-            content_answer(vec![content_match("src/lib.rs", 2)], true),
-        );
-        cx.run_until_parked();
-        let partial = palette_section(window, Section::InFiles, cx).unwrap();
-        assert_eq!(partial.rows.len(), 1);
-        assert_eq!(partial.status.as_deref(), Some("Indexing…"));
-        let selected = partial.rows[0].key();
-        window
-            .update(cx, |shell, _, cx| {
-                shell.select_palette_tab(Tab::Files, cx);
-                shell.command_palette.as_mut().unwrap().active = Some(selected.clone());
-            })
-            .unwrap();
-
-        cx.executor().advance_clock(CONTENT_INDEX_RETRY * 2);
-        let third = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        assert_eq!(third.len(), 1);
-        assert_eq!(third[0]["params"], first[0]["params"]);
-        assert_eq!(palette_section(window, Section::InFiles, cx), Some(partial));
-        engine.reply(
-            &third[0],
-            content_answer(
-                vec![
-                    content_match("src/lib.rs", 1),
-                    content_match("src/lib.rs", 2),
-                ],
-                false,
-            ),
-        );
-        cx.run_until_parked();
-        let complete = palette_section(window, Section::InFiles, cx).unwrap();
-        assert_eq!(complete.rows.len(), 2);
-        assert_eq!(complete.status, None);
-        window
-            .read_with(cx, |shell, cx| {
-                let sections = shell.palette_sections(cx);
-                let rows = flat_rows(&sections);
-                let palette = shell.command_palette.as_ref().unwrap();
-                assert_eq!(rows[palette.active_position(&rows)].key(), selected);
-            })
-            .unwrap();
-        cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(
-            engine
-                .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                .is_empty()
-        );
     }
 
     #[gpui::test]
@@ -2565,66 +2157,6 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn content_index_retries_stop_on_error(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = engine_palette(cx, true);
-        type_query(window, "needle", cx);
-        let first = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        engine.reply(&first[0], content_answer(Vec::new(), true));
-        cx.run_until_parked();
-        cx.executor().advance_clock(CONTENT_INDEX_RETRY);
-        let retry = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        assert_eq!(retry.len(), 1);
-        engine.fail(&retry[0], "search failed");
-        cx.run_until_parked();
-        let section = palette_section(window, Section::InFiles, cx).unwrap();
-        assert_eq!(section.status.as_deref(), Some("Search failed"));
-        cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(
-            engine
-                .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                .is_empty()
-        );
-    }
-
-    #[gpui::test]
-    fn content_search_on_an_older_host_explains_itself(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = engine_palette(cx, true);
-        type_query(window, "needle", cx);
-        let requests = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        engine.fail(&requests[0], "unknown method: SearchWorkspaceContent");
-        cx.run_until_parked();
-        let in_files = palette_section(window, Section::InFiles, cx).unwrap();
-        assert!(in_files.rows.is_empty());
-        assert!(
-            in_files
-                .status
-                .is_some_and(|status| status.contains("update it to search its file contents"))
-        );
-    }
-
-    #[gpui::test]
-    fn activating_a_content_row_opens_its_file(cx: &mut TestAppContext) {
-        let (window, _dir, _engine) = engine_palette(cx, true);
-        window
-            .update(cx, |shell, window, cx| {
-                let found: WorkspaceContentMatch =
-                    serde_json::from_value(content_match("src/lib.rs", 42)).unwrap();
-                shell.activate_palette_row(
-                    PaletteRow::new(Section::InFiles, RowKind::Content(found)),
-                    window,
-                    cx,
-                );
-                assert!(
-                    shell
-                        .file_surface_paths
-                        .values()
-                        .any(|path| path == "src/lib.rs")
-                );
-            })
-            .unwrap();
-    }
-
     /// A shell with the real app keymap and two sidebar sessions.
     fn keyed_palette_window(
         cx: &mut TestAppContext,
@@ -2678,27 +2210,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn digit_shortcuts_switch_tabs_while_the_palette_is_open(cx: &mut TestAppContext) {
-        let (window, _dir) = keyed_palette_window(cx);
-        window
-            .update(cx, |shell, window, cx| {
-                shell.toggle_command_palette(window, cx)
-            })
-            .unwrap();
-        cx.run_until_parked();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
-            .unwrap();
-
-        cx.simulate_keystrokes(window.into(), &platform_combo("mod-2"));
-        assert_eq!(palette_tab(window, cx), Some(Tab::Threads));
-        assert_eq!(selected_chat(window, cx).as_deref(), Some("first"));
-        cx.simulate_keystrokes(window.into(), &platform_combo("mod-4"));
-        assert_eq!(palette_tab(window, cx), Some(Tab::Files));
-        cx.simulate_keystrokes(window.into(), &platform_combo("mod-1"));
-        assert_eq!(palette_tab(window, cx), Some(Tab::All));
-    }
-
-    #[gpui::test]
     fn digit_shortcuts_jump_to_sessions_once_the_palette_closes(cx: &mut TestAppContext) {
         let (window, _dir) = keyed_palette_window(cx);
         window
@@ -2714,26 +2225,6 @@ mod tests {
         cx.simulate_keystrokes(window.into(), &platform_combo("mod-2"));
         assert_eq!(palette_tab(window, cx), None);
         assert_eq!(selected_chat(window, cx).as_deref(), Some("second"));
-    }
-
-    #[gpui::test]
-    fn tab_rotates_the_palette_tabs(cx: &mut TestAppContext) {
-        let (window, _dir) = keyed_palette_window(cx);
-        window
-            .update(cx, |shell, window, cx| {
-                shell.toggle_command_palette(window, cx)
-            })
-            .unwrap();
-        cx.run_until_parked();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
-            .unwrap();
-
-        for expected in [Tab::Threads, Tab::Commands, Tab::Files, Tab::All] {
-            cx.simulate_keystrokes(window.into(), "tab");
-            assert_eq!(palette_tab(window, cx), Some(expected));
-        }
-        cx.simulate_keystrokes(window.into(), "shift-tab");
-        assert_eq!(palette_tab(window, cx), Some(Tab::Files));
     }
 
     #[test]

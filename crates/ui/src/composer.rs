@@ -6066,8 +6066,6 @@ impl WorkspaceCommand {
                 false,
             ),
             (Self::Settings, "settings", "Aurea: open settings", false),
-            (Self::Diff, "diff", "Aurea: open changes", true),
-            (Self::Files, "files", "Aurea: open project files", true),
             (Self::Terminal, "terminal", "Aurea: open a terminal", true),
             (
                 Self::Rename,
@@ -12989,7 +12987,8 @@ mod tests {
             vec![],
         );
         let rows = with_workspace_commands(native, true);
-        assert_eq!(rows.len(), 11);
+        // 2 native + 7 workspace commands (no /diff or /files in Aurea).
+        assert_eq!(rows.len(), 9);
         assert!(rows[0].workspace_command.is_none());
         assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
         assert_eq!(workspace_command_for_text("/model", &rows), None);
@@ -12998,7 +12997,7 @@ mod tests {
             workspace_command_for_text("/zeron:zeron:model", &rows),
             Some(WorkspaceCommand::Model)
         );
-        assert_eq!(with_workspace_commands(rows, true).len(), 11);
+        assert_eq!(with_workspace_commands(rows, true).len(), 9);
         let draft_rows = with_workspace_commands(vec![], false);
         assert_eq!(draft_rows.len(), 4);
         assert_eq!(workspace_command_for_text("/diff", &draft_rows), None);

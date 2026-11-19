@@ -187,62 +187,6 @@ fn clicking_main_transcript_switches_back_to_session_navigation(cx: &mut TestApp
 }
 
 #[gpui::test]
-fn side_chat_to_diff_retains_right_focus_and_custom_bindings(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            let chat = serde_json::from_value(serde_json::json!({
-                "id": "side", "parentChatId": "parent", "deviceId": "local",
-                "archived": false, "createdAt": Utc::now(),
-            }))
-            .unwrap();
-            shell.open_side_chat(chat, shell.panel_key(cx), cx);
-            shell.add_diff_surface(window, cx);
-            shell.activate_right_surface(RightSurface::SideChat(1), window, cx);
-        })
-    });
-    cx.update(|window, cx| window.draw(cx).clear());
-    cx.update(|window, cx| {
-        assert!(
-            shell.read(cx).side_chats[&1]
-                .composer
-                .focus_handle(cx)
-                .is_focused(window)
-        );
-        let mut keymap = KeymapConfig::default();
-        keymap.next_session = "alt-down".into();
-        keymap.prev_session = "alt-up".into();
-        apply_keymap(cx, &keymap, ComposerSendBehavior::default());
-    });
-    cx.simulate_keystrokes("alt-down");
-    cx.update(|window, cx| window.draw(cx).clear());
-    assert_surface(&shell, cx, RightSurface::Diff(1));
-    cx.simulate_keystrokes("alt-down");
-    cx.update(|window, cx| window.draw(cx).clear());
-    assert_surface(&shell, cx, RightSurface::Subagent(1));
-    cx.simulate_keystrokes("alt-up");
-    cx.update(|window, cx| window.draw(cx).clear());
-    assert_surface(&shell, cx, RightSurface::Diff(1));
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.activate_right_surface(RightSurface::SideChat(1), window, cx);
-        })
-    });
-    cx.update(|window, cx| window.draw(cx).clear());
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.close_right_surface(RightSurface::SideChat(1), window, cx);
-        })
-    });
-    cx.update(|window, cx| window.draw(cx).clear());
-    // Closing returns to the most recently visited tab, then cycles in strip order.
-    assert_surface(&shell, cx, RightSurface::Diff(1));
-    cx.simulate_keystrokes("alt-down");
-    cx.update(|window, cx| window.draw(cx).clear());
-    assert_surface(&shell, cx, RightSurface::Subagent(1));
-}
-
-#[gpui::test]
 fn closing_active_and_last_tabs_recovers_the_correct_pane(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
     let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
@@ -308,22 +252,6 @@ fn modal_and_picker_block_navigation_in_both_panes(cx: &mut TestAppContext) {
         );
         assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(2));
     });
-}
-
-#[gpui::test]
-fn empty_picker_and_stale_tabs_do_not_change_sessions(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            let key = shell.panel_key(cx);
-            shell.right_tabs.insert(key, vec![RightSurface::File(999)]);
-            shell.set_right_active(RightSurface::Picker, cx);
-            window.focus(&shell.navigation_focus.right, cx);
-        })
-    });
-    press(cx, true);
-    press(cx, false);
-    assert_surface(&shell, cx, RightSurface::Picker);
 }
 
 #[gpui::test]

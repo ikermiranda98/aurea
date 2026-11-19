@@ -71,9 +71,9 @@ fn files_panel_layout(
 
 impl Shell {
     pub(super) fn files_panel_open(&self, cx: &App) -> bool {
-        matches!(self.route, Route::Chat)
-            && !self.active_chat.is_empty()
-            && self.panels.get(&self.panel_key(cx)).files_open
+        // Aurea drops the workspace file explorer: it never opens.
+        let _ = cx;
+        false
     }
 
     fn files_layout(&self, visible: f32, cx: &App) -> FilesPanelLayout {
@@ -251,112 +251,12 @@ impl Shell {
     }
 
     pub(super) fn sync_explorer_selection(&mut self, cx: &mut Context<Self>) {
-        let RightSurface::File(id) = self.resolved_right_active(cx) else {
-            return;
-        };
-        let Some(path) = self.file_surface_paths.get(&id).cloned() else {
-            return;
-        };
-        if let Some(files) = self.files.get(&self.panel_key(cx)).cloned() {
-            files.update(cx, |files, cx| files.reveal_file(path, cx));
-        }
+        let _ = cx;
     }
 
     pub(super) fn add_files_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_chat.is_empty() {
-            return;
-        }
-        let key = self.panel_key(cx);
-        if !self.files.contains_key(&key) {
-            let files = cx.new(|cx| {
-                FilesSurface::new_explorer(
-                    self.state.clone(),
-                    self.active_chat.clone(),
-                    self.settings.files_show_all,
-                    cx,
-                )
-            });
-            let owner = key.clone();
-            let sub = cx.subscribe_in(
-                &files,
-                window,
-                move |this: &mut Self, source, event, window, cx| match event {
-                    FilesEvent::HoldMutation { origin, paths } => {
-                        let surfaces = this
-                            .files
-                            .values()
-                            .chain(this.file_surfaces.values())
-                            .filter(|s| s.read(cx).shares_workspace(origin))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        for surface in surfaces {
-                            surface.update(cx, |files, cx| files.hold_mutation(paths.clone(), cx));
-                        }
-                    }
-                    FilesEvent::AddToChat {
-                        path,
-                        is_directory,
-                        origin,
-                    } => {
-                        let payload = WorkspacePathDrag::new(path.clone(), *is_directory)
-                            .with_origin(
-                                Some(origin.clone()),
-                                crate::files::WorkspacePathSource::Tree,
-                                None,
-                            );
-                        let composer = this.composer.clone();
-                        this.attach_workspace_drag(&payload, &composer, window, cx);
-                    }
-                    FilesEvent::Mutate(intent)
-                        if this.accepts_file_navigation(&owner, &source, cx) =>
-                    {
-                        this.start_file_mutation(source.clone(), intent.clone(), cx);
-                    }
-                    FilesEvent::MutateMany(intents)
-                        if this.accepts_file_navigation(&owner, &source, cx) =>
-                    {
-                        this.start_file_mutations(source.clone(), intents.clone(), cx);
-                    }
-                    FilesEvent::OpenFile(path)
-                        if this.accepts_file_navigation(&owner, &source, cx) =>
-                    {
-                        this.add_file_surface(path.clone(), window, cx);
-                    }
-                    FilesEvent::OpenWebLink(activation) => {
-                        if let crate::markdown::render::LinkOutcome::External(url) =
-                            this.activate_session_link(activation, window, cx)
-                        {
-                            cx.open_url(&url);
-                        }
-                    }
-                    FilesEvent::ShowAllFilesChanged(show_all) => {
-                        this.set_files_show_all(*show_all, cx)
-                    }
-                    _ => cx.notify(),
-                },
-            );
-            self.files.insert(key.clone(), files);
-            self.files_subs.insert(key.clone(), sub);
-        }
-        let before = self.painted_panels(cx);
-        let from = before.files;
-        let was_open = self.files_panel_open(cx);
-        let opening = !was_open || !self.horizontal_fit().files;
-        self.panels.update(&key, |p| p.files_open = true);
-        if opening {
-            self.record_panel_open(AuxiliaryPanel::Files, &key);
-            self.resplit_panels(before, Some(AuxiliaryPanel::Files), cx);
-            self.transition_files(from, before.files_content, self.files_settled_width(cx));
-        }
-        if let Some(files) = self.files.get(&key).cloned() {
-            files.update(cx, |files, cx| {
-                files.ensure_loaded(cx);
-                files.focus_explorer(window, cx);
-            });
-        }
-        self.composer
-            .update(cx, |composer, _| composer.focus_pending = false);
-        cx.notify();
+        // No workspace file explorer in Aurea.
+        let _ = (window, cx);
     }
 
     /// Undock the explorer portion. With the surface host closed too, this
@@ -379,20 +279,7 @@ impl Shell {
     /// The explorer's own toggle. Opening docks the explorer into the right
     /// pane — opening the pane with just that portion when it was closed.
     pub(super) fn toggle_files_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.files_panel_open(cx) {
-            self.add_files_surface(window, cx);
-            return;
-        }
-        if self.promote_hidden_panel(AuxiliaryPanel::Files, cx) {
-            self.add_files_surface(window, cx);
-            return;
-        }
-        self.close_files_panel(cx);
-        window.focus(&self.composer.focus_handle(cx), cx);
-        if self.right_pane_open(cx) {
-            self.focus_right_file_editor(self.resolved_right_active(cx), window, cx);
-        }
-        cx.notify();
+        let _ = (window, cx);
     }
 
     pub(super) fn on_files_panel_drag(
@@ -691,155 +578,5 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn explorer_and_editor_panels_have_independent_session_lifetimes(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, window, cx| {
-                shell.add_files_surface(window, cx);
-                assert!(
-                    shell.files.is_empty(),
-                    "the new-session canvas has no explorer"
-                );
-                shell.active_chat = "first".into();
-                shell.add_files_surface(window, cx);
-                let explorer = shell.files["first"].entity_id();
-                assert!(shell.files_panel_open(cx));
-                assert!(!shell.right_pane_open(cx));
-                assert!(shell.right_surface_rows(cx).is_empty());
-                shell.add_files_surface(window, cx);
-                assert_eq!(shell.files["first"].entity_id(), explorer);
-                shell.add_file_surface("src/main.rs".into(), window, cx);
-                shell.add_file_surface("src/main.rs".into(), window, cx);
-                assert_eq!(shell.file_surfaces.len(), 1);
-                assert_eq!(shell.right_surface_rows(cx).len(), 1);
-                assert!(shell.right_pane_open(cx));
-                shell.toggle_files_panel(window, cx);
-                assert!(!shell.files_panel_open(cx));
-                assert!(shell.right_pane_open(cx));
-                assert_eq!(shell.file_surfaces.len(), 1);
-                assert!(shell.pending_file_closes.is_empty());
-                shell.active_chat = "second".into();
-                assert!(!shell.files_panel_open(cx));
-                shell.add_files_surface(window, cx);
-                assert_ne!(shell.files["second"].entity_id(), explorer);
-                shell.active_chat = "first".into();
-                assert!(!shell.files_panel_open(cx));
-                shell.add_files_surface(window, cx);
-                assert_eq!(shell.files["first"].entity_id(), explorer);
-                shell.route = Route::Settings(SettingsSection::Files);
-                assert!(!shell.files_panel_open(cx));
-                assert_eq!(shell.files_reserved_width(cx), 0.0);
-                shell.route = Route::Chat;
-                assert!(shell.files_panel_open(cx));
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn pane_toggle_drives_surfaces_only_and_last_tab_close_collapses_them(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, window, cx| {
-                shell.active_chat = "chat".into();
-                // Widths settle immediately so the assertions see end states.
-                shell.reduced_motion = true;
-                // A fresh pane toggle lands on the surface host alone.
-                shell.toggle_right_pane(cx);
-                assert!(shell.right_pane_open(cx));
-                assert!(!shell.files_panel_open(cx));
-                shell.toggle_right_pane(cx);
-                assert!(!shell.right_pane_open(cx));
-                assert!(!shell.files_panel_open(cx));
-
-                // The explorer toggle opens the pane with only its portion.
-                shell.toggle_files_panel(window, cx);
-                assert!(shell.files_panel_open(cx));
-                assert!(!shell.right_pane_open(cx));
-                assert!(shell.files_visible_width(cx) > 0.0);
-                // With only the explorer docked, the pane toggle opens the
-                // surface host beside it instead of closing the pane, and it
-                // never hides the explorer.
-                shell.toggle_right_pane(cx);
-                assert!(shell.right_pane_open(cx) && shell.files_panel_open(cx));
-                shell.toggle_right_pane(cx);
-                assert!(!shell.right_pane_open(cx) && shell.files_panel_open(cx));
-
-                // Opening a file docks the surface host beside the explorer;
-                // programmatic opens never close an open pane.
-                shell.add_file_surface("src/main.rs".into(), window, cx);
-                assert!(shell.right_pane_open(cx) && shell.files_panel_open(cx));
-                shell.set_surfaces_open(true, cx);
-                assert!(shell.right_pane_open(cx) && shell.files_panel_open(cx));
-                assert_eq!(shell.file_surfaces.len(), 1);
-
-                // Closing the last surface tab collapses the surface host and
-                // leaves the pane open with just the explorer.
-                let file = shell.right_surface_rows(cx)[0].0;
-                shell.close_right_surface(file, window, cx);
-                assert!(shell.file_surfaces.is_empty());
-                assert!(!shell.right_pane_open(cx) && shell.files_panel_open(cx));
-
-                // Only the explorer toggle undocks it; with nothing else open
-                // that closes the pane entirely.
-                shell.toggle_files_panel(window, cx);
-                assert!(!shell.right_pane_open(cx) && !shell.files_panel_open(cx));
-                assert_eq!(shell.files_reserved_width(cx), 0.0);
-
-                // With the explorer undocked, the last tab close closes the
-                // whole pane.
-                shell.add_file_surface("src/main.rs".into(), window, cx);
-                assert!(shell.right_pane_open(cx));
-                let file = shell.right_surface_rows(cx)[0].0;
-                shell.close_right_surface(file, window, cx);
-                assert!(!shell.right_pane_open(cx) && !shell.files_panel_open(cx));
-            })
-            .unwrap();
-    }
 }
 
-#[cfg(all(test, target_os = "linux"))]
-#[path = "files_panel_workspace_tests.rs"]
-mod workspace_tests;

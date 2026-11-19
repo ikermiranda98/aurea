@@ -67,8 +67,6 @@ use crate::transcript::{self, Transcript, TranscriptEvent};
 mod actions_ui;
 mod chat_dropzone;
 #[cfg(test)]
-mod chat_dropzone_tests;
-#[cfg(test)]
 mod chat_rename_tests;
 mod command_palette;
 mod file_mutations;
@@ -834,9 +832,7 @@ fn right_pane_takeover_width(viewport: f32, sidebar: f32) -> f32 {
 pub enum RightSurface {
     #[default]
     Picker,
-    File(u64),
     Browser(u64),
-    Diff(u64),
     Terminal(u64),
     /// A subagent's transcript, read-only (per-subagent viz) — the handle
     /// keys [`Shell::subagent_tabs`].
@@ -3343,12 +3339,6 @@ impl Shell {
             if let Some(panel) = self.terminal.clone() {
                 panel.update(cx, |panel, cx| panel.set_open(panels.terminal_open, cx));
             }
-            if panels.changes_open
-                && let RightSurface::Diff(id) = self.resolved_right_active(cx)
-                && let Some(changes) = self.diffs.get(&id).cloned()
-            {
-                changes.update(cx, |changes, cx| changes.ensure_content(cx));
-            }
         }
         match state.read(cx).connection {
             ConnectionStatus::Ready => {
@@ -3554,13 +3544,6 @@ impl Shell {
             ),
             ..pane
         });
-        if open
-            && let RightSurface::Diff(id) = self.resolved_right_active(cx)
-            && let Some(changes) = self.diffs.get(&id).cloned()
-        {
-            // Reopening onto a diff tab revalidates its watch.
-            changes.update(cx, |changes, cx| changes.ensure_content(cx));
-        }
         cx.notify();
     }
 
@@ -3594,24 +3577,6 @@ impl Shell {
         stored
             .iter()
             .filter_map(|surface| match surface {
-                RightSurface::File(id) => self.file_surfaces.get(id).map(|file| {
-                    let path = self.file_surface_paths.get(id);
-                    let title = path
-                        .map(|path| workspace_file_title(path))
-                        .unwrap_or_else(|| SharedString::from("File"));
-                    (
-                        *surface,
-                        title,
-                        file.read(cx).has_unsaved_changes(),
-                        path.cloned().map(Into::into),
-                    )
-                }),
-                RightSurface::Diff(id) => self
-                    .diffs
-                    .get(id)
-                    // Contextual title (user request): the pane's scope
-                    // label, or the pinned commit's subject.
-                    .map(|changes| (*surface, changes.read(cx).tab_title(), false, None)),
                 RightSurface::Terminal(tab) => terminals
                     .iter()
                     .find(|(k, _, _)| k == tab)
@@ -3676,33 +3641,6 @@ impl Shell {
                 }
             });
         }
-    }
-
-    fn workspace_path_for_surface(
-        &self,
-        surface: RightSurface,
-        cx: &App,
-    ) -> Option<WorkspacePathDrag> {
-        let path = match surface {
-            RightSurface::File(id) => self.file_surface_paths.get(&id)?.clone(),
-            RightSurface::Picker
-            | RightSurface::Diff(_)
-            | RightSurface::Terminal(_)
-            | RightSurface::SideChat(_)
-            | RightSurface::Subagent(_)
-            | RightSurface::Browser(_) => {
-                return None;
-            }
-        };
-        let RightSurface::File(id) = surface else {
-            return None;
-        };
-        let origin = self.file_surfaces.get(&id)?.read(cx).interaction_origin(cx);
-        Some(WorkspacePathDrag::new(path, false).with_origin(
-            origin,
-            crate::files::WorkspacePathSource::FileTab,
-            None,
-        ))
     }
 
     /// Drag-reorder a surface tab within this chat's strip.
@@ -3798,15 +3736,6 @@ impl Shell {
         let key = self.panel_key(cx);
         self.panels.update(&key, |p| p.right_active = surface);
         match surface {
-            RightSurface::File(id) => {
-                if let Some(file) = self.file_surfaces.get(&id).cloned() {
-                    file.update(cx, |file, cx| file.ensure_loaded(cx));
-                    if let Some(path) = self.file_surface_paths.get(&id).cloned() {
-                        let chat_id = file.read(cx).chat_id().to_owned();
-                        self.note_recent_file(&chat_id, &path);
-                    }
-                }
-            }
             RightSurface::Terminal(tab) => {
                 let panel = self.right_terminal_panel(cx);
                 self.composer
@@ -3815,11 +3744,6 @@ impl Shell {
                     panel.select_tab_by_key(tab, cx);
                     panel.request_focus(cx);
                 });
-            }
-            RightSurface::Diff(id) => {
-                if let Some(changes) = self.diffs.get(&id).cloned() {
-                    changes.update(cx, |changes, cx| changes.ensure_content(cx));
-                }
             }
             // The tab's feed (watch or snapshot) runs from open to close —
             // activation needs no revalidation.
@@ -3834,31 +3758,7 @@ impl Shell {
             RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
             RightSurface::Picker => {}
         }
-        self.sync_explorer_selection(cx);
         cx.notify();
-    }
-
-    fn focus_right_file_editor(
-        &mut self,
-        surface: RightSurface,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let RightSurface::Browser(id) = surface {
-            if let Some(browser) = self.browsers.get(&id).cloned() {
-                browser.update(cx, |browser, cx| browser.focus_address(window, cx));
-            }
-            return;
-        }
-        let files = match surface {
-            RightSurface::File(id) => self.file_surfaces.get(&id).cloned(),
-            _ => None,
-        };
-        if let Some(files) = files {
-            files.update(cx, |files, cx| {
-                files.focus_editor(window, cx);
-            });
-        }
     }
 
     fn set_files_word_wrap(
@@ -3970,20 +3870,9 @@ impl Shell {
         if !from_main && !self.side_chat_open_here(&source, cx) {
             return LinkOutcome::Rejected;
         }
+        // Workspace file links opened the file editor, which Aurea drops.
         if activation.target.navigation.is_err() {
-            return if matches!(
-                activation.action,
-                LinkAction::Primary | LinkAction::Internal
-            ) && self.open_workspace_file_link(
-                &source,
-                &activation.target.original,
-                window,
-                cx,
-            ) {
-                LinkOutcome::Internal
-            } else {
-                LinkOutcome::Rejected
-            };
+            return LinkOutcome::Rejected;
         }
         let settings = crate::settings::current(cx);
         let mut resolved = activation.clone();
@@ -4109,31 +3998,6 @@ impl Shell {
         });
     }
 
-    /// The picker's Diffs card / the `+` menu's Diff row: every click opens a
-    /// FRESH diff tab with its own scope/base selection (multiple diff
-    /// panels, user request).
-    fn add_diff_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let changes = cx.new(|cx| Changes::new(self.state.clone(), cx));
-        self.register_diff_surface(changes, window, cx);
-    }
-
-    /// A Diff tab opened on *Branch changes* (the session card's totals),
-    /// opening the pane when it is closed.
-    fn add_branch_diff_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_chat.is_empty() {
-            return;
-        }
-        self.set_surfaces_open(true, cx);
-        let changes = cx.new(|cx| Changes::for_branch(self.state.clone(), cx));
-        self.register_diff_surface(changes, window, cx);
-    }
-
-    /// Open or focus a session-owned editor tab. The explorer is independent.
-    fn add_file_surface(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        let owner = (self.active_chat.clone(), self.state.clone());
-        self.add_file_surface_at(owner, path, None, window, cx);
-    }
-
     /// The chat and state a transcript link resolves in: the main chat's, or
     /// an open side chat's own (its chat row may not reach the main list yet).
     fn link_owner(&self, chat_id: &str, cx: &App) -> Option<(String, Entity<AppState>)> {
@@ -4144,298 +4008,6 @@ impl Shell {
             .values()
             .find(|side| side.state.read(cx).selected_chat.as_deref() == Some(chat_id))
             .map(|side| (chat_id.to_owned(), side.state.clone()))
-    }
-
-    /// Open or focus the editor for `path` owned by `owner` (chat id + the
-    /// state that resolves it): reads and saves go to that chat's checkout.
-    fn add_file_surface_at(
-        &mut self,
-        owner: (String, Entity<AppState>),
-        path: String,
-        location: Option<(u32, Option<FileColumn>)>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.active_chat.is_empty() || owner.0.is_empty() {
-            return;
-        }
-        let (owner_chat, owner_state) = owner;
-        self.set_surfaces_open(true, cx);
-        let panel_key = self.panel_key(cx);
-        let lookup = (panel_key.clone(), owner_chat.clone(), path.clone());
-        if let Some(id) = self.file_surface_keys.get(&lookup).copied() {
-            let surface = RightSurface::File(id);
-            self.set_right_active(surface, cx);
-            if let Some((line, column)) = location
-                && let Some(file) = self.file_surfaces.get(&id).cloned()
-            {
-                file.update(cx, |file, cx| file.navigate_to_line(line, column, cx));
-            }
-            self.focus_right_file_editor(surface, window, cx);
-            return;
-        }
-
-        self.file_surface_seq += 1;
-        let id = self.file_surface_seq;
-        let file = cx.new(|cx| {
-            FilesSurface::new_editor(
-                owner_state.clone(),
-                owner_chat.clone(),
-                path.clone(),
-                self.settings.files_autosave_enabled,
-                self.settings.files_autosave_delay_ms,
-                crate::typography::code_font_size(cx),
-                self.settings.files_word_wrap,
-                self.settings.files_show_all,
-                cx,
-            )
-        });
-        let event_panel_key = panel_key.clone();
-        let sub = cx.subscribe_in(
-            &file,
-            window,
-            move |this: &mut Self, source, event, window, cx| {
-                if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_))
-                    && !this.accepts_file_navigation(&event_panel_key, &source, cx)
-                {
-                    return;
-                }
-                match event {
-                    FilesEvent::HoldMutation { origin, paths } => {
-                        let surfaces = this
-                            .files
-                            .values()
-                            .chain(this.file_surfaces.values())
-                            .filter(|s| s.read(cx).shares_workspace(origin))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        for surface in surfaces {
-                            surface.update(cx, |files, cx| files.hold_mutation(paths.clone(), cx));
-                        }
-                    }
-                    FilesEvent::AddToChat {
-                        path,
-                        is_directory,
-                        origin,
-                    } => {
-                        let payload = WorkspacePathDrag::new(path.clone(), *is_directory)
-                            .with_origin(
-                                Some(origin.clone()),
-                                crate::files::WorkspacePathSource::Tree,
-                                None,
-                            );
-                        let composer = this.composer.clone();
-                        this.attach_workspace_drag(&payload, &composer, window, cx);
-                    }
-                    FilesEvent::Mutate(intent) => {
-                        this.start_file_mutation(source.clone(), intent.clone(), cx)
-                    }
-                    FilesEvent::MutateMany(intents) => {
-                        this.start_file_mutations(source.clone(), intents.clone(), cx)
-                    }
-                    // Navigation from an editor stays in its own chat.
-                    FilesEvent::OpenFile(path) => {
-                        let owner = (source.read(cx).chat_id().to_owned(), owner_state.clone());
-                        this.add_file_surface_at(owner, path.clone(), None, window, cx)
-                    }
-                    FilesEvent::RevealFile(path) => {
-                        this.add_files_surface(window, cx);
-                        if let Some(files) = this.files.get(&this.panel_key(cx)).cloned() {
-                            files.update(cx, |files, cx| {
-                                files.reveal_file_explicit(path.clone(), cx)
-                            });
-                        }
-                    }
-                    FilesEvent::OpenWebLink(activation) => {
-                        if let crate::markdown::render::LinkOutcome::External(url) =
-                            this.activate_session_link(activation, window, cx)
-                        {
-                            cx.open_url(&url);
-                        }
-                    }
-                    FilesEvent::TitleChanged => cx.notify(),
-                    FilesEvent::FileRenamed { old_path, new_path } => {
-                        this.rename_file_surface(id, &event_panel_key, old_path, new_path, cx)
-                    }
-                    FilesEvent::WordWrapChanged(word_wrap) => {
-                        this.set_files_word_wrap(*word_wrap, window, cx)
-                    }
-                    FilesEvent::ShowAllFilesChanged(show_all_files) => {
-                        this.set_files_show_all(*show_all_files, cx)
-                    }
-                    FilesEvent::CloseReady => {
-                        this.on_file_close_ready(RightSurface::File(id), &event_panel_key, cx)
-                    }
-                    FilesEvent::CloseCancelled => {
-                        this.cancel_file_close(RightSurface::File(id), cx)
-                    }
-                }
-            },
-        );
-        self.file_surfaces.insert(id, file);
-        self.file_surface_paths.insert(id, path);
-        self.file_surface_keys.insert(lookup, id);
-        self.file_surface_subs.insert(id, sub);
-        push_unique_right_surface(
-            self.right_tabs.entry(panel_key).or_default(),
-            RightSurface::File(id),
-        );
-        self.set_right_active(RightSurface::File(id), cx);
-        if let Some((line, column)) = location
-            && let Some(file) = self.file_surfaces.get(&id).cloned()
-        {
-            file.update(cx, |file, cx| file.navigate_to_line(line, column, cx));
-        }
-    }
-
-    /// Open a transcript's file link in the linking chat's own checkout: a
-    /// side chat's link resolves against, and edits, the side chat's files.
-    /// An absolute path the linking checkout cannot own falls through the
-    /// chat's parent and this device's project roots before it is treated
-    /// as a host file; the first known root that owns the path wins. A chat
-    /// root opens the file in that chat's context; a project root and a host
-    /// file open by absolute path through the linking chat.
-    fn open_workspace_file_link(
-        &mut self,
-        chat_id: &str,
-        target: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let owner_state = self
-            .link_owner(chat_id, cx)
-            .map(|(_, state)| state)
-            .unwrap_or_else(|| self.state.clone());
-        let roots = owner_state.read(cx).file_link_roots(chat_id);
-        let root_refs: Vec<&str> = roots.iter().map(|root| root.root.as_str()).collect();
-        use crate::workspace_links::FileLinkResolution;
-        let (owner_chat, link) = match crate::workspace_links::first_root_owning(target, root_refs)
-        {
-            Some(FileLinkResolution::Owned { root, link }) => match roots[root].chat.as_deref() {
-                Some(owner) => (owner.to_owned(), link),
-                // A linking chat without a checkout of its own resolves in
-                // its own file context, as before.
-                None if root == 0 => (chat_id.to_owned(), link),
-                // A project root past the linking chat's own has no chat of
-                // its own, and its relative path would name a different file
-                // under the linking chat's checkout: read it by absolute path
-                // through the linking chat, which keeps it editable only
-                // inside that checkout.
-                None => (
-                    chat_id.to_owned(),
-                    crate::workspace_links::WorkspaceFileLink {
-                        path: roots[root].absolute(&link).to_string_lossy().into_owned(),
-                        outside: true,
-                        ..link
-                    },
-                ),
-            },
-            // An absolute path no known root owns is still a file link: it
-            // opens read-only through the linking chat's own file context.
-            Some(FileLinkResolution::Outside(link)) => (chat_id.to_owned(), link),
-            None => return false,
-        };
-        let Some(owner) = self.link_owner(&owner_chat, cx) else {
-            return false;
-        };
-
-        self.set_surfaces_open(true, cx);
-        self.add_file_surface_at(
-            owner,
-            link.path,
-            link.line
-                .map(|line| (line, link.column.map(FileColumn::Character))),
-            window,
-            cx,
-        );
-        true
-    }
-
-    fn rename_file_surface(
-        &mut self,
-        id: u64,
-        panel_key: &str,
-        old_path: &str,
-        new_path: &str,
-        cx: &mut Context<Self>,
-    ) {
-        if self.file_surface_paths.get(&id).map(String::as_str) != Some(old_path) {
-            return;
-        }
-        self.file_surface_paths.insert(id, new_path.to_string());
-        let Some(owner) = self
-            .file_surfaces
-            .get(&id)
-            .map(|file| file.read(cx).chat_id().to_owned())
-        else {
-            return;
-        };
-        self.file_surface_keys.remove(&(
-            panel_key.to_string(),
-            owner.clone(),
-            old_path.to_string(),
-        ));
-        self.file_surface_keys
-            .entry((panel_key.to_string(), owner, new_path.to_string()))
-            .or_insert(id);
-        cx.notify();
-    }
-
-    /// The dedicated History surface. Keeping it as its own tab preserves its
-    /// graph/search state while Diff tabs retain their ordinary scope picker.
-    fn add_history_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let history = cx.new(|cx| Changes::for_history(self.state.clone(), cx));
-        self.register_diff_surface(history, window, cx);
-    }
-
-    /// A History row click: the commit opens as its own pinned diff tab
-    /// (user request).
-    fn add_commit_diff_surface(
-        &mut self,
-        commit: zeron_proto::GitHistoryCommit,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let changes = cx.new(|cx| Changes::for_commit(self.state.clone(), commit, cx));
-        self.register_diff_surface(changes, window, cx);
-    }
-
-    fn register_diff_surface(
-        &mut self,
-        changes: Entity<Changes>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.diff_seq += 1;
-        let id = self.diff_seq;
-        let sub =
-            cx.subscribe_in(
-                &changes,
-                window,
-                |this: &mut Self, _, event, window, cx| match event {
-                    ChangesEvent::OpenCommit(commit) => {
-                        this.add_commit_diff_surface(commit.clone(), window, cx);
-                    }
-                    ChangesEvent::OpenFile(path) => {
-                        this.add_file_surface(path.clone(), window, cx);
-                    }
-                    ChangesEvent::DiscardWorkingTree(request) => {
-                        if this.discard_working_tree_task.is_none() {
-                            this.discard_working_tree =
-                                Some(DiscardWorkingTreeFlow::Confirm(request.clone()));
-                            cx.notify();
-                        }
-                    }
-                },
-            );
-        self.diffs.insert(id, changes);
-        self.diff_subs.insert(id, sub);
-        let key = self.panel_key(cx);
-        self.right_tabs
-            .entry(key)
-            .or_default()
-            .push(RightSurface::Diff(id));
-        self.set_right_active(RightSurface::Diff(id), cx);
     }
 
     /// The picker's Terminal card / the `+` menu's Terminal row: every click
@@ -4701,40 +4273,15 @@ impl Shell {
         self.navigation_focus
             .remember(&self.shortcut_focus, window, cx);
         let key = self.panel_key(cx);
-        let files = match surface {
-            RightSurface::File(id) => self.file_surfaces.get(&id).cloned(),
-            _ => None,
-        };
-        if let Some(files) = files {
-            match files.update(cx, |files, cx| files.prepare_close(cx)) {
-                FilesCloseDisposition::Allow => {
-                    self.complete_file_close(surface, &key, cx);
-                    if restore_focus {
-                        self.restore_right_focus_after_close(window, cx);
-                    }
-                }
-                FilesCloseDisposition::Pending | FilesCloseDisposition::Blocked => {
-                    self.pending_file_closes.insert(surface);
-                    self.set_right_active(surface, cx);
-                }
-            }
-            return;
-        }
         if let Some(tabs) = self.right_tabs.get_mut(&key) {
             tabs.retain(|s| *s != surface);
         }
         match surface {
-            RightSurface::File(_) => {}
             RightSurface::Browser(id) => {
                 if let Some(browser) = self.browsers.remove(&id) {
                     browser.update(cx, |browser, cx| browser.close(cx));
                 }
                 self.browser_subs.remove(&id);
-            }
-            RightSurface::Diff(id) => {
-                // Dropping the entity tears down its diff watch.
-                self.diffs.remove(&id);
-                self.diff_subs.remove(&id);
             }
             RightSurface::Terminal(tab) => {
                 let panel = self.right_terminal_panel(cx);
@@ -4778,28 +4325,6 @@ impl Shell {
         cx.notify();
     }
 
-    fn on_file_close_ready(
-        &mut self,
-        surface: RightSurface,
-        panel_key: &str,
-        cx: &mut Context<Self>,
-    ) {
-        if self.pending_file_closes.contains(&surface) {
-            self.complete_file_close(surface, panel_key, cx);
-        } else {
-            if self.pending_exit.is_some() {
-                self.reveal_unsaved_file(cx);
-            }
-            cx.notify();
-        }
-    }
-
-    fn cancel_file_close(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
-        self.pending_file_closes.remove(&surface);
-        self.pending_exit = None;
-        cx.notify();
-    }
-
     pub fn prepare_window_close(&mut self, cx: &mut Context<Self>) -> bool {
         self.prepare_exit(PendingExit::CloseWindow, cx)
     }
@@ -4838,108 +4363,11 @@ impl Shell {
         self.prepare_exit(PendingExit::Quit, cx)
     }
 
-    /// Unsaved files first, then the trading close gate (B7): an exit over
-    /// running bots or open positions asks before the desk goes away.
+    /// The trading close gate (B7): an exit over running bots or open
+    /// positions asks before the desk goes away.
     fn prepare_exit(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
-        self.prepare_exit_files(action.clone(), cx) && self.trading_gate_allows(action, cx)
-    }
-
-    fn prepare_exit_files(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
-        let surfaces = self.file_surfaces.values().cloned().collect::<Vec<_>>();
-        if surfaces
-            .iter()
-            .all(|surface| !surface.read(cx).has_unsaved_changes())
-        {
-            self.pending_exit = None;
-            return true;
-        }
-        self.pending_exit = Some(action);
-        let mut all_ready = true;
-        for surface in surfaces {
-            let disposition = surface.update(cx, |surface, cx| surface.prepare_close(cx));
-            all_ready &= disposition == FilesCloseDisposition::Allow;
-        }
-        if all_ready {
-            self.pending_exit = None;
-        } else {
-            self.reveal_unsaved_file(cx);
-        }
-        cx.notify();
-        all_ready
-    }
-
-    fn reveal_unsaved_file(&mut self, cx: &mut Context<Self>) {
-        let editors = self
-            .file_surface_keys
-            .iter()
-            .filter_map(|((key, _, _), id)| {
-                self.file_surfaces
-                    .get(id)
-                    .filter(|files| files.read(cx).has_unsaved_changes())
-                    .map(|_| (key.clone(), RightSurface::File(*id)))
-            });
-        let current = self.panel_key(cx);
-        let mut dirty = editors.collect::<Vec<_>>();
-        dirty.sort_by_key(|(key, _)| (key != &current, key.clone()));
-        if let Some((key, surface)) = dirty.into_iter().next() {
-            self.panels
-                .update(&key, |panel| panel.right_active = surface);
-            if key == current {
-                // The ordinary open: it animates, re-splits the columns, and
-                // brings forward a pane the window fit hides.
-                self.apply_nav(NavEntry::Chat(key), cx);
-                self.set_surfaces_open(true, cx);
-            } else {
-                // Rank the pane most recent so a narrow window shows it.
-                self.panels.update(&key, |panel| panel.changes_open = true);
-                self.record_panel_open(AuxiliaryPanel::Right, &key);
-                self.apply_nav(NavEntry::Chat(key), cx);
-            }
-        }
-    }
-
-    fn all_file_edits_flushed(&self, cx: &App) -> bool {
-        self.file_surfaces
-            .values()
-            .all(|surface| !surface.read(cx).has_unsaved_changes())
-    }
-
-    fn complete_file_close(
-        &mut self,
-        surface: RightSurface,
-        panel_key: &str,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(tabs) = self.right_tabs.get_mut(panel_key) {
-            tabs.retain(|candidate| *candidate != surface);
-        }
-        match surface {
-            RightSurface::File(id) => {
-                self.file_surfaces.remove(&id);
-                self.file_surface_paths.remove(&id);
-                self.file_surface_subs.remove(&id);
-                self.file_surface_keys.retain(|_, value| *value != id);
-            }
-            _ => return,
-        }
-        self.pending_file_closes.remove(&surface);
-        self.close_empty_right_pane(panel_key, cx);
-        self.panels.forget_right_surface(panel_key, surface);
-        let fallback = self.panels.right_surface_fallback(
-            panel_key,
-            self.right_tabs
-                .get(panel_key)
-                .into_iter()
-                .flatten()
-                .copied(),
-        );
-        self.panels.update(panel_key, |panel| {
-            if panel.right_active == surface {
-                panel.right_active = fallback;
-            }
-        });
-        self.collapse_surfaces_if_empty(panel_key, cx);
-        cx.notify();
+        self.pending_exit = None;
+        self.trading_gate_allows(action, cx)
     }
 
     fn terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
@@ -10884,16 +10312,6 @@ impl Shell {
         Some(popover::modal("sync-lifecycle-dialog", viewport, card))
     }
 
-    fn active_changes(&self, cx: &App) -> Option<Entity<Changes>> {
-        if !self.right_pane_shown(cx) {
-            return None;
-        }
-        let RightSurface::Diff(id) = self.resolved_right_active(cx) else {
-            return None;
-        };
-        self.diffs.get(&id).cloned()
-    }
-
     /// Resolve shell-owned Escape surfaces in capture phase, before focused
     /// descendants such as an integrated terminal can consume the key.
     fn capture_escape_surface(&mut self, cx: &mut Context<Self>) -> bool {
@@ -10958,11 +10376,7 @@ impl Shell {
             self.close_right_plus(cx);
             return true;
         }
-        if self.right_plus.get().is_some() {
-            return true;
-        }
-        self.active_changes(cx)
-            .is_some_and(|changes| changes.update(cx, |changes, cx| changes.handle_escape(cx)))
+        self.right_plus.get().is_some()
     }
 
     fn on_key_down_capture(
@@ -12173,36 +11587,6 @@ impl Shell {
         let showing = self.right_pane_open(cx) || self.tween_active(self.right_tween) || exiting;
         let content: AnyElement = if showing {
             match self.resolved_right_active(cx) {
-                RightSurface::File(id) => {
-                    if let Some(file) = self.file_surfaces.get(&id).cloned() {
-                        // Keep the last file frame behind the closing mask. Loading
-                        // while closing would reactivate suspended image resources.
-                        if self.right_pane_open(cx) {
-                            file.update(cx, |file, cx| file.ensure_loaded(cx));
-                        }
-                        file.into_any_element()
-                    } else {
-                        self.render_surface_picker(cx)
-                    }
-                }
-                RightSurface::Diff(id) if self.diffs.contains_key(&id) => {
-                    let changes = self.diffs.get(&id).cloned().expect("checked");
-                    // Idempotent — also covers a persisted-open pane on boot.
-                    changes.update(cx, |changes, cx| changes.ensure_content(cx));
-                    // The diff options (scope dropdown, ref selector,
-                    // fold-all) moved DOWN from the titlebar band — the
-                    // surface tabs own that row now; the expand/close
-                    // buttons stayed up there (user request).
-                    let controls =
-                        changes.update(cx, |changes, cx| changes.render_header_controls(cx));
-                    div()
-                        .size_full()
-                        .flex()
-                        .flex_col()
-                        .child(crate::surface_chrome::toolbar(&theme).child(controls))
-                        .child(div().flex_1().min_h_0().child(changes))
-                        .into_any_element()
-                }
                 RightSurface::Browser(id) => self
                     .browsers
                     .get(&id)
@@ -12380,22 +11764,6 @@ impl Shell {
                             }),
                         ),
                     )
-                    // Git surfaces only where there IS git — the pane itself
-                    // no longer gates on it (terminals work anywhere).
-                    .when(self.space_git_detected(cx), |el| {
-                        el.child(row("surface-card-diffs", icons::LIST, "Diffs").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.add_diff_surface(window, cx);
-                            }),
-                        ))
-                        .child(
-                            row("surface-card-history", icons::GIT_BRANCH, "History").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.add_history_surface(window, cx);
-                                }),
-                            ),
-                        )
-                    }),
             )
             .into_any_element()
     }
@@ -12578,18 +11946,6 @@ impl Shell {
             }
             .map(crate::pickers::harness_brand_icon);
             let icon_path = match surface {
-                RightSurface::File(_) => icons::DOCUMENT,
-                RightSurface::Diff(id) => self
-                    .diffs
-                    .get(&id)
-                    .map(|changes| {
-                        if changes.read(cx).is_history() {
-                            icons::GIT_BRANCH
-                        } else {
-                            icons::LIST
-                        }
-                    })
-                    .unwrap_or(icons::LIST),
                 RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Subagent(_) => icons::BOT,
                 RightSurface::Terminal(_) => icons::TERMINAL,
@@ -12627,7 +11983,7 @@ impl Shell {
                 _ => false,
             };
             let ghost_title = title.clone();
-            let workspace_path = self.workspace_path_for_surface(surface, cx);
+            let workspace_path = None;
             let accessible_name = detail.as_ref().unwrap_or(&title);
             let accessible_label = if dirty {
                 format!("{accessible_name}, unsaved changes")
@@ -12645,14 +12001,6 @@ impl Shell {
                 .into_any_element()
             } else if let Some(favicon) = browser_favicon {
                 gpui::img(favicon).size(px(12.0)).into_any_element()
-            } else if matches!(surface, RightSurface::File(_)) {
-                crate::file_icons::icon(
-                    crate::file_icons::FileIconIdentity::file(file_identity_path.as_ref()),
-                    theme.appearance,
-                )
-                .size(px(14.0))
-                .when(!is_active, |icon| icon.opacity(0.78))
-                .into_any_element()
             } else if let Some((icon_path, Some(brand_color))) = harness_icon {
                 icon(icon_path)
                     .size(px(12.0))
@@ -12837,20 +12185,6 @@ impl Shell {
                         .flex_col()
                         .gap(px(2.0))
                         .child(
-                            popover::menu_row(&theme, false, "right-plus-files")
-                                .id("right-plus-files-row")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.add_files_surface(window, cx);
-                                    this.close_right_plus(cx);
-                                }))
-                                .child(
-                                    icon(icons::FOLDER_WITH_FILES)
-                                        .size(px(13.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Files")),
-                        )
-                        .child(
                             popover::menu_row(&theme, false, "right-plus-browser")
                                 .id("right-plus-browser-row")
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -12878,36 +12212,6 @@ impl Shell {
                                 )
                                 .child(SharedString::from("Terminal")),
                         )
-                        .when(self.space_git_detected(cx), |menu| {
-                            menu.child(
-                                popover::menu_row(&theme, false, "right-plus-diff")
-                                    .id("right-plus-diff-row")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.add_diff_surface(window, cx);
-                                        this.close_right_plus(cx);
-                                    }))
-                                    .child(
-                                        icon(icons::LIST)
-                                            .size(px(13.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .child(SharedString::from("Diffs")),
-                            )
-                            .child(
-                                popover::menu_row(&theme, false, "right-plus-history")
-                                    .id("right-plus-history-row")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.add_history_surface(window, cx);
-                                        this.close_right_plus(cx);
-                                    }))
-                                    .child(
-                                        icon(icons::GIT_BRANCH)
-                                            .size(px(13.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .child(SharedString::from("History")),
-                            )
-                        }),
                 )
                 .into_any_element();
             plus = plus.relative().child(popover::anchored_menu_below_gap(
@@ -13522,12 +12826,6 @@ impl Render for Shell {
                 WorkspaceCommand::New => self.open_new_session(None, cx),
                 WorkspaceCommand::Resume => self.toggle_command_palette(window, cx),
                 WorkspaceCommand::Settings => self.open_last_settings(cx),
-                WorkspaceCommand::Diff if !self.active_chat.is_empty() => {
-                    self.add_diff_surface(window, cx)
-                }
-                WorkspaceCommand::Files if !self.active_chat.is_empty() => {
-                    self.add_files_surface(window, cx)
-                }
                 WorkspaceCommand::Terminal if !self.active_chat.is_empty() => {
                     self.add_terminal_surface(cx)
                 }
@@ -13543,9 +12841,7 @@ impl Render for Shell {
         self.focus_rename_chat(window, cx);
 
         self.render_time = Some(self.motion_time());
-        if self.all_file_edits_flushed(cx)
-            && let Some(action) = self.pending_exit.take()
-        {
+        if let Some(action) = self.pending_exit.take() {
             let shell = cx.weak_entity();
             window.defer(cx, move |window, cx| {
                 if matches!(action, PendingExit::Quit) {
@@ -13803,17 +13099,6 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_terminal(window, cx)
-                }
-            }))
-            .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
-                if matches!(this.route, Route::Chat) && this.right_pane_open(cx) {
-                    let file = match this.resolved_right_active(cx) {
-                        RightSurface::File(id) => this.file_surfaces.get(&id).cloned(),
-                        _ => None,
-                    };
-                    if let Some(file) = file {
-                        file.update(cx, |file, cx| file.save_active_document(cx));
-                    }
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
@@ -15437,19 +14722,6 @@ mod tests {
     }
 
     #[test]
-    fn session_panels_update_tracks_right_surfaces() {
-        let mut panels = SessionPanels::default();
-        panels.update("a", |p| p.right_active = RightSurface::Diff(3));
-        assert_eq!(panels.get("a").right_active, RightSurface::Diff(3));
-        // Other chats keep the picker default.
-        assert_eq!(panels.get("b").right_active, RightSurface::Picker);
-        panels.update("a", |p| p.right_active = RightSurface::Terminal(7));
-        assert_eq!(panels.get("a").right_active, RightSurface::Terminal(7));
-        panels.update("a", |p| p.right_active = RightSurface::File(0));
-        assert_eq!(panels.get("a").right_active, RightSurface::File(0));
-    }
-
-    #[test]
     fn session_panels_right_history_tracks_visits_without_duplicates() {
         let mut panels = SessionPanels::default();
         let [a, b, c, d] = [1, 2, 3, 4].map(RightSurface::Browser);
@@ -15465,130 +14737,6 @@ mod tests {
         assert_eq!(panels.right_surface_fallback("chat", [a, c].into_iter()), c);
         // Dragging the strip into another order cannot change recency.
         assert_eq!(panels.right_surface_fallback("chat", [c, a].into_iter()), c);
-    }
-
-    #[test]
-    fn session_panels_right_history_is_scoped_and_skips_stale_surfaces() {
-        let mut panels = SessionPanels::default();
-        let a = RightSurface::File(1);
-        let b = RightSurface::SideChat(2);
-        let stale = RightSurface::Terminal(3);
-        for surface in [a, b, stale] {
-            panels.update("first", |p| p.right_active = surface);
-        }
-        for surface in [b, a] {
-            panels.update("second", |p| p.right_active = surface);
-        }
-        assert_eq!(
-            panels.right_surface_fallback("first", [a, b].into_iter()),
-            b
-        );
-        assert_eq!(
-            panels.right_surface_fallback("second", [a, b].into_iter()),
-            a
-        );
-        assert_eq!(panels.right_surface_fallback("new", [a, b].into_iter()), a);
-        assert_eq!(
-            panels.right_surface_fallback("first", [].into_iter()),
-            RightSurface::Picker
-        );
-        // Changing visibility or showing the picker is not a surface visit.
-        panels.update("first", |p| p.changes_open = true);
-        panels.update("first", |p| p.right_active = RightSurface::Picker);
-        assert_eq!(panels.right_tab_history["first"], vec![a, b, stale]);
-        for surface in [a, b, stale] {
-            panels.forget_right_surface("first", surface);
-        }
-        assert!(!panels.right_tab_history.contains_key("first"));
-        assert_eq!(panels.right_tab_history["second"], vec![b, a]);
-    }
-
-    #[gpui::test]
-    fn right_tabs_close_in_visit_order_across_surface_types(cx: &mut gpui::TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, window, cx| {
-                shell.active_chat = "owner".into();
-                let mut tabs = Vec::new();
-                for _ in 0..4 {
-                    shell.add_browser_surface(None, window, cx);
-                    tabs.push(RightSurface::Browser(shell.browser_seq));
-                }
-                let [a, b, c, d] = <[_; 4]>::try_from(tabs).unwrap();
-                for surface in [c, b, d] {
-                    shell.set_right_active(surface, cx);
-                }
-                shell.reorder_right_tabs(2, 0, cx);
-                shell.close_right_surface(d, window, cx);
-                assert_eq!(shell.resolved_right_active(cx), b);
-                shell.close_right_surface(a, window, cx);
-                assert_eq!(shell.resolved_right_active(cx), b, "inactive close");
-                shell.close_right_surface(b, window, cx);
-                assert_eq!(shell.resolved_right_active(cx), c);
-
-                shell.add_browser_surface(None, window, cx);
-                let recent = RightSurface::Browser(shell.browser_seq);
-                shell.add_file_surface("README.md".into(), window, cx);
-                let file = RightSurface::File(shell.file_surface_seq);
-                shell.close_right_surface(file, window, cx);
-                assert_eq!(shell.resolved_right_active(cx), recent);
-
-                // A save may complete after switching to another session.
-                shell.add_file_surface("README.md".into(), window, cx);
-                let file = RightSurface::File(shell.file_surface_seq);
-                let owner = shell.panel_key(cx);
-                shell.active_chat = "other".into();
-                shell.add_browser_surface(None, window, cx);
-                let other = RightSurface::Browser(shell.browser_seq);
-                shell.complete_file_close(file, &owner, cx);
-                assert_eq!(shell.resolved_right_active(cx), other);
-                shell.active_chat = "owner".into();
-                assert_eq!(shell.resolved_right_active(cx), recent);
-                shell.close_right_surface(recent, window, cx);
-                shell.close_right_surface(c, window, cx);
-                assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
-                assert!(!shell.panels.right_tab_history.contains_key(&owner));
-                assert!(!shell.right_pane_open(cx));
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn file_surface_is_single_instance_per_tab_list() {
-        let mut tabs = vec![RightSurface::Terminal(1)];
-        assert!(push_unique_right_surface(&mut tabs, RightSurface::File(0)));
-        assert!(!push_unique_right_surface(&mut tabs, RightSurface::File(0)));
-        assert_eq!(tabs, vec![RightSurface::Terminal(1), RightSurface::File(0)]);
-    }
-
-    #[test]
-    fn file_editors_are_distinct_surface_tabs_with_stable_titles() {
-        let mut tabs = vec![RightSurface::File(0)];
-        assert!(push_unique_right_surface(&mut tabs, RightSurface::File(1)));
-        assert!(push_unique_right_surface(&mut tabs, RightSurface::File(2)));
-        assert!(!push_unique_right_surface(&mut tabs, RightSurface::File(1)));
-        assert_eq!(workspace_file_title("src/árbol.rs"), "árbol.rs");
     }
 
     // ---- sidebar resort FLIP diff (§1.6) ----
@@ -15899,115 +15047,6 @@ mod exit_regressions {
                 assert!(shell.state.read(cx).selected_chat.is_none());
                 assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("b"));
                 assert_eq!(shell.composer.read(cx).appshots[""].len(), 1);
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn pane_geometry_uses_one_animation_time_per_frame(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, _, cx| {
-                let duration = RESIZE.total().mul_f32(motion::speed_scale());
-                let started = std::time::Instant::now() - duration.mul_f32(2.);
-                let tween = Some(WidthTween {
-                    from: 520.,
-                    to: 0.,
-                    started,
-                    duration,
-                    curve: RESIZE.curve,
-                });
-                shell.reduced_motion = false;
-                // The frame started halfway through the transition but rendering
-                // crossed its deadline. Every region must still use that frame.
-                shell.render_time = Some(started + duration.mul_f32(0.5));
-                assert!(shell.tween_active(tween));
-                assert_eq!(shell.active_tween_endpoints(tween), Some((520., 0.)));
-                let width = shell.eval_tween(tween, 0.);
-                assert!(width > 0. && width < 520.);
-                assert_eq!(shell.eval_tween(tween, 0.), width);
-                shell.active_chat = "preview".into();
-                shell.viewport_width = 1000.;
-                shell.right_tween = tween;
-                shell.toggle_right_pane(cx);
-                assert_eq!(
-                    shell.right_tween.unwrap().from,
-                    width,
-                    "reversing must not restart from zero"
-                );
-                let files = cx.new(|cx| {
-                    FilesSurface::new(
-                        shell.state.clone(),
-                        "preview".into(),
-                        false,
-                        1000,
-                        13.0,
-                        false,
-                        false,
-                        cx,
-                    )
-                });
-                let key = shell.panel_key(cx);
-                shell.file_surfaces.insert(0, files.clone());
-                shell
-                    .right_tabs
-                    .insert(key.clone(), vec![RightSurface::File(0)]);
-                shell
-                    .panels
-                    .update(&key, |panel| panel.right_active = RightSurface::File(0));
-                assert!(files.read(cx).test_images_visible());
-                shell.toggle_right_pane(cx);
-                assert!(!shell.right_pane_open(cx));
-                assert!(shell.tween_active(shell.right_tween));
-                assert!(
-                    files.read(cx).test_images_visible(),
-                    "file content stays painted through the closing mask"
-                );
-                let frame_time = shell.render_time;
-                shell.render_time = Some(shell.right_tween.unwrap().started + duration);
-                shell.suspend_hidden_right_images(cx);
-                assert!(
-                    !files.read(cx).test_images_visible(),
-                    "image resources suspend once the close animation ends"
-                );
-                shell.render_time = frame_time;
-                shell.settings.sidebar_collapsed = true;
-                shell.sidebar_tween = tween;
-                shell.toggle_sidebar(cx);
-                assert_eq!(shell.sidebar_tween.unwrap().from, width);
-                shell.render_time = None;
-                assert!(!shell.tween_active(tween));
-                assert_eq!(shell.active_tween_endpoints(tween), None);
-                assert_eq!(shell.eval_tween(tween, 0.), 0.);
             })
             .unwrap();
     }
@@ -17661,87 +16700,6 @@ mod exit_regressions {
             .unwrap();
     }
 
-    #[gpui::test]
-    fn lifecycle_actions_keep_pending_and_failed_file_saves_alive(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        for failed in [false, true] {
-            window
-                .update(cx, |shell, window, cx| {
-                    window.activate_window();
-                    let state = shell.state.clone();
-                    let files = cx.new(|cx| {
-                        let mut files = FilesSurface::new(
-                            state,
-                            "test".into(),
-                            false,
-                            1000,
-                            13.0,
-                            false,
-                            false,
-                            cx,
-                        );
-                        files.seed_pending_exit_test_document(failed);
-                        files
-                    });
-                    shell.file_surfaces.insert(0, files);
-                    shell
-                        .file_surface_keys
-                        .insert(("test".into(), "test".into(), "test.rs".into()), 0);
-                })
-                .unwrap();
-            cx.update(|cx| cx.dispatch_action(&crate::app_menus::Quit));
-            cx.run_until_parked();
-            window
-                .update(cx, |shell, _, cx| {
-                    assert!(matches!(shell.pending_exit, Some(PendingExit::Quit)));
-                    assert!(!shell.all_file_edits_flushed(cx));
-                    shell.cancel_file_close(RightSurface::File(0), cx);
-                    assert!(shell.pending_exit.is_none());
-                })
-                .unwrap();
-            cx.update(|cx| cx.dispatch_action(&crate::app_menus::CloseWindow));
-            cx.run_until_parked();
-            window
-                .update(cx, |shell, _, cx| {
-                    assert!(matches!(shell.pending_exit, Some(PendingExit::CloseWindow)));
-                    shell.quit_for_runtime_change(cx);
-                    assert!(matches!(
-                        shell.pending_exit,
-                        Some(PendingExit::RuntimeChange)
-                    ));
-                    assert!(shell.runtime_change_task.is_none());
-                    shell.apply_staged_update(PathBuf::from("must-not-install"), cx);
-                    assert!(matches!(
-                        shell.pending_exit,
-                        Some(PendingExit::InstallUpdate(_))
-                    ));
-                    shell.cancel_file_close(RightSurface::File(0), cx);
-                    assert!(shell.pending_exit.is_none());
-                })
-                .unwrap();
-        }
-    }
 }
 
 /// Native browser regression fixture hooks are excluded from shipped builds.
