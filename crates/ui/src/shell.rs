@@ -614,14 +614,17 @@ pub enum SettingsSection {
     /// Composer and conversation behavior plus thread naming.
     #[default]
     General,
+    /// The desk chat's system prompt (Aurea).
+    Chat,
     Appshots,
     Archived,
 }
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 12] = [
+    pub const ALL: [SettingsSection; 13] = [
         SettingsSection::General,
+        SettingsSection::Chat,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Voice,
@@ -700,6 +703,7 @@ impl SettingsSection {
             SettingsSection::Voice => "voice",
             SettingsSection::Shortcuts => "shortcuts",
             SettingsSection::General => "general",
+            SettingsSection::Chat => "chat",
             SettingsSection::Appshots => "appshots",
             SettingsSection::Archived => "archived",
         }
@@ -719,6 +723,7 @@ impl SettingsSection {
             "voice" => SettingsSection::Voice,
             "shortcuts" => SettingsSection::Shortcuts,
             "general" | "conversations" => SettingsSection::General,
+            "chat" | "system-prompt" => SettingsSection::Chat,
             "appshots" => SettingsSection::Appshots,
             "archived" => SettingsSection::Archived,
             _ => return None,
@@ -746,6 +751,7 @@ impl SettingsSection {
             SettingsSection::Voice => "Dictation",
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::General => "General",
+            SettingsSection::Chat => "Chat",
             SettingsSection::Appshots => "Appshots",
             SettingsSection::Archived => "Archived sessions",
         }
@@ -765,6 +771,7 @@ impl SettingsSection {
             SettingsSection::Voice => icons::MICROPHONE,
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::General => icons::SETTINGS,
+            SettingsSection::Chat => icons::CHAT_ROUND_LINE,
             SettingsSection::Appshots => icons::MONITOR,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         }
@@ -2149,6 +2156,8 @@ pub struct Shell {
     archived_page: Option<Entity<ArchivedPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
+    /// Settings → Chat (the desk chat's system prompt), built on first visit.
+    chat_prompt_page: Option<Entity<crate::settings::chat_prompt::ChatPromptPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
@@ -2667,6 +2676,7 @@ impl Shell {
             archived_page: None,
             appearance_page: None,
             notifications_page: None,
+            chat_prompt_page: None,
             shortcuts_page: None,
             accounts_page: None,
             harnesses_page: None,
@@ -5064,6 +5074,15 @@ impl Shell {
             }
             // Dictation only: the local Parakeet v3 model, downloaded on demand.
             SettingsSection::Voice => crate::dictation::card(cx).into_any_element(),
+            SettingsSection::Chat => {
+                let data_dir = self.data_dir.clone();
+                self.chat_prompt_page
+                    .get_or_insert_with(|| {
+                        cx.new(|cx| crate::settings::chat_prompt::ChatPromptPage::new(data_dir, cx))
+                    })
+                    .clone()
+                    .into_any_element()
+            }
             SettingsSection::Shortcuts | SettingsSection::General | SettingsSection::Appshots => {
                 if self.shortcuts_page.is_none() {
                     let state = self.state.clone();
@@ -7495,10 +7514,6 @@ impl Shell {
         } else {
             self.render_settings_nav(section, &theme, window, cx)
         };
-        // The footer uses the chat sidebar's theme so the account and
-        // settings buttons render identically in both places.
-        let footer_theme = Theme::of(cx).clone();
-        let footer = self.render_sidebar_footer_row(&footer_theme, cx);
         let outlet = self.settings_outlet(section, window, cx);
         div()
             .id("settings-page")
@@ -7580,8 +7595,9 @@ impl Shell {
                             .pt(px(Theme::SPACE_SM))
                             .child(search_field),
                     )
-                    .child(div().flex_1().min_h_0().child(nav))
-                    .child(div().p(px(Theme::SPACE_SM)).flex_none().child(footer)),
+                    // No account footer in Aurea (local only; Settings opens
+                    // from the drawer's menu).
+                    .child(div().flex_1().min_h_0().child(nav)),
             )
             .child(
                 div()

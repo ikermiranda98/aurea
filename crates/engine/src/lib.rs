@@ -2125,3 +2125,17 @@ mod revival_tests {
         }
     }
 }
+
+/// Write the desk chat's system prompt (`zeron_proto::desk_prompt`) into a
+/// project-less chat's folder. The data dir is the scratch root's parent
+/// (`<data>/scratch`). Best-effort: a failed write keeps the previous file.
+pub(crate) fn desk_prompt_install(scratch_root: &std::path::Path, chat_folder: &str) {
+    let Some(data_dir) = scratch_root.parent() else {
+        return;
+    };
+    if let Err(error) =
+        zeron_proto::desk_prompt::install(data_dir, std::path::Path::new(chat_folder))
+    {
+        tracing::warn!(%error, "could not write the desk chat's system prompt");
+    }
+}

@@ -1667,6 +1667,8 @@ enum EditKind {
 }
 
 const GENERIC_COMPOSER_CONTEXT: &str = "Composer";
+/// A free-text editor (Settings → Chat): Enter starts a new line.
+pub(crate) const TEXT_EDITOR_CONTEXT: &str = "TextEditor";
 pub(crate) const MESSAGE_COMPOSER_CONTEXT: &str = "MessageComposer";
 const PALETTE_SEARCH_CONTEXT: &str = "PaletteSearch";
 
@@ -1827,6 +1829,9 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
         Some(GENERIC_COMPOSER_CONTEXT),
     ));
 
+    let mut editor_bindings = input_bindings(TEXT_EDITOR_CONTEXT);
+    editor_bindings.push(KeyBinding::new("enter", Newline, Some(TEXT_EDITOR_CONTEXT)));
+
     let mut message_bindings = input_bindings(MESSAGE_COMPOSER_CONTEXT);
     for binding in message_enter_bindings(send_behavior, &platform_combo("mod-enter")) {
         match binding.action {
@@ -1915,6 +1920,7 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
     }
     cx.bind_keys(palette_bindings);
     cx.bind_keys(generic_bindings);
+    cx.bind_keys(editor_bindings);
     cx.bind_keys(message_bindings);
 }
 
@@ -3286,6 +3292,16 @@ impl ComposerInput {
         } else {
             self.selected_range.end
         }
+    }
+
+    /// Caret to the start of the text, scrolled there (a long text a page
+    /// loads reads from its top).
+    pub(crate) fn move_to_start(&mut self, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+        // The caret is on the first line: show the top outright rather than
+        // follow a caret position the not-yet-laid-out text can't place.
+        self.scroll_top = 0.0;
+        self.follow_cursor = false;
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {

@@ -75,6 +75,8 @@ settings_index! {
         "esc interrupt cancel halt run keyboard"),
     (ThreadNaming, General, None, "Thread naming",
         "titles rename sessions model"),
+    (SystemPrompt, Chat, None, "System prompt",
+        "instructions instrucciones agent agente opencode trading desk mesa prompt"),
     (ColorScheme, Appearance, None, "Color scheme",
         "system light dark mode"),
     (LightTheme, Appearance, None, "Light theme",
@@ -353,6 +355,7 @@ fn shortcut_entries(section: SettingsSection) -> Vec<Entry> {
 fn page_terms(section: SettingsSection) -> &'static str {
     match section {
         SettingsSection::General => "preferences composer conversations behavior",
+        SettingsSection::Chat => "system prompt instructions agent trading desk",
         SettingsSection::Appearance => "theme look colors fonts",
         SettingsSection::Notifications => "alerts sounds banners",
         SettingsSection::Voice => "speech dictation microphone codex",

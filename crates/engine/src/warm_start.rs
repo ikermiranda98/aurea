@@ -317,8 +317,12 @@ impl SessionsEngine {
                 scratch_root.join(name)
             })
             .filter(|folder| !folder.exists());
+        let projectless = zeron_proto::projectless::is_scratch_cwd(&request.cwd);
         let launched = async {
             request.cwd = crate::repos::resolve_chat_cwd(&request.cwd, &scratch_root)?;
+            if projectless {
+                crate::desk_prompt_install(&scratch_root, &request.cwd);
+            }
             // What the chat's first run hands its harness (`drive_run`): the
             // Zeron server with a token for this chat alone, the plugins'
             // servers, the chat's origin and the host's credentials.

@@ -21,6 +21,7 @@ use zeron_proto::{AuthState, WorkspaceScope};
 pub mod accounts;
 pub mod appearance;
 pub mod archived;
+pub mod chat_prompt;
 pub mod composer;
 pub mod harnesses;
 pub mod notifications;

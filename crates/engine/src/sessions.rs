@@ -1068,8 +1068,14 @@ impl SessionsEngine {
             .get()
             .cloned()
             .unwrap_or_else(|| crate::repos::home_dir().join(".zeron").join("scratch"));
+        let projectless = zeron_proto::projectless::is_scratch_cwd(&request.cwd);
         request.cwd = crate::repos::resolve_chat_cwd(&request.cwd, &scratch_root)
             .map_err(EngineError::Other)?;
+        // Aurea's desk chat: its system prompt (Settings → Chat) rides the
+        // chat folder's AGENTS.md, which the agent reads on every message.
+        if projectless {
+            crate::desk_prompt_install(&scratch_root, &request.cwd);
+        }
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)

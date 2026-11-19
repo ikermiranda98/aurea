@@ -12,3 +12,6 @@ uuid.workspace = true
 chrono.workspace = true
 pulldown-cmark.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
