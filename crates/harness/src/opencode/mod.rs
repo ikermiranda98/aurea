@@ -215,6 +215,21 @@ fn opencode_install_paths() -> Vec<PathBuf> {
     }
     dirs.push(PathBuf::from("/opt/homebrew/bin/opencode"));
     dirs.push(PathBuf::from("/usr/local/bin/opencode"));
+    // The desktop app ships the same CLI at a fixed per-user location; a user
+    // who installed OpenCode that way never has it on PATH.
+    #[cfg(windows)]
+    if let Some(local) = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| crate::executable::home_dir().map(|home| home.join("AppData").join("Local")))
+    {
+        dirs.push(
+            local
+                .join("Programs")
+                .join("ai.opencode.desktop")
+                .join("resources")
+                .join("opencode-cli.exe"),
+        );
+    }
     dirs
 }
 
@@ -485,33 +500,70 @@ impl OpencodeHarness {
 
     /// One short-lived server answers both discovery calls. Also primes the
     /// commands cache so concurrent picker/composer fetches share one boot.
+
+    /// Runs `opencode models` and returns its stdout. Works without an account.
+    async fn run_cli_models(&self) -> Result<String, HarnessError> {
+        let binary = self.resolve_executable().map_err(|e| HarnessError::Protocol(e.to_string()))?;
+        let output = tokio::process::Command::new(&binary)
+            .arg("models")
+            .output()
+            .await
+            .map_err(|e| HarnessError::Protocol(e.to_string()))?;
+        if !output.status.success() {
+            return Err(HarnessError::Protocol("opencode models failed".into()));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
     async fn probe_models(&self) -> Result<Vec<Model>, HarnessError> {
         let _guard = self.probe_lock.lock().await;
-        let mut server = self.server(None, None).await?;
-        let result = async {
-            let providers = server.provider_catalog(None).await?;
-            let mut models = models_from_providers(&providers);
-            if server.protocol().await == Protocol::V2 {
-                let agents = server.get_json("/api/agent", None).await?;
-                let option = agent_option(&agents);
-                for model in &mut models {
-                    model.options.push(option.clone());
+        // The server is authoritative when it answers: an account sees every
+        // provider it configured. Without one it refuses (401), and then the
+        // CLI still lists the free tier, which needs no auth at all.
+        let result = match self.server(None, None).await {
+            Ok(mut server) => {
+                let result = async {
+                    let providers = server.provider_catalog(None).await?;
+                    let mut models = models_from_providers(&providers);
+                    if server.protocol().await == Protocol::V2 {
+                        let agents = server.get_json("/api/agent", None).await?;
+                        let option = agent_option(&agents);
+                        for model in &mut models {
+                            model.options.push(option.clone());
+                        }
+                    }
+                    if models.is_empty() {
+                        return Err(HarnessError::Protocol(
+                            "opencode advertised no models (`opencode auth login` to configure a provider)"
+                                .into(),
+                        ));
+                    }
+                    if let Ok(commands) = server.commands_wire(None).await {
+                        let _ = self.commands_cache.set(commands_from_wire(&commands));
+                    }
+                    Ok(models)
                 }
+                .await;
+                server.shutdown(self.kill_grace).await;
+                result
             }
-            if models.is_empty() {
-                return Err(HarnessError::Protocol(
-                    "opencode advertised no models (`opencode auth login` to configure a provider)"
-                        .into(),
-                ));
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(models) if !models.is_empty() => Ok(models),
+            // An explicitly configured server is authoritative: tests and
+            // remote setups must see its answer, not this machine's CLI.
+            other if self.base_url.is_some() => other,
+            other => {
+                if let Ok(output) = self.run_cli_models().await {
+                    let models = parse_cli_models(&output);
+                    if !models.is_empty() {
+                        return Ok(models);
+                    }
+                }
+                other
             }
-            if let Ok(commands) = server.commands_wire(None).await {
-                let _ = self.commands_cache.set(commands_from_wire(&commands));
-            }
-            Ok(models)
         }
-        .await;
-        server.shutdown(self.kill_grace).await;
-        result
     }
 
     async fn probe_commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
@@ -529,6 +581,87 @@ impl OpencodeHarness {
     }
 }
 
+/// The free tier `opencode models` advertises without an account, kept as a
+/// static last resort for when the CLI cannot run at all. DeepSeek leads: it
+/// is the model Aurea runs by default.
+const FREE_FALLBACK_IDS: &[&str] = &[
+    "opencode/deepseek-v4.1-flash-free",
+    "opencode/big-pickle",
+    "opencode/beam-free",
+    "opencode/flint-40b-free",
+    "opencode/hy4-flash-free",
+    "opencode/iceman-free",
+    "opencode/inkling-2-small-free",
+    "opencode/longcat-2.5-free",
+    "opencode/mimo-v2.6-flash-free",
+    "opencode/nemotron-3.5-lightning-free",
+    "opencode/nemotron-3.5-super-vl-free",
+];
+
+/// Parses `opencode models` output (one `provider/model` per line) into Models.
+/// Only the free tier is offered: Aurea runs without an OpenCode account.
+fn parse_cli_models(output: &str) -> Vec<Model> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(free_model)
+        .collect()
+}
+
+/// One picker row for a free model id, or `None` for a paid one.
+fn free_model(id: &str) -> Option<Model> {
+    // Free ids end in `-free`; `big-pickle` is the free flagship that predates
+    // the suffix.
+    if !id.ends_with("-free") && id != "opencode/big-pickle" {
+        return None;
+    }
+    let slug = id.split('/').next_back().unwrap_or(id);
+    Some(Model {
+        id: id.to_string(),
+        label: model_label(slug),
+        description: Some("OpenCode (free)".into()),
+        provider: Some(zeron_proto::agent::ModelProvider {
+            id: "opencode".into(),
+            name: "OpenCode".into(),
+        }),
+        reasoning_levels: Vec::new(),
+        options: Vec::new(),
+        default: id == "opencode/deepseek-v4.1-flash-free",
+    })
+}
+
+/// `deepseek-v4.1-flash-free` → `DeepSeek V4.1 Flash Free`.
+fn model_label(slug: &str) -> String {
+    let mut words: Vec<String> = slug
+        .split('-')
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect();
+    // Brand casing the slug loses; the picker only ever shows these free ids.
+    for word in &mut words {
+        let repaired = match word.to_lowercase().as_str() {
+            "deepseek" => Some("DeepSeek"),
+            "mimo" => Some("MiMo"),
+            "longcat" => Some("LongCat"),
+            "hy4" => Some("HY4"),
+            "vl" => Some("VL"),
+            "40b" => Some("40B"),
+            _ => None,
+        };
+        if let Some(repaired) = repaired {
+            *word = repaired.to_string();
+        }
+    }
+    words.join(" ")
+}
+
 #[async_trait]
 impl Harness for OpencodeHarness {
     fn id(&self) -> HarnessId {
@@ -537,6 +670,14 @@ impl Harness for OpencodeHarness {
     fn display_name(&self) -> &str {
         // Must match the registry's lazy descriptor.
         "OpenCode"
+    }
+    fn fallback_models(&self) -> Vec<crate::Model> {
+        // The free tier, offered even when the CLI or server is unreachable.
+        // `parse_cli_models` prefers the live `opencode models` answer.
+        FREE_FALLBACK_IDS
+            .iter()
+            .filter_map(|id| free_model(id))
+            .collect()
     }
     fn supports_steering(&self) -> bool {
         true
@@ -6365,4 +6506,6 @@ if (process.argv.includes('--version')) {{
             mcp.env.insert("ZERON_CHAT_ID".into(), "first".into());
         }
     }
+
+
 }

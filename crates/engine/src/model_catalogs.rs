@@ -185,8 +185,10 @@ async fn list_inner(
     let catalog = match result {
         Some(Ok(Ok(catalog))) if !catalog.models.is_empty() => catalog,
         Some(Ok(Err(error))) if !CatalogFailure::classify(&error).allows_stale() => {
-            // Claude intentionally offers its manifest even while logged out.
-            if harness.id() == zeron_proto::HarnessId::ClaudeCode
+            // Claude and OpenCode intentionally offer their free models even
+            // while logged out.
+            if (harness.id() == zeron_proto::HarnessId::ClaudeCode
+                || harness.id() == zeron_proto::HarnessId::Opencode)
                 && CatalogFailure::classify(&error) == CatalogFailureCode::AuthRequired
             {
                 ModelCatalog {

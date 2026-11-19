@@ -4158,3 +4158,43 @@ async fn a_stopped_server_process_fails_the_turn_and_is_torn_down() {
     assert!(!alive, "the stopped server {pid} outlived its run");
     drop(steer_tx);
 }
+
+#[test]
+fn cli_models_keep_only_the_free_tier() {
+    let output = "opencode/beam-free\nopencode/big-pickle\n\
+opencode/deepseek-v4.1-flash-free\nopencode/gpt-5.5-pro\nopencode/claude-sonnet-4.5\n";
+    let models = parse_cli_models(output);
+    let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "opencode/beam-free",
+            "opencode/big-pickle",
+            "opencode/deepseek-v4.1-flash-free"
+        ]
+    );
+    let deepseek = models.iter().find(|m| m.id.ends_with("deepseek-v4.1-flash-free")).unwrap();
+    assert_eq!(deepseek.label, "DeepSeek V4.1 Flash Free");
+    assert_eq!(deepseek.provider.as_ref().unwrap().id, "opencode");
+    // Exactly one default, and it is the model Aurea runs.
+    assert!(deepseek.default);
+    assert_eq!(models.iter().filter(|m| m.default).count(), 1);
+}
+
+#[test]
+fn model_labels_keep_their_brand_casing() {
+    assert_eq!(model_label("nemotron-3.5-super-vl-free"), "Nemotron 3.5 Super VL Free");
+    assert_eq!(model_label("hy4-flash-free"), "HY4 Flash Free");
+    assert_eq!(model_label("mimo-v2.6-flash-free"), "MiMo V2.6 Flash Free");
+    assert_eq!(model_label("flint-40b-free"), "Flint 40B Free");
+}
+
+#[test]
+fn static_fallback_lists_the_free_tier_with_one_default() {
+    let models = OpencodeHarness::new().fallback_models();
+    assert!(models.len() >= 2, "{models:?}");
+    assert!(models.iter().all(|m| m.id.starts_with("opencode/")));
+    assert!(models.iter().all(|m| m.id != "opencode/gpt-5.5-pro"));
+    assert_eq!(models.iter().filter(|m| m.default).count(), 1);
+    assert_eq!(models[0].id, "opencode/deepseek-v4.1-flash-free");
+}
