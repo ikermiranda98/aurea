@@ -49,7 +49,6 @@ struct PanelTitlebarWidths {
 pub(super) struct TitlebarTrailing {
     fit: HorizontalPanelFit,
     right_pane_visible: bool,
-    takeover: bool,
     row_left: f32,
     row_gap: f32,
     right_pad: f32,
@@ -311,13 +310,11 @@ impl Shell {
     /// The trailing titlebar strip follows the columns beneath it.
     pub(super) fn titlebar_trailing_layout(&self, on_canvas: bool, cx: &App) -> TitlebarTrailing {
         let sidebar_now = self.sidebar_now();
-        let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
 
         // Same glide as the old strip: content starts at the inset card's
         // left edge while the sidebar is open, and slides toward the control
         // cluster as it collapses.
-        let content_left =
-            (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start() + plus_inset);
+        let content_left = (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start());
 
         // Trailing titlebar section. With the changes pane open this is the
         // PANE'S HEADER — a strip exactly as wide as the pane carrying its
@@ -352,8 +349,7 @@ impl Shell {
             // own 8px pad lands the first chip on the pane gutter. The
             // window-control cluster still wins while the sidebar is
             // collapsed (the chips clear it instead of underlapping).
-            let cluster_end =
-                self.title_bar_content_start() - TITLEBAR_IDENTITY_GAP + plus_inset - 14.0;
+            let cluster_end = self.title_bar_content_start() - TITLEBAR_IDENTITY_GAP - 14.0;
             (sidebar_now - 8.0).max(cluster_end)
         } else {
             content_left
@@ -386,7 +382,6 @@ impl Shell {
         TitlebarTrailing {
             fit,
             right_pane_visible,
-            takeover,
             row_left,
             row_gap,
             right_pad,
@@ -396,36 +391,23 @@ impl Shell {
     }
 
     /// The unified titlebar in chat mode:
-    /// `[new-session +] [harness icon + session title] … [toggle-changes]`.
-    /// Replaces the tab strip; inherits its titlebar duties (drag region,
-    /// animated left inset, the toggle-changes button on git projects).
+    /// `[new-session +] … [toggle-changes]`. No session title: the sidebar
+    /// lists the one session, so the bar only inherits the strip's titlebar
+    /// duties (drag region, animated left inset, the toggle-changes button on
+    /// git projects).
     pub(super) fn render_session_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        // The canvas titles as NOTHING (user request — a "New session"
-        // header over the empty canvas was noise); the bar keeps its height,
-        // drag region, and buttons. Where a session runs, and its side-chat
-        // and project actions, live in the session card.
-        let (title, harness, on_canvas): (SharedString, Option<zeron_proto::HarnessId>, bool) = {
-            let state = self.state.read(cx);
-            match state.selected_chat_row() {
-                Some(chat) => (
-                    SharedString::from(transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                    )),
-                    chat.config.as_ref().map(|c| c.harness),
-                    false,
-                ),
-                None => (SharedString::from(""), None, true),
-            }
-        };
+        // The bar names nothing: Aurea runs one session at a time and the
+        // sidebar lists it, so a title here only repeated the sidebar row
+        // (user request). The bar keeps its height, drag region and buttons.
+        let on_canvas = self.state.read(cx).selected_chat_row().is_none();
 
         // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
         // session is selected (`render_titlebar_cluster`) — this row budgets
-        // one button slot so the title never sits under it.
+        // one button slot so the controls never sit under it.
         let TitlebarTrailing {
             fit,
             right_pane_visible,
-            takeover,
             row_left,
             row_gap,
             right_pad,
@@ -433,25 +415,6 @@ impl Shell {
             content_width,
         } = self.titlebar_trailing_layout(on_canvas, cx);
 
-        // What runs alongside the open chat: its working subagents and side
-        // chats, counted on the session card's toggle.
-        let running_lanes = {
-            let state = self.state.read(cx);
-            let now = Utc::now();
-            state.selected_chat.as_deref().map_or(0, |chat| {
-                let side_chats = state
-                    .chats
-                    .iter()
-                    .filter(|side| {
-                        !side.archived
-                            && side.parent_chat_id.as_deref() == Some(chat)
-                            && state.display_status_for(side, now)
-                                == zeron_proto::ChatIndicator::Working
-                    })
-                    .count() as u32;
-                state.running_subagents_for(chat, now) + side_chats
-            })
-        };
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
@@ -576,35 +539,10 @@ impl Shell {
             )
         };
 
-        // The session card's toggle belongs to the transcript: it ends the
-        // transcript's stretch of the titlebar, left of the side pane's tabs
-        // when one is open, else just left of the explorer toggle.
-        let session_info_toggle = (!takeover && !on_canvas).then(|| {
-            let open = self.session_info_visible(cx);
-            let label = if open {
-                "Hide session details"
-            } else {
-                "Show session details"
-            };
-            header_icon_button_with(
-                "toggle-session-info",
-                icons::corner_card_glyph(16.0, theme.text_muted),
-                label,
-                cx.listener(|this, _, _, cx| this.toggle_session_info(cx)),
-            )
-            .role(gpui::Role::Button)
-            .aria_label(label)
-            .flex_none()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.note_session_info_press()),
-            )
-            .when(open, |button| button.bg(crate::theme::wash(0.09)))
-            // Running subagents and side chats ride the card's lanes: the
-            // button counts them, open or closed, for as long as they run.
-            .when(running_lanes > 0, |button| {
-                crate::running_pill::mark_titlebar_button(button, running_lanes, &theme)
-            })
+        let desk = self.trading_page.clone().map(|trading| {
+            trading
+                .update(cx, |surface, cx| surface.titlebar_row(&theme, cx))
+                .into_any_element()
         });
         let inner = div()
             .size_full()
@@ -614,46 +552,8 @@ impl Shell {
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))
-            // In panel takeover the header strip spans the whole band — the
-            // title would sit UNDER it (both flex_none, the row overflows and
-            // paint order stacks them), so it hides for the duration.
-            .when(!takeover, |el| {
-                el.child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .when_some(
-                            harness.map(crate::pickers::harness_brand_icon),
-                            |el, (path, tint)| {
-                                el.child(
-                                    icon(path)
-                                        .size(px(14.0))
-                                        .flex_none()
-                                        .text_color(tint.unwrap_or(theme.text_muted)),
-                                )
-                            },
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(if on_canvas {
-                                    theme.text_muted.opacity(0.7)
-                                } else {
-                                    theme.text.opacity(0.85)
-                                })
-                                .child(title),
-                        ),
-                )
-            })
-            .child(div().flex_1())
-            .children(session_info_toggle)
+            .children(desk)
+            .when(self.trading_page.is_none(), |el| el.child(div().flex_1()))
             .children(trailing);
 
         // The unified window titlebar: full-width on the glass shell, ABOVE

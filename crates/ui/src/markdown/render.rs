@@ -1761,17 +1761,6 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) fn selection_test_entry_count(prefix: &str) -> usize {
-    REGISTRY.with(|registry| {
-        registry
-            .borrow()
-            .iter()
-            .filter(|entry| entry.key.starts_with(prefix))
-            .count()
-    })
-}
-
-#[cfg(test)]
 pub(crate) fn selection_test_bounds(key: &str) -> gpui::Bounds<gpui::Pixels> {
     REGISTRY.with(|r| {
         r.borrow()

@@ -291,14 +291,6 @@ fn composer_target_width(panel_width: f32, content_width: f32, docked: bool) -> 
     (content_width + 2.0 * Theme::SPACE_LG).min(panel_width)
 }
 
-fn titlebar_new_session_alpha(route: &Route, has_selected_chat: bool) -> f32 {
-    if matches!(route, Route::Chat) && has_selected_chat {
-        1.0
-    } else {
-        0.0
-    }
-}
-
 /// Open the session at `slot` (zero-based) of the sidebar's active list. One
 /// action carrying the slot, rather than nine near-identical action types.
 #[derive(Clone, PartialEq, Action)]
@@ -655,10 +647,14 @@ impl SettingsSection {
 
     fn visible_in_nav(self) -> bool {
         // Aurea is a local trading desk: no devices, Zeron Cloud, billing,
-        // file editor or Appshots pages.
+        // file editor or Appshots pages, and (user request) no Providers,
+        // Shortcuts or Archived sessions pages.
         !matches!(
             self,
             Self::Agents
+                | Self::Harnesses
+                | Self::Shortcuts
+                | Self::Archived
                 | Self::Devices
                 | Self::Cloud
                 | Self::Billing
@@ -839,15 +835,6 @@ pub enum RightSurface {
     /// keys [`Shell::subagent_tabs`].
     Subagent(u64),
     SideChat(u64),
-}
-
-fn push_unique_right_surface(tabs: &mut Vec<RightSurface>, surface: RightSurface) -> bool {
-    if tabs.contains(&surface) {
-        false
-    } else {
-        tabs.push(surface);
-        true
-    }
 }
 
 fn workspace_file_title(path: &str) -> SharedString {
@@ -2179,6 +2166,8 @@ pub struct Shell {
     chat_rename: Option<ChatRename>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
+    /// Clean Chat was clicked once: the next click deletes every chat.
+    clean_chat_armed: bool,
     /// Global confirmation/error dialog for the Changes-pane trash action. The
     /// RPC task is retained separately so rerenders do not cancel it.
     discard_working_tree: Option<DiscardWorkingTreeFlow>,
@@ -2544,6 +2533,9 @@ impl Shell {
         // Aurea's sidebar is one list (no projects or other devices to group
         // by); a profile saved under Zeron's grouping falls back to it.
         settings.sidebar_organization = settings::SidebarOrganization::InOneList;
+        // The chat drawer starts closed on every launch: the desk comes first.
+        // Dev/testing knob: `ZERON_OPEN_DRAWER=1` starts it open (captures).
+        settings.sidebar_collapsed = std::env::var_os("ZERON_OPEN_DRAWER").is_none();
         state.update(cx, |state, cx| {
             state.watch_clock_transitions(cx);
         });
@@ -2558,7 +2550,7 @@ impl Shell {
         // remembered like any other link to a section.
         let open_route = std::env::var("ZERON_OPEN_ROUTE").ok();
         let route = match open_route.as_deref() {
-            Some("trading") => Route::Trading,
+            Some("trading") => Route::Chat,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
                     Some(section) => {
@@ -2687,6 +2679,7 @@ impl Shell {
             chat_copy_left: false,
             chat_rename: None,
             delete_confirm: None,
+            clean_chat_armed: false,
             discard_working_tree: None,
             discard_working_tree_task: None,
             space_menu: popover::Popup::default(),
@@ -3846,18 +3839,6 @@ impl Shell {
         });
     }
 
-    /// The chat and state a transcript link resolves in: the main chat's, or
-    /// an open side chat's own (its chat row may not reach the main list yet).
-    fn link_owner(&self, chat_id: &str, cx: &App) -> Option<(String, Entity<AppState>)> {
-        if chat_id == self.active_chat {
-            return Some((chat_id.to_owned(), self.state.clone()));
-        }
-        self.side_chats
-            .values()
-            .find(|side| side.state.read(cx).selected_chat.as_deref() == Some(chat_id))
-            .map(|side| (chat_id.to_owned(), side.state.clone()))
-    }
-
     /// The picker's Terminal card / the `+` menu's Terminal row: every click
     /// opens a fresh embedded terminal tab.
     fn add_terminal_surface(&mut self, cx: &mut Context<Self>) {
@@ -4443,6 +4424,10 @@ impl Shell {
     // ---- routes / settings ----
 
     fn set_route(&mut self, route: Route, cx: &mut Context<Self>) {
+        // Aurea has one page: the trading desk with the chat in its drawer
+        // (`Route::Chat` keeps the chat's keys and focus rules). The desk's
+        // own route is the same page.
+        let route = if route == Route::Trading { Route::Chat } else { route };
         self.command_palette = None;
         // A settings-search landing belongs to the page it was asked on, and
         // a query to the visit: however Settings is left, the next visit
@@ -4828,7 +4813,8 @@ impl Shell {
     }
 
     pub(crate) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
-        let mut section = section.canonical();
+        // A page Aurea hides (Providers, Shortcuts, Archived...) opens General.
+        let mut section = section.reopenable();
         // Signed out, or not offered Cloud: no Cloud or billing to manage.
         if section.needs_account() && !self.state.read(cx).cloud_offered() {
             section = SettingsSection::General;
@@ -5662,7 +5648,7 @@ impl Shell {
         }
     }
 
-    fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+    pub(super) fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.delete_confirm = None;
         if let Some(tabs) = self.right_tabs.get(&chat_id) {
             for surface in tabs {
@@ -6979,12 +6965,9 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let can_back = self.nav.can_back();
         let can_forward = self.nav.can_forward();
-        // The titlebar is the single owner of the new-session action in both
-        // sidebar states. Hide it on the new-session canvas: opening another
-        // blank canvas from an already blank canvas has no effect and used to
-        // leave two competing + placements across the responsive variants.
-        let plus_alpha = self.titlebar_plus_alpha(cx);
-        let show_plus = plus_alpha > 0.01;
+        // Aurea runs one session at a time, so the new-session `+` that used
+        // to lead this cluster is gone (user request); the `mod-n` shortcut
+        // and the command palette still open one.
         let over_artwork = settings::current(cx)
             .new_thread_composer_background
             .as_ref()
@@ -7091,19 +7074,6 @@ impl Shell {
                         cx.listener(|this, _, _, cx| this.navigate_forward(cx)),
                     )),
             )
-            .children(show_plus.then(|| {
-                div()
-                    .flex_none()
-                    .ml(px(TITLEBAR_GROUP_GAP))
-                    .opacity(plus_alpha)
-                    .child(window_control_button(
-                        "titlebar-new-session",
-                        icons::PLUS,
-                        ShortcutId::NewSession.label(),
-                        &theme,
-                        cx.listener(|this, _, _, cx| this.open_new_session(None, cx)),
-                    ))
-            }))
             .into_any_element()
     }
 
@@ -7123,8 +7093,7 @@ impl Shell {
                 self.fullscreen.unwrap_or(false),
                 self.linux_left_caption_count(),
             ),
-        ) + CLUSTER_BUTTONS_WIDTH
-            + TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
+        ) + CLUSTER_BUTTONS_WIDTH;
         let left = (sidebar - Theme::SPACE_SM - 24.0).max(cluster_end + TITLEBAR_GROUP_GAP);
         let theme = Theme::of(cx).clone();
         let trigger = self.render_sidebar_view_trigger(&theme, cx);
@@ -7141,12 +7110,6 @@ impl Shell {
                 .child(trigger)
                 .into_any_element(),
         )
-    }
-
-    /// The titlebar owns new-session creation regardless of sidebar state. It
-    /// remains available on PR screens, even without a selected session.
-    pub(super) fn titlebar_plus_alpha(&self, cx: &App) -> f32 {
-        titlebar_new_session_alpha(&self.route, self.state.read(cx).selected_chat.is_some())
     }
 
     /// Native Windows caption controls integrated into Zeron's unified
@@ -7483,31 +7446,6 @@ impl Shell {
             );
         }
         out
-    }
-
-    fn render_sidebar(&mut self, _cx: &mut Context<Self>) -> AnyElement {
-        // The sidebar is part of the resolved theme. A second fixed-Zeron
-        // palette here made imported families look split in half and froze
-        // activity/glyph personality independently of the selected variant.
-        let inner = self.sidebar_pane.clone().cached(
-            gpui::StyleRefinement::default()
-                .w(px(self.sidebar_content_width()))
-                .h_full()
-                .flex_none(),
-        );
-        // Transparent — the sidebar sits directly on the frost shell; the main
-        // card's own border provides the separation. The content row spans the
-        // full window height (the titlebar overlays it), so the column pads
-        // itself below the chrome.
-        div()
-            .id("sidebar-column")
-            .debug_selector(|| "sidebar-column".into())
-            .h_full()
-            .flex_none()
-            .overflow_hidden()
-            .w(px(self.sidebar_now()))
-            .child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
-            .into_any_element()
     }
 
     /// The sidebar column's tone, spanning the FULL window height (under the
@@ -10550,6 +10488,63 @@ impl Shell {
             )
     }
 
+    /// Aurea's one page: the trading desk fills the window beside the chat
+    /// drawer.
+    fn render_trading_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.trading_page.is_none() {
+            let page = cx.new(|cx| crate::trading::TradingSurface::new(self.state.clone(), cx));
+            // The desk's heading rides the unified titlebar (see
+            // `TradingSurface::titlebar_row`), so a snapshot has to redraw the
+            // shell too — otherwise the bar would keep the boot-time chips.
+            cx.observe(&page, |_, _, cx| cx.notify()).detach();
+            self.trading_page = Some(page);
+        }
+        let outlet = self
+            .trading_page
+            .as_ref()
+            .cloned()
+            .map(IntoElement::into_any_element)
+            .unwrap_or_else(|| Empty.into_any_element());
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(div().flex_1().min_h_0().child(outlet))
+            .into_any_element()
+    }
+
+    /// The left drawer: the desk's chat (transcript and composer) at the
+    /// drawer's width. Closed, it keeps its content laid out at full width so
+    /// opening it slides the conversation in instead of reflowing it.
+    fn render_chat_drawer(
+        &mut self,
+        window: &mut Window,
+        chat_width: f32,
+        transcript_width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chat = self.render_main(window, chat_width, transcript_width, cx);
+        div()
+            .id("sidebar-column")
+            .debug_selector(|| "sidebar-column".into())
+            .h_full()
+            .flex_none()
+            .overflow_hidden()
+            .w(px(self.sidebar_now()))
+            .child(
+                div()
+                    .h_full()
+                    .w(px(chat_width))
+                    .pt(px(Theme::TITLEBAR_HEIGHT))
+                    .flex()
+                    .child(chat),
+            )
+            .into_any_element()
+    }
+
+    /// The chat column, sized for the drawer it now lives in.
     fn render_main(
         &mut self,
         window: &mut Window,
@@ -10560,28 +10555,6 @@ impl Shell {
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
-
-        if matches!(self.route, Route::Trading) {
-            if self.trading_page.is_none() {
-                self.trading_page =
-                    Some(cx.new(|cx| crate::trading::TradingSurface::new(self.state.clone(), cx)));
-            }
-            let outlet = self
-                .trading_page
-                .as_ref()
-                .cloned()
-                .map(IntoElement::into_any_element)
-                .unwrap_or_else(|| Empty.into_any_element());
-            return div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .flex()
-                .flex_col()
-                .child(div().flex_1().min_h_0().child(outlet))
-                .into_any_element();
-        }
-
         let _ = (text, border);
         let has_selection = self.state.read(cx).selected_chat.is_some();
         let has_spaces = !self.state.read(cx).spaces.is_empty();
@@ -10630,11 +10603,9 @@ impl Shell {
         }
         self.composer
             .update(cx, |composer, cx| composer.set_dock_frame(dock_frame, cx));
-        // The session card: docked, the transcript holds its room free on
-        // the right and the composer follows the column left by half of it;
-        // over a column too tight for that, it floats once opened.
-        let (session_docked, session_reveal, session_reserve) =
-            self.session_info_frame(has_selection, cx);
+        // No session card beside the chat in Aurea (the drawer has no room for
+        // it): the transcript keeps no reserve on its right.
+        let session_reserve = 0.0;
         self.transcript
             .update(cx, |transcript, cx| transcript.set_right_reserve(session_reserve, cx));
         // Panel open/close glides the composer width; a window resize or a
@@ -10797,15 +10768,6 @@ impl Shell {
             .relative()
             .left(px(-session_reserve / 2.0))
             .child(self.render_status_strip(composer_width, cx));
-        let session_card = self.render_session_info(
-            session_docked,
-            session_reveal,
-            self.viewport_height
-                - Theme::TITLEBAR_HEIGHT
-                - self.bottom_stack.get()
-                - 24.0,
-            cx,
-        );
         self.chat_dropzone("chat-dropzone", self.composer.clone(), cx)
             .debug_selector(|| "chat-dropzone".into())
             .track_focus(&self.navigation_focus.main)
@@ -10869,7 +10831,6 @@ impl Shell {
                         ))
                 },
             )
-            .children(session_card)
             .when_some(harness_update_card, |column, chip| {
                 // Home notices stay anchored to the window bottom, behind the
                 // dock. Clip paint and hitboxes at the same measured terminal
@@ -12970,23 +12931,23 @@ impl Render for Shell {
                 } else {
                     0.0
                 };
-                let main_target_width = self.main_target_width(right_target_width, cx);
-                // Navigation can change either edge: Files and responsive
-                // sidebar fitting matter just as much as the right surface.
+                let _ = right_target_width;
+                // Aurea: the chat lives in the left drawer at the drawer's
+                // content width; the trading desk takes the rest.
+                let main_target_width = self.sidebar_content_width();
                 self.composer_dock
                     .borrow_mut()
                     .observe_conversation(&self.panel_key(cx));
                 let panel_handoff = self.composer_dock.borrow_mut().observe_column(
                     self.state.read(cx).selected_chat.is_some(),
-                    (self.sidebar_now(), main_target_width),
+                    (0.0, main_target_width),
                     on_chat && !self.reduced_motion,
                     self.render_time.unwrap_or_else(std::time::Instant::now),
                 );
                 if panel_handoff {
                     self.motion_active.set(true);
                 }
-                let main_takeover = self.main_takeover_active();
-                let main_content_width = self.main_content_width(main_target_width, cx);
+                let main_content_width = main_target_width;
                 let transcript_width = self.composer_dock.borrow_mut().transcript_width(
                     main_content_width,
                     self.state.read(cx).selected_chat.is_some(),
@@ -13013,7 +12974,8 @@ impl Render for Shell {
                     }
                 });
 
-                let sidebar = self.render_sidebar(cx);
+                let sidebar =
+                    self.render_chat_drawer(window, main_content_width, transcript_width, cx);
                 // A collapsed or fit-hidden sidebar has no seam: the window's
                 // own left edge sits there, and a press must resize the window
                 // rather than drag the sidebar open.
@@ -13026,7 +12988,7 @@ impl Render for Shell {
                         cx,
                     )
                 });
-                let main = self.render_main(window, main_content_width, transcript_width, cx);
+                let main = self.render_trading_page(cx);
                 // The Changes pane is chat-scoped chrome: the Settings route
                 // never renders it (zeron __root.tsx `!isSettings && activeChat`
                 // around the diff column) — the per-session open flags stay
@@ -13062,17 +13024,6 @@ impl Render for Shell {
                 // flush and unbordered, the transcript directly on the frost
                 // glass; the changes pane is a flush left-bordered glass panel
                 // (built inside `render_right_pane`).
-                let main = if main_takeover {
-                    div()
-                        .h_full()
-                        .w(px(main_content_width))
-                        .flex_none()
-                        .flex()
-                        .child(main)
-                        .into_any_element()
-                } else {
-                    main
-                };
                 let card: AnyElement = div()
                     .id("conversation-column")
                     .debug_selector(|| "conversation-column".into())
@@ -13812,20 +13763,6 @@ mod tests {
         assert_eq!(PANE_RESIZE_HITBOX_TOP, Theme::TITLEBAR_HEIGHT);
         assert_eq!(PANE_RESIZE_HITBOX_HALF_WIDTH * 2.0, 20.0);
         assert_eq!(TERMINAL_RESIZE_HITBOX_HEIGHT, 10.0);
-    }
-
-    #[test]
-    fn new_session_action_lives_in_the_titlebar_only_when_useful() {
-        assert_eq!(titlebar_new_session_alpha(&Route::Chat, true), 1.0);
-        assert_eq!(titlebar_new_session_alpha(&Route::Chat, false), 0.0);
-        assert_eq!(
-            titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), true),
-            0.0
-        );
-        assert_eq!(
-            titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), false),
-            0.0
-        );
     }
 
     #[test]
@@ -15224,53 +15161,6 @@ mod exit_regressions {
                 }
             });
         }
-    }
-
-    /// A ready Shell with no engine, for the Pull requests route.
-    fn pull_request_shell(
-        cx: &mut TestAppContext,
-    ) -> (
-        Entity<Shell>,
-        &mut gpui::VisualTestContext,
-        tempfile::TempDir,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let data_dir = dir.path().to_path_buf();
-        let (shell, cx) = cx.add_window_view(|_, cx| {
-            let state = cx.new(|_| {
-                let mut state = AppState::new();
-                state.connection = zeron_proto::view::ConnectionStatus::Ready;
-                state
-            });
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir,
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        shell.update(cx, |shell, _| shell.debug_gate = Some(GatePhase::Ready));
-        (shell, cx, dir)
     }
 
     #[gpui::test]
@@ -16877,14 +16767,15 @@ mod settings_modal_regressions {
 
     #[test]
     fn remembered_sections_reopen_only_where_the_nav_can_show_them() {
+        // Aurea hides Shortcuts, Providers and Archived: they reopen as General.
         assert_eq!(
             SettingsSection::Shortcuts.reopenable(),
-            SettingsSection::Shortcuts
+            SettingsSection::General
         );
-        // The legacy Accounts alias lands on the page that absorbed it.
+        // The legacy Accounts alias pointed at Providers, hidden in Aurea.
         assert_eq!(
             SettingsSection::Agents.reopenable(),
-            SettingsSection::Harnesses
+            SettingsSection::General
         );
         // Appshots is hidden off-desktop, so it cannot be reopened there.
         assert_eq!(
@@ -16910,7 +16801,7 @@ mod settings_modal_regressions {
         );
         assert_eq!(
             settings_open_route("settings", SettingsSection::Agents),
-            Some(SettingsSection::Harnesses)
+            Some(SettingsSection::General)
         );
         for (route, section) in [
             ("settings/devices", SettingsSection::Devices),
@@ -17104,21 +16995,21 @@ mod settings_modal_regressions {
                 shell.toggle_settings(cx);
                 assert_eq!(shell.route, Route::Settings(SettingsSection::General));
                 // Switching sections inside Settings is remembered.
-                shell.open_settings(SettingsSection::Shortcuts, cx);
-                assert_eq!(shell.settings.settings_section, SettingsSection::Shortcuts);
+                shell.open_settings(SettingsSection::Notifications, cx);
+                assert_eq!(shell.settings.settings_section, SettingsSection::Notifications);
                 assert_eq!(
                     settings::current(cx).settings_section,
-                    SettingsSection::Shortcuts
+                    SettingsSection::Notifications
                 );
                 shell.toggle_settings(cx);
                 assert_eq!(shell.route, Route::Chat);
                 // ⌘, / the footer gear reopen it…
                 shell.toggle_settings(cx);
-                assert_eq!(shell.route, Route::Settings(SettingsSection::Shortcuts));
+                assert_eq!(shell.route, Route::Settings(SettingsSection::Notifications));
                 shell.close_settings(cx);
                 // …as do the palette and `/settings`.
                 shell.open_last_settings(cx);
-                assert_eq!(shell.route, Route::Settings(SettingsSection::Shortcuts));
+                assert_eq!(shell.route, Route::Settings(SettingsSection::Notifications));
                 shell.close_settings(cx);
 
                 // A link naming a section wins, and becomes the one remembered.
@@ -17129,19 +17020,19 @@ mod settings_modal_regressions {
                 assert_eq!(shell.route, Route::Settings(SettingsSection::Appearance));
                 shell.close_settings(cx);
 
-                // Legacy aliases are remembered as the page they resolve to.
+                // A legacy alias of a page Aurea hides opens General.
                 shell.open_settings(SettingsSection::Agents, cx);
-                assert_eq!(shell.settings.settings_section, SettingsSection::Harnesses);
+                assert_eq!(shell.settings.settings_section, SettingsSection::General);
                 shell.close_settings(cx);
                 shell.toggle_settings(cx);
-                assert_eq!(shell.route, Route::Settings(SettingsSection::Harnesses));
+                assert_eq!(shell.route, Route::Settings(SettingsSection::General));
                 settings::flush(cx);
             })
             .unwrap();
         // It survives a restart.
         assert_eq!(
             settings::UiSettings::load(dir.path()).settings_section,
-            SettingsSection::Harnesses
+            SettingsSection::General
         );
     }
 
@@ -17171,81 +17062,6 @@ mod settings_modal_regressions {
                 );
             })
             .unwrap();
-    }
-
-    /// The full shell draws its sidebar as a cached view after its own
-    /// render, so the lifted row must be built and drawn within one frame.
-    /// Carried out of the sidebar it follows the pointer, and dropped on a
-    /// conversation it becomes a chat chip in that composer.
-    #[gpui::test]
-    fn a_dragged_session_leaves_the_sidebar_and_drops_as_a_chat_mention(
-        cx: &mut TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
-        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
-        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
-        shell.update(cx, |shell, cx| {
-            shell.debug_gate = Some(GatePhase::Ready);
-            shell.splash = SplashPhase::Gone;
-            shell.reduced_motion = true;
-            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
-            shell.state.update(cx, |state, _| {
-                state.workspace_scope = Some(WorkspaceScope::Local);
-                state.local_device_id = Some("local".into());
-                state.chats = ["older", "newer"]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(ix, id)| {
-                        serde_json::from_value(serde_json::json!({
-                            "id": id, "title": format!("Chat {id}"), "deviceId": "local",
-                            "archived": false,
-                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
-                        }))
-                        .unwrap()
-                    })
-                    .collect();
-                state.selected_chat = Some("newer".into());
-            });
-            shell.active_chat = "newer".into();
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
-        let row = cx.debug_bounds("chat-older").expect("sidebar row");
-        let from = row.center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        // Several frames of dragging, inside the sidebar and then out of it.
-        for step in 1..=6 {
-            let x = from.x + px(4.0 + 120.0 * step as f32);
-            cx.simulate_mouse_move(
-                gpui::point(x, from.y + px(40.0)),
-                Some(MouseButton::Left),
-                gpui::Modifiers::default(),
-            );
-            cx.update(|window, cx| window.draw(cx).clear());
-        }
-        // The sidebar is a cached view, whose contents tests can't query by
-        // selector; the lifted row's own window position is the check.
-        let sidebar_width = shell.read_with(cx, |shell, _| shell.settings.sidebar_width);
-        shell.read_with(cx, |shell, _| {
-            let transfer = shell.sidebar_session_transfer.as_ref().expect("still dragging");
-            let left = transfer.slide_x.to;
-            let expected = f32::from(transfer.pointer.x - transfer.cursor_offset.x);
-            assert!(left > sidebar_width, "outside the sidebar the row follows the pointer");
-            assert!((left - expected).abs() < 0.5);
-        });
-        let drop = gpui::point(from.x + px(724.0), from.y + px(40.0));
-        cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::default());
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear());
-        shell.read_with(cx, |shell, cx| {
-            let text = shell.composer.read(cx).input.read(cx).text().to_owned();
-            assert!(
-                text.contains("[Chat older](zeron-chat:older)"),
-                "the drop mentions the chat: {text:?}"
-            );
-            assert!(shell.sidebar_session_transfer.is_none());
-        });
     }
 
     /// Signed in to an organization the edge offers Cloud (Cloud's settings

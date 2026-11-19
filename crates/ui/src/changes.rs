@@ -2990,20 +2990,6 @@ impl Changes {
         }
     }
 
-    /// Handle Escape before focused descendants such as a terminal receive it.
-    /// A popup in its exit animation remains a blocker until it unmounts.
-    pub(crate) fn handle_escape(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.ref_menu.is_open() {
-            self.close_ref_menu(cx);
-            return true;
-        }
-        if self.scope_menu.is_open() {
-            self.close_scope_menu(cx);
-            return true;
-        }
-        self.scope_menu.get().is_some() || self.ref_menu.get().is_some()
-    }
-
     fn open_ref_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // "PaletteSearch" context: ↑↓/⏎ stay unbound in the input and bubble
         // to the card's key handler.
@@ -4466,46 +4452,6 @@ fn code_text_viewport(
         }
         None => viewport.into_any_element(),
     }
-}
-
-/// Read-only unified row for PR diffs; reuse the Changes pane's gutters,
-/// source text, font settings, markers and semantic colors. The caller owns
-/// virtualization and the shared horizontal viewport.
-pub(crate) fn readonly_diff_line(
-    line: &DiffLine,
-    spans: &[zeron_syntax::HighlightSpan],
-    theme: &Theme,
-    gutter_px: f32,
-) -> AnyElement {
-    diff_line_row(line, spans, theme, gutter_px, DiffCodeWidth::Clipped, None)
-}
-
-/// Read-only unified row whose code plane scrolls with `scroll` while the
-/// gutters stay put. Every row shares one extent, so a whole multi-file
-/// stream moves as one horizontal plane.
-pub(crate) fn readonly_scrolled_diff_line(
-    line: &DiffLine,
-    spans: &[zeron_syntax::HighlightSpan],
-    theme: &Theme,
-    gutter_px: f32,
-    text_width: f32,
-    scroll: &gpui::ScrollHandle,
-    row: usize,
-) -> AnyElement {
-    diff_line_row(
-        line,
-        spans,
-        theme,
-        gutter_px,
-        DiffCodeWidth::Scrollable(DiffHorizontalMetrics {
-            max_text_width: text_width,
-            max_gutter_width: gutter_px,
-        }),
-        Some(DiffCodeScroll {
-            handle: scroll.clone(),
-            id: format!("pr-code-{row}").into(),
-        }),
-    )
 }
 
 /// Read-only split row using the same cells and divider as the Changes pane.

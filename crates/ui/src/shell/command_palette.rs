@@ -1281,50 +1281,6 @@ mod tests {
         }
     }
 
-    /// A palette over chat "focused" (plus "deploy-thread"), wired to a fake
-    /// engine. `focused: false` leaves no chat in focus.
-    fn engine_palette(
-        cx: &mut TestAppContext,
-        focused: bool,
-    ) -> (gpui::WindowHandle<Shell>, tempfile::TempDir, FakeEngine) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let (out, requests) = tokio::sync::mpsc::channel(64);
-        let (replies, inbound) = tokio::sync::mpsc::channel(64);
-        let engine = {
-            let _guard = runtime.enter();
-            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound))
-        };
-        let (window, dir) = palette_window(cx);
-        window
-            .update(cx, |shell, window, cx| {
-                shell.state.update(cx, |state, cx| {
-                    state.local_device_id = Some("local".into());
-                    state.apply_chats(vec![
-                        chat("focused", None, false, 0),
-                        titled("deploy-thread", "Deploy the docs", false, 1),
-                    ]);
-                    state.set_test_engine(engine);
-                    if focused {
-                        state.select_chat(Some("focused".into()), cx);
-                    }
-                });
-                if focused {
-                    shell.active_chat = "focused".into();
-                }
-                shell.toggle_command_palette(window, cx);
-            })
-            .unwrap();
-        let fake = FakeEngine {
-            runtime,
-            requests,
-            replies,
-        };
-        (window, dir, fake)
-    }
-
     fn type_query(window: gpui::WindowHandle<Shell>, query: &str, cx: &mut TestAppContext) {
         window
             .update(cx, |shell, _, cx| {
@@ -1336,21 +1292,6 @@ mod tests {
                     .update(cx, |input, cx| input.set_text(query, cx));
             })
             .unwrap();
-    }
-
-    fn palette_section(
-        window: gpui::WindowHandle<Shell>,
-        section: Section,
-        cx: &mut TestAppContext,
-    ) -> Option<PaletteSection> {
-        window
-            .read_with(cx, |shell, cx| {
-                shell
-                    .palette_sections(cx)
-                    .into_iter()
-                    .find(|found| found.section == section)
-            })
-            .unwrap()
     }
 
     /// A shell with the real app keymap and two sidebar sessions.

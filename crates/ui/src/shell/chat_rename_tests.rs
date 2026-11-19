@@ -113,63 +113,6 @@ fn mutated(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
 }
 
 #[gpui::test]
-fn double_click_edits_a_sidebar_title_in_place(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    let row = cx.debug_bounds("chat-older").unwrap();
-    double_click(cx, row.center());
-
-    // The title swaps for a focused field holding the whole name, selected;
-    // no modal opens.
-    assert!(cx.debug_bounds("chat-title-older").is_none());
-    let field = cx.debug_bounds("chat-title-editor-older").unwrap();
-    assert!(row.contains(&field.center()));
-    let input = shell.read_with(cx, |shell, _| {
-        let rename = shell.chat_rename.as_ref().unwrap();
-        assert_eq!(rename.chat_id, "older");
-        assert_eq!(rename.surface, ChatRenameSurface::Sidebar);
-        rename.input.clone()
-    });
-    cx.update(|window, cx| {
-        assert!(input.focus_handle(cx).is_focused(window));
-        assert_eq!(input.read(cx).text(), "older");
-    });
-
-    // Clicking inside the field keeps editing instead of activating the row.
-    cx.simulate_click(field.center(), Modifiers::default());
-    redraw(cx);
-    assert!(shell.read_with(cx, |shell, _| shell.chat_rename.is_some()));
-
-    // Escape drops the edit without renaming.
-    cx.simulate_keystrokes("escape");
-    redraw(cx);
-    assert!(shell.read_with(cx, |shell, _| shell.chat_rename.is_none()));
-    assert!(cx.debug_bounds("chat-title-older").is_some());
-    assert!(!mutated(&shell, cx));
-
-    // Enter on an unchanged title closes without a mutation.
-    double_click(cx, row.center());
-    cx.simulate_keystrokes("enter");
-    redraw(cx);
-    assert!(shell.read_with(cx, |shell, _| shell.chat_rename.is_none()));
-    assert!(!mutated(&shell, cx));
-
-    // Typing replaces the selected name; Enter commits it.
-    double_click(cx, row.center());
-    cx.simulate_input("Renamed");
-    let input = shell.read_with(cx, |shell, _| {
-        shell.chat_rename.as_ref().unwrap().input.clone()
-    });
-    assert_eq!(
-        input.read_with(cx, |input, _| input.text().to_string()),
-        "Renamed"
-    );
-    cx.simulate_keystrokes("enter");
-    redraw(cx);
-    assert!(shell.read_with(cx, |shell, _| shell.chat_rename.is_none()));
-    assert!(mutated(&shell, cx));
-}
-
-#[gpui::test]
 fn menu_rename_opens_the_same_field_and_blur_commits(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
     shell.update(cx, |shell, cx| shell.open_rename_chat("newer".into(), cx));
@@ -373,31 +316,4 @@ fn rename_expands_a_collapsed_custom_section(cx: &mut TestAppContext) {
         assert!(shell.sidebar_disclosure_motion.contains_key("custom:work"));
     });
     assert!(cx.debug_bounds("chat-title-editor-older").is_some());
-}
-
-#[gpui::test]
-fn inline_rename_keeps_the_row_height_in_compact_and_full_rows(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    for compact in [true, false] {
-        shell.update(cx, |shell, cx| {
-            shell.settings.sidebar_compact = compact;
-            cx.notify();
-        });
-        redraw(cx);
-        let row = cx.debug_bounds("chat-older").unwrap();
-        double_click(cx, row.center());
-
-        // The field takes the title's place without growing the row.
-        let field = cx.debug_bounds("chat-title-editor-older").unwrap();
-        assert!(row.contains(&field.center()), "compact: {compact}");
-        assert_eq!(
-            cx.debug_bounds("chat-older").unwrap().size.height,
-            row.size.height,
-            "compact: {compact}"
-        );
-
-        cx.simulate_keystrokes("escape");
-        redraw(cx);
-        assert!(shell.read_with(cx, |shell, _| shell.chat_rename.is_none()));
-    }
 }

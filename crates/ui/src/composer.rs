@@ -7115,25 +7115,6 @@ impl Composer {
         }
     }
 
-    pub(crate) fn add_workspace_path(
-        &mut self,
-        path: &str,
-        is_directory: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let inserted = self.input.update(cx, |input, cx| {
-            input.insert_dropped_mention(path, is_directory, cx)
-        });
-        if inserted {
-            self.reset_mention(None, cx);
-            self.reset_slash(None, cx);
-            let focus = self.input.read(cx).focus_handle.clone();
-            window.focus(&focus, cx);
-            cx.notify();
-        }
-    }
-
     /// Mention another chat at the caret: a chip the agent receives as a
     /// reference it can read (dragged in from the sidebar).
     pub(crate) fn add_chat_mention(

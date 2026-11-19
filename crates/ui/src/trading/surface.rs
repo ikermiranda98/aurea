@@ -237,7 +237,12 @@ impl TradingSurface {
 
     // ----------------------------------------------------------------- header
 
-    fn header(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    /// The desk's heading, drawn inside the unified titlebar (user request:
+    /// the desk's own 52px strip moved up there, so the page keeps that height
+    /// for content). Single line and no chrome of its own — the titlebar
+    /// supplies the height, the left inset (aligned with [`PAGE_PAD`]) and the
+    /// drag region; the shell observes this entity so a snapshot redraws it.
+    pub(crate) fn titlebar_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let demo = self
             .snapshot
             .as_ref()
@@ -248,59 +253,43 @@ impl TradingSurface {
             .map(|snapshot| SharedString::from(format!("motor {}", snapshot.version)))
             .unwrap_or_else(|| SharedString::from("sin snapshot"));
         div()
-            .flex_none()
-            .w_full()
-            .h(px(52.0))
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(10.0))
-            .px(px(18.0))
-            .border_b_1()
-            .border_color(theme.border)
+            .overflow_hidden()
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.0))
-                    .child(
-                        div()
-                            .text_size(px(15.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Aurea"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(9.0))
-                            .text_color(theme.text_faint)
-                            .child("MESA DE TRADING"),
-                    ),
+                    .flex_none()
+                    .text_size(px(13.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("Aurea"),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(9.0))
+                    .text_color(theme.text_faint)
+                    .child("MESA DE TRADING"),
             )
             // The phase reads "EN VIVO" once the stream is up; on the demo
             // fixture that would contradict the DEMO chip beside it.
             .when(!(demo && self.phase == Phase::Live), |el| {
                 el.child(self.phase_chip(theme))
             })
-            .when(demo, |el| {
-                el.child(chip("DEMO", theme.accent))
-            })
+            .when(demo, |el| el.child(chip("DEMO", theme.accent)))
             .child(
                 div()
+                    .flex_none()
                     .text_size(px(9.5))
                     .font_family(theme.font_mono.clone())
                     .text_color(theme.text_faint)
                     .child(version),
             )
             .child(div().flex_1())
-            .child(
-                button("trading-open-chat", "Chat", ButtonTone::Ghost, theme).on_click(
-                    cx.listener(|_, _, window, cx| {
-                        // A new chat with the agent: it reads the desk through
-                        // its trading tools and asks here before moving money.
-                        window.dispatch_action(Box::new(crate::shell::NewSession), cx);
-                    }),
-                ),
-            )
             .child(
                 button("trading-close-all", "Cerrar todo", ButtonTone::Ghost, theme).on_click(
                     cx.listener(|this, _, _, cx| this.ask(Confirm::CloseAll, cx)),
@@ -1421,9 +1410,9 @@ impl TradingSurface {
 impl Render for TradingSurface {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        // The page starts under the titlebar row, like Zeron's Pull requests
-        // page: the row belongs to the sidebar toggle, history arrows and the
-        // window's own caption buttons, whichever side they sit on.
+        // The page starts under the titlebar row, which now carries the desk's
+        // heading too (`titlebar_row`) — this body keeps only the strips and
+        // the cards, so it starts right below the bar.
         let mut root = div()
             .size_full()
             .pt(px(Theme::TITLEBAR_HEIGHT))
@@ -1431,8 +1420,7 @@ impl Render for TradingSurface {
             .flex_col()
             .bg(theme.bg)
             .text_color(theme.text)
-            .font_family(theme.font_sans.clone())
-            .child(self.header(&theme, cx));
+            .font_family(theme.font_sans.clone());
         if let Some(bar) = self.confirm_bar(&theme, cx) {
             root = root.child(bar);
         }

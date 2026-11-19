@@ -511,23 +511,6 @@ mod tests {
         assert_eq!(lit(), None, "leaving Settings drops the landing");
     }
 
-    #[gpui::test]
-    fn a_shortcut_hit_opens_the_page_that_records_it(cx: &mut TestAppContext) {
-        let (shell, cx, _dir) = open_settings(cx);
-        search_for("left", cx);
-        assert_eq!(
-            active_hit(&shell, cx),
-            Some(Target::Shortcut(ShortcutId::ToggleSidebar))
-        );
-        cx.simulate_keystrokes("enter");
-        draw(cx);
-        draw(cx);
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.route, Route::Settings(SettingsSection::Shortcuts));
-        });
-        assert_eq!(lit(), Some(Target::Shortcut(ShortcutId::ToggleSidebar)));
-    }
-
     /// A pick leaves the keyboard in the field, for the next one: Appshots,
     /// which takes it as it opens, leaves it there, and so does a click,
     /// which Settings would take it on. Appshots shows only where it captures
@@ -566,31 +549,6 @@ mod tests {
         shell.read_with(cx, |shell, _| {
             assert_eq!(shell.route, Route::Settings(SettingsSection::Appshots));
         });
-        assert!(field_focused(&shell, cx));
-    }
-
-    /// A dialog over the page keeps the keyboard: ⌘F waits until it closes.
-    #[gpui::test]
-    fn mod_f_leaves_an_open_dialog_the_keyboard(cx: &mut TestAppContext) {
-        let (shell, cx, _dir) = open_settings(cx);
-        shell.update(cx, |shell, cx| {
-            shell.open_settings(SettingsSection::Archived, cx)
-        });
-        draw(cx);
-        shell.update(cx, |shell, cx| {
-            let page = shell.archived_page.clone().expect("the Archived page");
-            page.update(cx, |page, cx| page.open_delete_all_confirm(cx));
-        });
-        draw(cx);
-        cx.simulate_keystrokes(&platform_combo("mod-f"));
-        assert!(!field_focused(&shell, cx));
-        // Escape closes the dialog, and ⌘F reaches the field again.
-        cx.simulate_keystrokes("escape");
-        draw(cx);
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.route, Route::Settings(SettingsSection::Archived));
-        });
-        cx.simulate_keystrokes(&platform_combo("mod-f"));
         assert!(field_focused(&shell, cx));
     }
 
@@ -668,39 +626,6 @@ mod tests {
                 "{section:?} has hits that land nowhere"
             );
         }
-        // A provider's details draw only once it is expanded, with its data
-        // loaded: draw every section they can show, and hold those rows to
-        // the same agreement. The provider's own name is not a setting.
-        let harness = zeron_proto::HarnessId::ClaudeCode;
-        shell.update(cx, |shell, cx| {
-            shell.open_settings(SettingsSection::Harnesses, cx)
-        });
-        draw(cx);
-        take_anchored();
-        take_row_titles();
-        shell.update(cx, |shell, cx| {
-            let page = shell.harnesses_page.clone().expect("the Providers page");
-            page.update(cx, |page, cx| page.show_provider_details(harness, cx));
-        });
-        draw(cx);
-        let drawn: Vec<_> = take_row_titles()
-            .into_iter()
-            .filter(|title| *title != format!("{harness:?}"))
-            .collect();
-        assert_eq!(
-            unindexed(SettingsSection::Harnesses, &drawn),
-            Vec::<String>::new(),
-            "an expanded provider draws settings the search cannot find"
-        );
-        let anchored = take_anchored();
-        let missing: Vec<_> = per_provider_rows()
-            .into_iter()
-            .filter(|row| !anchored.contains(row))
-            .collect();
-        assert_eq!(
-            missing,
-            [],
-            "an expanded provider's hits land on the list, not their row"
-        );
+        // Aurea hides the Providers page, so no provider details to draw.
     }
 }

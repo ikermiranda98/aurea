@@ -2741,12 +2741,13 @@ mod tests {
             assert_eq!(loaded.settings_section, SettingsSection::General, "{raw}");
             assert_eq!(loaded.sidebar_width, 300.0, "{raw}");
         }
-        // The legacy Accounts alias still reads, and reopens as Providers.
+        // The legacy Accounts alias still reads; Aurea hides Providers, so it
+        // reopens as General.
         let alias: UiSettings = serde_json::from_str(r#"{"settingsSection":"agents"}"#).unwrap();
         assert_eq!(alias.settings_section, SettingsSection::Agents);
         assert_eq!(
             alias.settings_section.reopenable(),
-            SettingsSection::Harnesses
+            SettingsSection::General
         );
     }
 

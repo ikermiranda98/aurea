@@ -78,53 +78,6 @@ impl Shell {
         })
     }
 
-    pub(super) fn ensure_project_actions(&mut self, cx: &mut Context<Self>) {
-        let context = self.project_action_context(cx);
-        let key = context.as_ref().map(|context| context.key.clone());
-        let changed = self.project_actions.activate(key.clone());
-        let needs_load = key.as_ref().is_some_and(|key| {
-            !self.project_actions.cache.contains_key(key)
-                || matches!(
-                    self.project_actions.cache.get(key),
-                    Some(ProjectActionsStatus::Idle)
-                )
-        });
-        if (changed || needs_load)
-            && let Some(context) = context
-        {
-            self.refresh_project_actions(context, cx);
-        }
-    }
-
-    fn refresh_project_actions(&mut self, context: ProjectActionContext, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.project_actions
-                .mark_unavailable(&context.key, "Engine not connected".into());
-            cx.notify();
-            return;
-        };
-        let generation = self.project_actions.begin_load(&context.key);
-        let params = project_action_params(
-            serde_json::json!({ "spaceId": context.key.space_id }),
-            &context.target_device_id,
-        );
-        let key = context.key.clone();
-        self.project_actions.request_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call_as::<ProjectActionsSnapshot>(methods::LIST_PROJECT_ACTIONS, params)
-                .await
-                .map_err(|err| err.to_string());
-            this.update(cx, |shell, cx| {
-                if shell.project_actions.accept_load(&key, generation, result) {
-                    cx.notify();
-                }
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
     fn close_project_actions_menu(&mut self, cx: &mut Context<Self>) {
         if self.project_actions.menu.begin_close() {
             popover::reap_popup(cx, |shell: &mut Shell| &mut shell.project_actions.menu);
@@ -132,57 +85,6 @@ impl Shell {
         cx.notify();
     }
 
-
-    pub(super) fn open_project_action_editor(
-        &mut self,
-        action: Option<ProjectAction>,
-        import: Option<ProjectActionDraft>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(key) = self.project_actions.active.clone() else {
-            return;
-        };
-        self.close_project_actions_menu(cx);
-        let action_id = action.as_ref().map(|action| action.id.clone());
-        let draft =
-            action
-                .as_ref()
-                .map(draft_from_action)
-                .or(import)
-                .unwrap_or(ProjectActionDraft {
-                    name: String::new(),
-                    command: String::new(),
-                    icon: ProjectActionIcon::Play,
-                    run_on_worktree_create: false,
-                });
-        let name = cx.new(|cx| ComposerInput::new("Action name", cx));
-        name.update(cx, |input, cx| input.set_text(draft.name, cx));
-        let command = cx.new(|cx| ComposerInput::new("Command", cx));
-        command.update(cx, |input, cx| input.set_text(draft.command, cx));
-        let name_events = cx.subscribe(
-            &name,
-            |_: &mut Shell, _, _: &crate::composer::ComposerInputEvent, cx| cx.notify(),
-        );
-        let command_events = cx.subscribe(
-            &command,
-            |_: &mut Shell, _, _: &crate::composer::ComposerInputEvent, cx| cx.notify(),
-        );
-        self.project_actions.editor = Some(ProjectActionEditor {
-            key,
-            action_id,
-            name,
-            command,
-            icon: draft.icon,
-            run_on_worktree_create: draft.run_on_worktree_create,
-            error: None,
-            saving: false,
-            focus_pending: true,
-            confirm_delete: false,
-            _name_events: name_events,
-            _command_events: command_events,
-        });
-        cx.notify();
-    }
 
     fn save_project_action(&mut self, cx: &mut Context<Self>) {
         let Some(context) = self.project_action_context(cx) else {
@@ -389,13 +291,6 @@ impl Shell {
             .ok();
         }));
         cx.notify();
-    }
-
-    /// Reload the active project's actions (the card's retry).
-    pub(super) fn retry_project_actions(&mut self, cx: &mut Context<Self>) {
-        if let Some(context) = self.project_action_context(cx) {
-            self.refresh_project_actions(context, cx);
-        }
     }
 
     pub(super) fn run_project_action(
