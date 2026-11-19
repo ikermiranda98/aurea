@@ -117,6 +117,14 @@ impl IbkrLedger {
             IbInbound::CurrentTime(_) => false,
             IbInbound::Unknown { .. } => false,
             IbInbound::Unreadable { .. } => false,
+            // Order entry answers belong to the close cycle, not the ledger.
+            IbInbound::OrderStatus(_)
+            | IbInbound::OpenOrder(_)
+            | IbInbound::OpenOrderEnd
+            | IbInbound::ContractDetails(_)
+            | IbInbound::ContractDetailsEnd { .. }
+            | IbInbound::Execution(_)
+            | IbInbound::ExecutionEnd { .. } => false,
         }
     }
 
@@ -220,7 +228,17 @@ impl IbkrLedger {
         !self.accounts.is_empty()
     }
 
-    fn positions_of(&self, account: &str) -> Vec<Position> {
+    /// The contract of `account`'s open row shown as `symbol`.
+    pub fn contract_of(&self, account: &str, symbol: &str) -> Option<zeron_tws::inbound::Contract> {
+        self.positions
+            .get(account)?
+            .values()
+            .find(|row| row.position != 0.0 && row.contract.display_symbol() == symbol)
+            .map(|row| row.contract.clone())
+    }
+
+    /// `account`'s open rows, normalised for the dashboard.
+    pub fn positions_of(&self, account: &str) -> Vec<Position> {
         let no_positions = BTreeMap::new();
         let no_prices = BTreeMap::new();
         let rows = self.positions.get(account).unwrap_or(&no_positions);

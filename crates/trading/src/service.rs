@@ -23,7 +23,7 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::sync::{Mutex as AsyncMutex, broadcast, watch};
 use zeron_proto::trading::{
     Account, Broker, EquityPoint, Link, Log, LogLevel, ProgramState, Programs, Snapshot,
     TradingError,
@@ -76,6 +76,13 @@ struct State {
     equity: Vec<EquityPoint>,
     last_sample: i64,
     logs: Vec<Log>,
+    /// The server version TWS opened this session with; order entry needs it
+    /// to pick the wire layout (`zeron_tws::orders`).
+    server_version: Option<i32>,
+    /// The next order id this client may use (`nextValidId`, then +1 each).
+    next_order_id: Option<i64>,
+    /// The API client id the live link opened with.
+    client_id: i32,
 }
 
 impl Default for State {
@@ -88,6 +95,9 @@ impl Default for State {
             equity: Vec::new(),
             last_sample: 0,
             logs: Vec::new(),
+            server_version: None,
+            next_order_id: None,
+            client_id: FIRST_CLIENT_ID,
         }
     }
 }
@@ -105,6 +115,9 @@ struct Inner {
     connecting: AsyncMutex<()>,
     /// Where the active account is persisted; `None` keeps it in memory.
     store: Mutex<Option<Store>>,
+    /// Every decoded inbound message, for the close cycle's request/answer
+    /// waits (contract details, open orders, executions, order status).
+    inbound: broadcast::Sender<IbInbound>,
 }
 
 impl Default for TradingService {
@@ -123,6 +136,7 @@ impl TradingService {
             client: Mutex::new(None),
             connecting: AsyncMutex::new(()),
             store: Mutex::new(None),
+            inbound: broadcast::channel(1024).0,
         });
         // The demo fixture ticks every 2 s; keep forwarding it while no live
         // link owns the snapshot. Without a runtime (unit tests, a CLI probe)
@@ -166,6 +180,73 @@ impl TradingService {
             return Vec::new();
         }
         state.ledger.foreign_positions()
+    }
+
+    /// Every inbound message from now on. Subscribe *before* sending the
+    /// request whose answer you wait for.
+    pub fn subscribe_inbound(&self) -> broadcast::Receiver<IbInbound> {
+        self.inner.inbound.subscribe()
+    }
+
+    /// The server version of the live session, once TWS has sent it.
+    pub fn server_version(&self) -> Option<i32> {
+        let state = lock(&self.inner.state);
+        state.live.then_some(state.server_version).flatten()
+    }
+
+    /// The client id the service's own link uses (executions filter on it).
+    pub fn client_id(&self) -> i64 {
+        i64::from(lock(&self.inner.state).client_id)
+    }
+
+    /// Reserves the next order id, or `None` until TWS has sent `nextValidId`.
+    pub fn allocate_order_id(&self) -> Option<i64> {
+        let mut state = lock(&self.inner.state);
+        if !state.live {
+            return None;
+        }
+        let id = state.next_order_id?;
+        state.next_order_id = Some(id + 1);
+        Some(id)
+    }
+
+    /// Appends one engine row to the live log and republishes.
+    pub fn push_log(&self, level: LogLevel, message: String) {
+        {
+            let mut state = lock(&self.inner.state);
+            if !state.live {
+                return;
+            }
+            state.push_log(level, message);
+        }
+        self.inner.publish();
+    }
+
+    /// Sends one request on the live link. `false` when no link is up.
+    pub fn send(&self, fields: Vec<String>) -> bool {
+        match lock(&self.inner.client).as_ref() {
+            Some(client) if client.is_connected() => client.request(fields),
+            _ => false,
+        }
+    }
+
+    /// The contract TWS reported for `symbol` on `account`'s position.
+    pub fn position_contract(
+        &self,
+        account: &str,
+        symbol: &str,
+    ) -> Option<zeron_tws::inbound::Contract> {
+        lock(&self.inner.state).ledger.contract_of(account, symbol)
+    }
+
+    /// `account`'s open rows as the wire states them now (the close cycle
+    /// re-reads its fixed account, never the shown one).
+    pub fn account_positions(&self, account: &str) -> Vec<zeron_proto::trading::Position> {
+        let state = lock(&self.inner.state);
+        if !state.live {
+            return Vec::new();
+        }
+        state.ledger.positions_of(account)
     }
 
     /// The snapshot stream `WatchTradingSnapshot` forwards.
@@ -220,6 +301,7 @@ impl TradingService {
             return Ok(lock(&self.inner.state).ledger.account());
         }
         let link = (config.host.clone(), config.port);
+        let client_id = config.client_id;
         let (client, events) =
             IbClient::connect(config)
                 .await
@@ -237,6 +319,9 @@ impl TradingService {
             state.link = Some(link);
             state.ledger = IbkrLedger::default();
             state.ledger.prefer(remembered);
+            state.server_version = None;
+            state.next_order_id = None;
+            state.client_id = client_id;
             state.equity.clear();
             state.last_sample = 0;
             state.logs.clear();
@@ -259,6 +344,8 @@ impl TradingService {
             state.live = false;
             state.client_in_use = None;
             state.link = None;
+            state.server_version = None;
+            state.next_order_id = None;
             state.ledger = IbkrLedger::default();
             state.equity.clear();
             state.last_sample = 0;
@@ -370,7 +457,12 @@ impl Inner {
         while let Some(event) = events.recv().await {
             match event {
                 IbEvent::Connecting => {}
-                IbEvent::ServerVersion { .. } => {}
+                IbEvent::ServerVersion { version, .. } => {
+                    let mut state = lock(&self.state);
+                    if state.live {
+                        state.server_version = Some(version);
+                    }
+                }
                 IbEvent::Connected { host, port } => {
                     {
                         let mut state = lock(&self.state);
@@ -423,6 +515,13 @@ impl Inner {
                     if !state.live {
                         continue;
                     }
+                    if let IbInbound::NextValidId { order_id } = &message {
+                        // Never step back below an id already handed out.
+                        let next = state.next_order_id.map_or(*order_id, |n| n.max(*order_id));
+                        state.next_order_id = Some(next);
+                    }
+                    // No receiver is fine: nobody is waiting for an answer.
+                    let _ = self.inbound.send(message.clone());
                     if !state.ledger.apply(&message, now_ms()) {
                         continue;
                     }

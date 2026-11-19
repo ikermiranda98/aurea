@@ -4,6 +4,7 @@
 //! watch channel the RPC layer streams) plus [`mock`], the fixture source the
 //! dashboard consumes until the real engine (lane A) lands.
 
+pub mod cierre;
 pub mod claims;
 pub mod close;
 pub mod engine;

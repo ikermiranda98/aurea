@@ -302,6 +302,22 @@ pub enum IbInbound {
     },
     /// The session clock (`reqCurrentTime`).
     CurrentTime(i64),
+    /// `ORDER_STATUS`: an order's state and fill (see [`crate::orders`]).
+    OrderStatus(crate::orders::OrderStatusRow),
+    /// `OPEN_ORDER`: one open order's fixed head.
+    OpenOrder(crate::orders::OpenOrderRow),
+    /// The `reqAllOpenOrders` answer is complete.
+    OpenOrderEnd,
+    /// `CONTRACT_DATA`: one contract-details answer.
+    ContractDetails(crate::orders::ContractDetailsRow),
+    ContractDetailsEnd {
+        req_id: i64,
+    },
+    /// `EXECUTION_DATA`: one fill of a `reqExecutions` answer (or live).
+    Execution(crate::orders::ExecutionRow),
+    ExecutionEnd {
+        req_id: i64,
+    },
     /// A message this build does not interpret yet.
     Unknown {
         code: i64,
@@ -430,6 +446,25 @@ pub fn decode(fields: &[String]) -> IbInbound {
         49 => IbInbound::CurrentTime(
             fields.get(2).and_then(|value| number(value)).unwrap_or(0.0) as i64
         ),
+        3 => crate::orders::decode_order_status(fields)
+            .map(IbInbound::OrderStatus)
+            .unwrap_or(IbInbound::Unreadable { code }),
+        5 => crate::orders::decode_open_order(fields)
+            .map(IbInbound::OpenOrder)
+            .unwrap_or(IbInbound::Unreadable { code }),
+        53 => IbInbound::OpenOrderEnd,
+        10 => crate::orders::decode_contract_details(fields)
+            .map(IbInbound::ContractDetails)
+            .unwrap_or(IbInbound::Unreadable { code }),
+        52 => IbInbound::ContractDetailsEnd {
+            req_id: fields.get(2).and_then(|value| number(value)).unwrap_or(-1.0) as i64,
+        },
+        11 => crate::orders::decode_execution(fields)
+            .map(IbInbound::Execution)
+            .unwrap_or(IbInbound::Unreadable { code }),
+        55 => IbInbound::ExecutionEnd {
+            req_id: fields.get(2).and_then(|value| number(value)).unwrap_or(-1.0) as i64,
+        },
         _ => IbInbound::Unknown { code },
     }
 }

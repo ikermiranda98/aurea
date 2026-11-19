@@ -25,6 +25,15 @@ fn aurea(key: &str) -> Option<&'static str> {
         "trading.close.all_failed" => {
             "Cierre incompleto: {{failed}} fallo(s), {{open}} posición(es) siguen abiertas."
         }
+        "trading.close.wire_unsupported" => {
+            "Esta versión de TWS ({{version}}) no está soportada para órdenes: cierra {{symbol}} desde TWS."
+        }
+        "trading.close.limit_sent" => {
+            "El cierre a mercado falló{{reason}}; enviado un límite {{action}} {{quantity}} {{symbol}} a {{prices}} GTC (orden {{orders}}). Revisa Órdenes."
+        }
+        "trading.close.oca_sent" => {
+            "El cierre a mercado falló{{reason}}; enviados 2 límites OCA {{action}} {{quantity}} {{symbol}} a {{prices}} GTC (órdenes {{orders}}). Uno cancela al otro. Revisa Órdenes."
+        }
         "trading.panic.done" => "Pánico ejecutado.",
         "trading.log.system_started" => "Bot arrancado.",
         "trading.log.system_stopped" => "Bot detenido.",

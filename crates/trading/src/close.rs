@@ -1,8 +1,7 @@
 //! Close-position cycle (A4): durable claims + market order + OCA limit fallback.
 //!
-//! Pragmatic IBKR-focused port. The full event-driven TWS round-trip is left as
-//! a skeleton; the parts exercised by the available tests (guard order, claims,
-//! replay) are implemented against `Store` + `TradingService`.
+//! The orchestrators: durable claims, 60 s replay, the close-all sweep and the
+//! panic. Each position close runs the real TWS cycle in [`crate::cierre`].
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -12,7 +11,6 @@ use std::time::Instant;
 use zeron_proto::trading::{
     Log, LogLevel, PanicResult, Position, PositionCloseResult, PositionSide, TaskStatus,
 };
-use zeron_tws::client::IbClient;
 
 use crate::claims;
 use crate::service::TradingService;
@@ -23,23 +21,11 @@ use crate::store::Store;
 // In-flight + recent-verdict caches
 // ---------------------------------------------------------------------------
 
-static CIERRES_EN_VUELO: LazyLock<Mutex<HashSet<String>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
-
 static CIERRES_RECIENTES: LazyLock<Mutex<std::collections::HashMap<String, (Instant, PositionCloseResult)>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 fn recentes() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, (Instant, PositionCloseResult)>> {
     CIERRES_RECIENTES.lock().unwrap()
-}
-
-struct InFlightGuard(String);
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        if let Ok(mut set) = CIERRES_EN_VUELO.lock() {
-            set.remove(&self.0);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -66,28 +52,6 @@ fn no_tws(symbol: &str) -> PositionCloseResult {
         ok: false,
         message: format!("TWS not connected for {symbol}."),
         message_key: Some("trading.close.no_tws".into()),
-        message_params: Some(crate::claims::symbol_params(symbol)),
-    }
-}
-
-fn no_size(symbol: &str) -> PositionCloseResult {
-    PositionCloseResult {
-        ok: false,
-        message: format!("No size to close for {symbol}."),
-        message_key: Some("trading.close.no_size".into()),
-        message_params: Some(crate::claims::symbol_params(symbol)),
-    }
-}
-
-fn busy(symbol: &str) -> PositionCloseResult {
-    claims::ocupado(symbol)
-}
-
-fn no_contract(symbol: &str) -> PositionCloseResult {
-    PositionCloseResult {
-        ok: false,
-        message: format!("No contract for {symbol}."),
-        message_key: Some("trading.close.no_contract".into()),
         message_params: Some(crate::claims::symbol_params(symbol)),
     }
 }
@@ -169,48 +133,14 @@ impl CloseRequestId for Option<&str> {
 // cerrar_una
 // ---------------------------------------------------------------------------
 
-pub async fn cerrar_una<P, A, S>(
-    position: P,
-    account: A,
-    client: Option<IbClient>,
-    _store: S,
-) -> PositionCloseResult
+/// One full close cycle of `position` on `account` (the real one lives in
+/// [`crate::cierre`]).
+pub async fn cerrar_una<P, A>(position: P, account: A, tws_service: &TradingService) -> PositionCloseResult
 where
     P: std::ops::Deref<Target = Position>,
     A: AsRef<str>,
-    S: std::ops::Deref<Target = Store>,
 {
-    let position = &*position;
-    let account = account.as_ref();
-    let symbol = position.symbol.clone();
-
-    // 1. TWS connected
-    let client = match client {
-        Some(c) if c.is_connected() => c,
-        _ => return no_tws(&symbol),
-    };
-
-    // 2. size > 0
-    if !(position.size > 0.0) {
-        return no_size(&symbol);
-    }
-
-    // 3/4. contract + in-flight (use symbol as key for MVP)
-    let key = symbol.clone();
-    {
-        let mut set = CIERRES_EN_VUELO.lock().unwrap();
-        if !set.insert(key.clone()) {
-            return busy(&symbol);
-        }
-    }
-    let _guard = InFlightGuard(key);
-
-    // 5-16. Full cycle requires contract resolution + order events; not
-    // available in this pragmatic port. Attempt a market order placement using
-    // a synthetic contract best-effort, then report executed. If anything is
-    // missing, return no_contract.
-    let _ = (client, account);
-    no_contract(&symbol)
+    crate::cierre::cerrar_una(&position, account.as_ref(), tws_service).await
 }
 
 // ---------------------------------------------------------------------------
@@ -289,8 +219,7 @@ where
         pnl_pct: None,
     });
 
-    let client = tws_service.tws_client();
-    let verdict = cerrar_una(&pos, &account_id, client, store).await;
+    let verdict = cerrar_una(&pos, &account_id, tws_service).await;
 
     // Finalize claim.
     let _ = store.with_conn_mut(|conn| {
@@ -425,7 +354,7 @@ where
                             pnl: None,
                             pnl_pct: None,
                         });
-                    let v = cerrar_una(&pos, &account_id, client.clone(), store).await;
+                    let v = cerrar_una(&pos, &account_id, tws_service).await;
                     let _ = store.with_conn_mut(|conn| {
                         claims::finalizar_cierre(conn, &child_id, now_ms(), &v)
                     });
