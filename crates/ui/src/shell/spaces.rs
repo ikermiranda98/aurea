@@ -252,6 +252,28 @@ mod pinned_session_tests {
         })
     }
 
+    /// The drawer's "..." menu builds (it panicked when a row took two
+    /// hover listeners) and Clean Chat asks before it deletes.
+    #[gpui::test]
+    fn the_drawer_menu_builds_and_clean_chat_asks_first(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, window, cx| {
+                shell.open_sidebar_view_menu(window, cx);
+                let theme = Theme::of(cx).clone();
+                let _menu = shell.render_sidebar_view_menu(&theme, cx);
+                assert!(!shell.clean_chat_armed);
+                shell.activate_clean_chat(cx);
+                assert!(shell.clean_chat_armed, "the first click only arms it");
+                let _armed = shell.render_sidebar_view_menu(&theme, cx);
+                shell.close_sidebar_view_menu(cx);
+                assert!(!shell.clean_chat_armed, "closing the menu disarms it");
+            })
+            .unwrap();
+    }
+
     fn remote_pin_state(state: &mut super::AppState, synced: bool, initialized: bool) {
         state.workspace_scope = Some(zeron_proto::WorkspaceScope::Synced);
         state.auth = Some(zeron_proto::AuthState::SignedIn {
@@ -4085,8 +4107,12 @@ impl Shell {
             "Clean Chat"
         };
         let clean = row(0, "sidebar-clean-chat")
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                if *hovered && let Some(menu) = this.sidebar_view_menu.open_mut() {
+            // The row already owns `on_hover` (its hover blend): follow the
+            // pointer with mouse moves instead.
+            .on_mouse_move(cx.listener(|this, _: &gpui::MouseMoveEvent, _, cx| {
+                if let Some(menu) = this.sidebar_view_menu.open_mut()
+                    && menu.active != Some(0)
+                {
                     menu.active = Some(0);
                     cx.notify();
                 }
@@ -4107,8 +4133,12 @@ impl Shell {
                     .child(clean_label),
             );
         let open_settings = row(1, "sidebar-open-settings")
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                if *hovered && let Some(menu) = this.sidebar_view_menu.open_mut() {
+            // The row already owns `on_hover` (its hover blend): follow the
+            // pointer with mouse moves instead.
+            .on_mouse_move(cx.listener(|this, _: &gpui::MouseMoveEvent, _, cx| {
+                if let Some(menu) = this.sidebar_view_menu.open_mut()
+                    && menu.active != Some(1)
+                {
                     menu.active = Some(1);
                     cx.notify();
                 }

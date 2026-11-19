@@ -1246,10 +1246,10 @@ impl AppState {
     /// use the chat id; the new-session canvas is per-space so two projects
     /// don't share one drawer.
     pub fn panel_session_key(&self) -> String {
-        match self.selected_chat.as_deref() {
-            Some(id) if !id.is_empty() => id.to_string(),
-            _ => canvas_panel_key(self.selected_space.as_deref()),
-        }
+        // Aurea: one right pane and terminal for the whole desk, open with or
+        // without a chat (user request). The project-less canvas key opens
+        // its terminals in `~`.
+        canvas_panel_key(None)
     }
 
     /// Optional `OpenTerminal` cwd. Existing chats leave this unset so the

@@ -287,7 +287,7 @@ fn embedded_terminal_and_browser_focus_route_to_right_tabs(cx: &mut TestAppConte
         // No engine in this harness: reserve a real emulator tab without
         // starting a PTY, then use the normal surface activation path.
         shell.right_terminal_panel(cx).update(cx, |panel, cx| {
-            panel.reserve_tab_for_chat("parent".into(), "Test terminal", cx);
+            panel.reserve_tab_for_chat(crate::state::canvas_panel_key(None), "Test terminal", cx);
         });
         shell.add_terminal_surface(cx);
     });
@@ -325,7 +325,7 @@ fn bottom_terminal_keeps_session_navigation(cx: &mut TestAppContext) {
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             shell.terminal_panel(cx).update(cx, |panel, cx| {
-                panel.reserve_tab_for_chat("parent".into(), "Test terminal", cx);
+                panel.reserve_tab_for_chat(crate::state::canvas_panel_key(None), "Test terminal", cx);
             });
             shell.toggle_terminal(window, cx);
         })
@@ -347,32 +347,6 @@ fn bottom_terminal_keeps_session_navigation(cx: &mut TestAppContext) {
     shell.read_with(cx, |shell, cx| {
         assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
     });
-}
-
-#[gpui::test]
-fn each_session_cycles_only_its_own_tabs(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    shell.update(cx, |shell, cx| shell.open_chat("other".into(), cx));
-    cx.update(|window, cx| window.draw(cx).clear());
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.add_subagent_surface("other".into(), "third".into(), "Third".into(), false, cx);
-            shell.activate_right_surface(RightSurface::Subagent(3), window, cx);
-        })
-    });
-    press(cx, true);
-    shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
-        assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(3));
-    });
-    shell.update(cx, |shell, cx| shell.open_chat("parent".into(), cx));
-    cx.update(|window, cx| window.draw(cx).clear());
-    let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-    cx.simulate_click(tab, gpui::Modifiers::default());
-    press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Subagent(2));
-    press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Subagent(1));
 }
 
 /// Settles a transcript selection and seeds the clipboard with a sentinel, so
@@ -450,7 +424,7 @@ fn ctrl_c_in_a_terminal_is_not_taken_by_a_transcript_selection(cx: &mut TestAppC
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             shell.terminal_panel(cx).update(cx, |panel, cx| {
-                panel.reserve_tab_for_chat("parent".into(), "Test terminal", cx);
+                panel.reserve_tab_for_chat(crate::state::canvas_panel_key(None), "Test terminal", cx);
             });
             shell.toggle_terminal(window, cx);
         })

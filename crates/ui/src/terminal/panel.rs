@@ -2459,8 +2459,8 @@ mod tests {
                 state
             });
             let mut panel = TerminalPanel::new(state, cx);
-            let key = panel.reserve_tab_for_chat("chat".into(), "Shell", cx);
-            panel.tab_mut("chat", key).unwrap().emulator.feed(b"$ ");
+            let key = panel.reserve_tab_for_chat(crate::state::canvas_panel_key(None), "Shell", cx);
+            panel.tab_mut(&crate::state::canvas_panel_key(None), key).unwrap().emulator.feed(b"$ ");
             panel.open = true;
             panel
         });
@@ -2555,8 +2555,8 @@ mod tests {
             });
             let mut panel = TerminalPanel::new(state, cx);
             for title in ["First", "Second"] {
-                let key = panel.reserve_tab_for_chat("chat".into(), title, cx);
-                let tab = panel.tab_mut("chat", key).unwrap();
+                let key = panel.reserve_tab_for_chat(crate::state::canvas_panel_key(None), title, cx);
+                let tab = panel.tab_mut(&crate::state::canvas_panel_key(None), key).unwrap();
                 for _ in 0..200 {
                     tab.emulator.feed(b"scrollback\r\n");
                 }

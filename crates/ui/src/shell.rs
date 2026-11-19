@@ -3238,10 +3238,10 @@ impl Shell {
             self.last_appshot_chat = Some(selected.clone());
         }
         if selected != self.active_chat {
-            if !self.active_chat.is_empty() {
+            {
                 let expanded = self.right_pane_expanded;
-                self.panels
-                    .update(&self.active_chat, |panels| panels.right_expanded = expanded);
+                let key = self.panel_key(cx);
+                self.panels.update(&key, |panels| panels.right_expanded = expanded);
             }
             // The session card lands with the destination's panels rather
             // than fading over its transcript. To or from the new-chat
@@ -3269,16 +3269,10 @@ impl Shell {
             // hidden (user request) — a previously opened canvas drawer must
             // not pop open on a fresh canvas. The source chat's flag stays in
             // the map, so returning restores it.
-            let panels = if self.active_chat.is_empty() {
-                self.panels.update(&key, |panels| {
-                    panels.terminal_open = false;
-                });
-                self.panels.get(&key)
-            } else {
-                self.panels.get(&key)
-            };
-            self.right_pane_expanded =
-                !self.active_chat.is_empty() && panels.changes_open && panels.right_expanded;
+            // One set of panels for the desk: a chat switch (or Clean Chat)
+            // leaves the right pane and terminal as they are.
+            let panels = self.panels.get(&key);
+            self.right_pane_expanded = panels.changes_open && panels.right_expanded;
             if let Some(panel) = self.terminal.clone() {
                 panel.update(cx, |panel, cx| panel.set_open(panels.terminal_open, cx));
             }
@@ -3329,11 +3323,10 @@ impl Shell {
     /// SPACE — one shared "" key made a canvas toggle read as global state
     /// (user report).
     fn panel_key(&self, cx: &App) -> String {
-        if self.active_chat.is_empty() {
-            crate::state::canvas_panel_key(self.state.read(cx).selected_space.as_deref())
-        } else {
-            self.active_chat.clone()
-        }
+        // Aurea keeps one set of panels for the desk (see
+        // `AppState::panel_session_key`): the right pane and the terminal
+        // stay put across chats and Clean Chat.
+        self.state.read(cx).panel_session_key()
     }
 
     /// Whether the right pane shows. NOT gated on git any more: the pane is
@@ -3342,7 +3335,7 @@ impl Shell {
     /// new-session canvas, where the titlebar carries no toggle to close it
     /// again (an earlier user request).
     fn right_pane_open(&self, cx: &App) -> bool {
-        !self.active_chat.is_empty() && self.panels.get(&self.panel_key(cx)).changes_open
+        self.panels.get(&self.panel_key(cx)).changes_open
     }
 
     /// Open and on screen: the window fit is not hiding it.
@@ -3437,9 +3430,6 @@ impl Shell {
     /// An open pane the window fit hides is brought forward instead, so the
     /// requested content is reachable.
     fn set_surfaces_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.active_chat.is_empty() {
-            return;
-        }
         if self.right_pane_open(cx) == open {
             if open {
                 self.promote_hidden_panel(AuxiliaryPanel::Right, cx);
@@ -3764,9 +3754,6 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.active_chat.is_empty() {
-            return;
-        }
         self.sync_browser_profile(cx);
         let key = self.panel_key(cx);
         let remote = {
@@ -3780,7 +3767,9 @@ impl Shell {
         let browser = cx.new(|cx| {
             crate::browser::BrowserSurface::new(self.browser_context.clone(), remote, window, cx)
         });
-        if let Some(handle) = self.state.read(cx).engine().cloned() {
+        if let Some(handle) = self.state.read(cx).engine().cloned()
+            && !self.active_chat.is_empty()
+        {
             let chat_id = self.active_chat.clone();
             browser.update(cx, |browser, cx| {
                 browser.watch_previews(handle, chat_id, cx)
@@ -12470,7 +12459,7 @@ impl Render for Shell {
                 WorkspaceCommand::New => self.open_new_session(None, cx),
                 WorkspaceCommand::Resume => self.toggle_command_palette(window, cx),
                 WorkspaceCommand::Settings => self.open_last_settings(cx),
-                WorkspaceCommand::Terminal if !self.active_chat.is_empty() => {
+                WorkspaceCommand::Terminal => {
                     self.add_terminal_surface(cx)
                 }
                 WorkspaceCommand::Rename if !self.active_chat.is_empty() => {
@@ -12937,7 +12926,7 @@ impl Render for Shell {
                 let main_target_width = self.sidebar_content_width();
                 self.composer_dock
                     .borrow_mut()
-                    .observe_conversation(&self.panel_key(cx));
+                    .observe_conversation(&self.active_chat.clone());
                 let panel_handoff = self.composer_dock.borrow_mut().observe_column(
                     self.state.read(cx).selected_chat.is_some(),
                     (0.0, main_target_width),
@@ -15932,84 +15921,6 @@ mod exit_regressions {
                 })
                 .unwrap();
         }
-    }
-
-    #[gpui::test]
-    fn browser_tabs_keep_session_ownership_and_release_on_close(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        let weak = window
-            .update(cx, |shell, window, cx| {
-                // A fresh-session canvas never accumulates ownerless tabs.
-                shell.add_browser_surface(None, window, cx);
-                assert!(shell.browsers.is_empty());
-                shell.active_chat = "first-session".into();
-                shell.add_browser_surface(None, window, cx);
-                let first = shell.browser_seq;
-                let weak = shell.browsers[&first].downgrade();
-                shell.add_browser_surface(None, window, cx);
-                let second = shell.browser_seq;
-                assert_ne!(first, second);
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(second)
-                );
-                shell.active_chat = "second-session".into();
-                assert!(shell.right_surface_rows(cx).is_empty());
-                shell.add_browser_surface(None, window, cx);
-                let other = shell.browser_seq;
-                shell.active_chat = "first-session".into();
-                assert_eq!(shell.right_surface_rows(cx).len(), 2);
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(second)
-                );
-                // Closing a background tab preserves the selected address input.
-                let focus = window.focused(cx);
-                shell.close_right_surface(RightSurface::Browser(first), window, cx);
-                assert_eq!(window.focused(cx), focus);
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(second)
-                );
-                shell.close_right_surface(RightSurface::Browser(second), window, cx);
-                assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
-                shell.active_chat = "second-session".into();
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(other)
-                );
-                shell.close_right_surface(RightSurface::Browser(other), window, cx);
-                assert!(shell.browsers.is_empty());
-                assert!(shell.browser_subs.is_empty());
-                weak
-            })
-            .unwrap();
-        cx.run_until_parked();
-        assert!(
-            weak.upgrade().is_none(),
-            "closed browser retained by callbacks"
-        );
     }
 
     #[gpui::test]

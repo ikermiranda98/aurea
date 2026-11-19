@@ -174,8 +174,9 @@ impl Shell {
                 sidebar_limit: self.settings.sidebar_width,
             };
         }
-        let panels = self.panels.get(&self.active_chat);
-        let on_chat = !self.active_chat.is_empty();
+        let key = crate::state::canvas_panel_key(None);
+        let panels = self.panels.get(&key);
+        let on_chat = true;
         // A closing column keeps its slot while it still paints: one the fit
         // had already hidden closes from zero and claims nothing.
         let present = |open: bool, tween: Option<WidthTween>| {
@@ -243,7 +244,7 @@ impl Shell {
         }
         if let Some((previous, painted)) = previous.filter(|_| !direct) {
             // Closing columns count too: the fit may hide one mid-close.
-            let panels = self.panels.get(&self.active_chat);
+            let panels = self.panels.get(&crate::state::canvas_panel_key(None));
             let open = [
                 !self.settings.sidebar_collapsed || self.tween_active(self.sidebar_tween),
                 panels.changes_open || self.tween_active(self.right_tween),
@@ -359,7 +360,7 @@ impl Shell {
     /// content columns absorb every change. The share persists with the next
     /// settings save, like a drag. Returns whether the surface host took one.
     fn split_panel_widths(&mut self, cx: &App) -> bool {
-        if !matches!(self.route, Route::Chat) || self.active_chat.is_empty() {
+        if !matches!(self.route, Route::Chat) {
             return false;
         }
         // Split for where the columns will rest, not for a slot a closing

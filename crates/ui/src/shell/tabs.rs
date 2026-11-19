@@ -325,8 +325,9 @@ impl Shell {
         // click. Closed, it is just the stable open/close toggle. Hidden on
         // the new-session canvas (user request) — nothing to diff yet.
         let fit = self.horizontal_fit();
-        let right_pane_visible = !on_canvas
-            && ((fit.right && (self.right_pane_open(cx) || self.tween_active(self.right_tween)))
+        // Aurea: the pane is the desk's, chat or not (user request).
+        let _ = on_canvas;
+        let right_pane_visible = ((fit.right && (self.right_pane_open(cx) || self.tween_active(self.right_tween)))
                 || self.fit_exit_width(1).is_some());
         let takeover = right_pane_visible
             && (self.right_pane_expanded || self.tween_active(self.main_takeover_tween));
@@ -415,9 +416,9 @@ impl Shell {
             content_width,
         } = self.titlebar_trailing_layout(on_canvas, cx);
 
-        let trailing: Option<gpui::AnyElement> = if on_canvas {
-            None
-        } else {
+        // The right pane's controls stay in the bar with or without a chat:
+        // the terminal and browser are the desk's (user request).
+        let trailing: Option<gpui::AnyElement> = {
             let mut controls = div()
                 .id("right-titlebar-controls")
                 .debug_selector(|| "right-titlebar-controls".into())
