@@ -25,7 +25,6 @@ pub mod billing;
 pub mod cloud;
 pub mod composer;
 pub mod devices;
-pub mod files;
 pub mod harnesses;
 pub mod notifications;
 pub mod search;

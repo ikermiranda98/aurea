@@ -137,7 +137,6 @@ impl Shell {
             || self.user_menu.get().is_some()
             || self.spaces_menu.get().is_some()
             || self.right_plus.get().is_some()
-            || !self.pending_file_closes.is_empty()
             || self.pending_exit.is_some()
     }
 

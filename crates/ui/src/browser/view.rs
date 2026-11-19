@@ -15,7 +15,7 @@ fn button(
 ) -> gpui::Stateful<gpui::Div> {
     // Match Files/History chrome, including focus-preserving mouse-down and
     // tooltips. Disabled controls have neither a pointer cursor nor a handler.
-    crate::files::toolbar_button(id, label)
+    toolbar_button(id, label)
         .when(!enabled, |el| el.cursor_default().opacity(0.35))
         .child(
             icons::icon(glyph)
@@ -665,7 +665,7 @@ impl Render for BrowserSurface {
         // Annotation picks an element on the page into the composer.
         let annotating = self.annotating();
         let can_annotate = self.can_annotate();
-        let annotate = crate::files::toolbar_button(
+        let annotate = toolbar_button(
             "browser-annotate",
             if annotating {
                 "Stop annotating"
@@ -876,4 +876,27 @@ impl Render for BrowserSurface {
                 .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_faint)
                 .child(icons::icon(icons::ARROW_UP_RIGHT).size(px(11.0))).child("Opens in your default browser")))
     }
+}
+
+/// A square chrome button in the browser toolbar (the shared surface size),
+/// with a label tooltip; the mouse-down keeps focus where it was.
+fn toolbar_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .size(px(crate::surface_chrome::CONTROL_SIZE))
+        .flex_none()
+        .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .occlude()
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+            window.prevent_default()
+        })
+        .hover(|style| style.bg(crate::theme::wash(0.14)))
+        .tooltip(crate::settings::widgets::text_tooltip(label))
+        .tooltip_show_delay(std::time::Duration::from_millis(350))
 }

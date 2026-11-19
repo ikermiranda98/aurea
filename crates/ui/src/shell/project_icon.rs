@@ -1,6 +1,5 @@
 //! Repository artwork is fetched once per project/connection, off the render thread.
 use super::*;
-use crate::files::client::{FilesRequestContext, WorkspaceFilesClient};
 use crate::image_media::{MediaImage, decode_project_icon, release_media};
 
 pub(super) const ICON_PATHS: &[&str] = &[
@@ -127,73 +126,6 @@ pub(super) struct ProjectIcon {
     media: Option<MediaImage>,
     refreshed: std::time::Instant,
     _task: Task<()>,
-}
-
-impl ProjectIcon {
-    fn new(
-        name: String,
-        seed: String,
-        context: FilesRequestContext,
-        engine: Option<crate::state::EngineHandle>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        cx.on_release(|this, cx| release_media(this.media.take(), cx))
-            .detach();
-        let task = cx.spawn(async move |this, cx| {
-            let executor = cx.background_executor().clone();
-            let load = async {
-                if context.target_device_id.is_none() {
-                    let root = std::path::PathBuf::from(context.cwd);
-                    return executor.spawn(async move { load_local_icon(&root) }).await;
-                }
-                let client = WorkspaceFilesClient::new(engine?, context.clone());
-                for path in ICON_PATHS {
-                    // This also resolves the current checkout identity on the owning host.
-                    let file = match client
-                        .read_file(zeron_proto::ReadWorkspaceFileRequest {
-                            target: context.target.clone(),
-                            path: (*path).into(),
-                        })
-                        .await
-                    {
-                        Ok(file) => file,
-                        Err(error) if error.retryable() => return None,
-                        Err(_) => continue,
-                    };
-                    let (mime, bytes) = client
-                        .read_image((*path).into(), file.checkout_id)
-                        .await
-                        .ok()?;
-                    return executor
-                        .spawn(async move { decode_project_icon(&mime, bytes).ok() })
-                        .await;
-                }
-                None
-            };
-            let media = match futures::future::select(
-                Box::pin(load),
-                Box::pin(executor.timer(Duration::from_secs(30))),
-            )
-            .await
-            {
-                futures::future::Either::Left((media, _)) => {
-                    media.map(|media| media.for_view((16.0, 16.0), 2.0, 4096))
-                }
-                _ => None,
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.media = media;
-                cx.notify();
-            });
-        });
-        Self {
-            name,
-            seed,
-            media: None,
-            refreshed: std::time::Instant::now(),
-            _task: task,
-        }
-    }
 }
 
 impl Render for ProjectIcon {
@@ -367,53 +299,9 @@ impl ProjectIcons {
         let seed = representative
             .map(|space| space.path.clone())
             .unwrap_or_else(|| "home".into());
-        let artwork = space.map(|space| {
-            state
-                .project_members(space)
-                .into_iter()
-                .find(|member| state.local_device_id.as_deref() == Some(&member.device_id))
-                .unwrap_or_else(|| state.representative_space(space))
-        });
-        let context = artwork.map(|space| FilesRequestContext {
-            target: zeron_proto::WorkspaceTarget {
-                chat_id: None,
-                space_id: Some(space.id.clone()),
-                checkout_path: None,
-            },
-            target_device_id: (state.local_device_id.as_deref() != Some(&space.device_id))
-                .then(|| space.device_id.clone()),
-            cwd: space.path.clone(),
-            checkout_id: space.checkout_id.clone(),
-        });
-        let Some(context) = context else {
-            return monogram(&name, &seed, selected, Theme::of(cx));
-        };
-        let key = format!(
-            "{:?}:{:?}:{}:{:?}:{}",
-            profile, context.target_device_id, context.cwd, context.checkout_id, name
-        );
-        let engine = state.engine().cloned();
-        // Don't cache a remote miss before a connection exists.
-        if context.target_device_id.is_some() && engine.is_none() {
-            return monogram(&name, &seed, selected, Theme::of(cx));
-        }
-        let mut cache = self.entries.borrow_mut();
-        cache.retain(|_, entity| entity.read(cx).refreshed.elapsed() < Duration::from_secs(300));
-        let entity = cache
-            .entry(key)
-            .or_insert_with(|| {
-                let entity =
-                    cx.new(|cx| ProjectIcon::new(name.clone(), seed.clone(), context, engine, cx));
-                // The owner draws the selected monogram and redraws when artwork lands.
-                cx.observe(&entity, |_, _, cx| cx.notify()).detach();
-                entity
-            })
-            .clone();
-        drop(cache);
-        if entity.read(cx).media.is_none() {
-            return monogram(&name, &seed, selected, Theme::of(cx));
-        }
-        entity.into_any_element()
+        // Aurea has no workspace files to read artwork from: the monogram.
+        let _ = (profile, &self.entries);
+        monogram(&name, &seed, selected, Theme::of(cx))
     }
 }
 

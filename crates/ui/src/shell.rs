@@ -29,9 +29,6 @@ use zeron_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent, DiscardWorkingTreeRequest};
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
-use crate::files::{
-    FileColumn, FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag,
-};
 use crate::icons::{self, icon};
 use crate::loaders;
 use crate::motion::{
@@ -45,7 +42,6 @@ use crate::settings::archived::ArchivedPage;
 use crate::settings::billing::BillingPage;
 use crate::settings::cloud::CloudPage;
 use crate::settings::devices::DevicesPage;
-use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
@@ -69,7 +65,6 @@ mod chat_dropzone;
 #[cfg(test)]
 mod chat_rename_tests;
 mod command_palette;
-mod file_mutations;
 mod files_panel;
 mod harness_updates;
 mod navigation_focus;
@@ -87,7 +82,6 @@ mod settings_search;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
-mod search_warm;
 pub(crate) mod spaces;
 mod thread_search;
 mod trading_gate;
@@ -1257,7 +1251,6 @@ struct RightTabDrag {
     panel_key: String,
     from: usize,
     title: SharedString,
-    workspace_path: Option<WorkspacePathDrag>,
 }
 
 /// Live drag-over state for the surface-tab strip — the terminal drawer's
@@ -2132,27 +2125,7 @@ pub struct Shell {
     right_plus: popover::Popup<()>,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
-    /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
-    /// scope/base pick and diff watch (multiple diff panels, user request).
-    diffs: std::collections::HashMap<u64, Entity<Changes>>,
-    /// One workspace browser per chat/panel key. Dropping the entity closes
-    /// its file watcher and every in-flight workspace request.
-    files: std::collections::HashMap<String, Entity<FilesSurface>>,
-    files_subs: std::collections::HashMap<String, Subscription>,
-    /// One independent editor per opened workspace file. IDs are global
-    /// while the lookup key keeps a file tab scoped to its chat panel.
-    file_surfaces: std::collections::HashMap<u64, Entity<FilesSurface>>,
-    file_surface_paths: std::collections::HashMap<u64, String>,
-    /// Open editors by (pane, owning chat, path): a side chat's file links
-    /// open editors bound to the side chat, beside the main chat's own.
-    file_surface_keys: std::collections::HashMap<(String, String, String), u64>,
-    file_surface_subs: std::collections::HashMap<u64, Subscription>,
-    file_surface_seq: u64,
-    pending_file_closes: std::collections::HashSet<RightSurface>,
     pending_exit: Option<PendingExit>,
-    /// Event hookups for [`Self::diffs`] (History rows opening commit tabs).
-    diff_subs: std::collections::HashMap<u64, Subscription>,
-    diff_seq: u64,
     /// Subagent transcript surfaces by id — each tab a read-only
     /// [`Transcript`] pinned to its subagent doc.
     subagent_tabs: std::collections::HashMap<u64, SubagentTab>,
@@ -2196,14 +2169,12 @@ pub struct Shell {
     billing_page: Option<Entity<BillingPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
-    files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
-    files_settings_sub: Option<Subscription>,
     appearance_settings_sub: Option<Subscription>,
     /// Session-row context menu, including the Copy submenu.
     chat_menu: popover::Popup<ChatMenuState>,
@@ -2237,10 +2208,6 @@ pub struct Shell {
     /// The New project palette's collapsed-breadcrumbs (`…`) menu.
     project_crumb_menu: popover::Popup<()>,
     command_palette: Option<command_palette::CommandPalette>,
-    /// The focus whose workspace search index was last warmed (see `search_warm`).
-    search_warm: Option<search_warm::SearchWarm>,
-    /// Per chat, the files opened in editor tabs, most recent first.
-    recent_files: std::collections::HashMap<String, std::collections::VecDeque<String>>,
     pending_workspace_command: Option<crate::composer::WorkspaceCommand>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
@@ -2683,18 +2650,7 @@ impl Shell {
             right_terminal: None,
             right_plus: popover::Popup::default(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
-            diffs: std::collections::HashMap::new(),
-            files: std::collections::HashMap::new(),
-            files_subs: std::collections::HashMap::new(),
-            file_surfaces: std::collections::HashMap::new(),
-            file_surface_paths: std::collections::HashMap::new(),
-            file_surface_keys: std::collections::HashMap::new(),
-            file_surface_subs: std::collections::HashMap::new(),
-            file_surface_seq: 0,
-            pending_file_closes: std::collections::HashSet::new(),
             pending_exit: None,
-            diff_subs: std::collections::HashMap::new(),
-            diff_seq: 0,
             subagent_tabs: std::collections::HashMap::new(),
             subagent_seq: 0,
             side_chats: std::collections::HashMap::new(),
@@ -2727,14 +2683,12 @@ impl Shell {
             billing_page: None,
             archived_page: None,
             appearance_page: None,
-            files_settings_page: None,
             notifications_page: None,
             shortcuts_page: None,
             accounts_page: None,
             harnesses_page: None,
             shortcuts_sub: None,
             notifications_sub: None,
-            files_settings_sub: None,
             appearance_settings_sub: None,
             chat_menu: popover::Popup::default(),
             chat_copy_intent: Default::default(),
@@ -2756,8 +2710,6 @@ impl Shell {
             add_space: None,
             project_crumb_menu: popover::Popup::default(),
             command_palette: None,
-            search_warm: None,
-            recent_files: std::collections::HashMap::new(),
             pending_workspace_command: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),
@@ -2944,9 +2896,7 @@ impl Shell {
     // ---- splash ----
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
-        self.prune_file_explorers(cx);
         self.refresh_harness_update_watch(cx);
-        self.sync_search_warm(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
         }
@@ -3304,7 +3254,6 @@ impl Shell {
             self.last_appshot_chat = Some(selected.clone());
         }
         if selected != self.active_chat {
-            self.suspend_file_images(cx);
             if !self.active_chat.is_empty() {
                 let expanded = self.right_pane_expanded;
                 self.panels
@@ -3618,41 +3567,6 @@ impl Shell {
             .collect()
     }
 
-    /// Attach a workspace path only while the surface it came from still
-    /// shows this chat's workspace; a drag outliving a session switch is dropped.
-    fn attach_workspace_drag(
-        &mut self,
-        payload: &WorkspacePathDrag,
-        composer: &Entity<Composer>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(origin) = &payload.origin else {
-            return;
-        };
-        let current = crate::files::client::FilesRequestContext::for_chat(
-            self.state.read(cx),
-            &self.panel_key(cx),
-        );
-        if current.as_ref() != Some(&origin.context) || !matches!(self.route, Route::Chat) {
-            return;
-        }
-        let valid = self
-            .files
-            .values()
-            .chain(self.file_surfaces.values())
-            .any(|files| {
-                files.entity_id() == origin.surface_id && files.read(cx).accepts_origin(origin, cx)
-            });
-        if valid {
-            composer.update(cx, |composer, cx| {
-                for item in payload.items() {
-                    composer.add_workspace_path(&item.path, item.is_directory, window, cx)
-                }
-            });
-        }
-    }
-
     /// Drag-reorder a surface tab within this chat's strip.
     fn reorder_right_tabs(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         let key = self.panel_key(cx);
@@ -3710,12 +3624,6 @@ impl Shell {
         }
     }
 
-    fn suspend_file_images(&mut self, cx: &mut Context<Self>) {
-        for files in self.files.values().chain(self.file_surfaces.values()) {
-            files.update(cx, |files, cx| files.suspend_images(cx));
-        }
-    }
-
     /// Release image previews once the surface host stops painting: after
     /// its close mask lands, while the window fit hides it, or off the chat
     /// route. Once per hide, so a quick reversal never unloads the frame.
@@ -3727,7 +3635,6 @@ impl Shell {
         if painting {
             self.right_images_suspended = false;
         } else if !self.right_images_suspended {
-            self.suspend_file_images(cx);
             self.right_images_suspended = true;
         }
     }
@@ -3741,7 +3648,6 @@ impl Shell {
                 .update(cx, |state, cx| state.focus_subagent_sync(&doc_id, cx));
         }
         if self.resolved_right_active(cx) != surface {
-            self.suspend_file_images(cx);
         }
         let key = self.panel_key(cx);
         self.panels.update(&key, |p| p.right_active = surface);
@@ -3768,65 +3674,6 @@ impl Shell {
             RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
             RightSurface::Picker => {}
         }
-        cx.notify();
-    }
-
-    fn set_files_word_wrap(
-        &mut self,
-        word_wrap: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.settings.files_word_wrap = word_wrap;
-        if let Some(page) = self.files_settings_page.clone() {
-            page.update(cx, |page, cx| page.set_word_wrap(word_wrap, cx));
-        }
-        let surfaces = self.file_surfaces.values().cloned().collect::<Vec<_>>();
-        for surface in surfaces {
-            surface.update(cx, |surface, cx| {
-                surface.set_word_wrap(word_wrap, window, cx)
-            });
-        }
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
-    /// Push a new code size into every open file surface. Called by the
-    /// Appearance settings page, which owns the control. The typography
-    /// global is the canonical store and persists on its own; this only
-    /// propagates the change to already-open surfaces.
-    pub(crate) fn set_code_font_size(&mut self, code_font_size: f32, cx: &mut Context<Self>) {
-        let surfaces = self
-            .files
-            .values()
-            .chain(self.file_surfaces.values())
-            .cloned()
-            .collect::<Vec<_>>();
-        for surface in surfaces {
-            surface.update(cx, |surface, cx| {
-                surface.set_editor_font_size(code_font_size, cx)
-            });
-        }
-        cx.notify();
-    }
-
-    fn set_files_show_all(&mut self, show_all_files: bool, cx: &mut Context<Self>) {
-        self.settings.files_show_all = show_all_files;
-        if let Some(page) = self.files_settings_page.clone() {
-            page.update(cx, |page, cx| page.set_show_all_files(show_all_files, cx));
-        }
-        let surfaces = self
-            .file_surfaces
-            .values()
-            .chain(self.files.values())
-            .cloned()
-            .collect::<Vec<_>>();
-        for surface in surfaces {
-            surface.update(cx, |surface, cx| {
-                surface.set_show_all_files(show_all_files, cx)
-            });
-        }
-        self.schedule_save(cx);
         cx.notify();
     }
 
@@ -4956,10 +4803,10 @@ impl Shell {
             let page = cx.new(AppearancePage::new);
             self.appearance_settings_sub = Some(cx.subscribe(
                 &page,
+                // The code size lives in the typography global; with no file
+                // editors there is nothing else to push it into.
                 |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
-                    AppearanceSettingsEvent::CodeFontSizeChanged(size) => {
-                        this.set_code_font_size(size, cx);
-                    }
+                    AppearanceSettingsEvent::CodeFontSizeChanged(_) => cx.notify(),
                 },
             ));
             self.appearance_page = Some(page);
@@ -5160,7 +5007,6 @@ impl Shell {
     /// points at `entry` (back/forward moved the index); the selection change
     /// this triggers dedups against `current()` in [`Self::on_state_changed`].
     fn apply_nav(&mut self, entry: NavEntry, cx: &mut Context<Self>) {
-        self.suspend_file_images(cx);
         match entry {
             NavEntry::Chat(chat_id) => {
                 self.set_route(Route::Chat, cx);
@@ -5251,60 +5097,8 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
-            SettingsSection::Files => {
-                if self.files_settings_page.is_none() {
-                    let page = cx.new(|cx| {
-                        FilesSettingsPage::new(
-                            self.settings.files_autosave_enabled,
-                            self.settings.files_autosave_delay_ms,
-                            self.settings.files_word_wrap,
-                            self.settings.files_show_all,
-                            cx,
-                        )
-                    });
-                    self.files_settings_sub = Some(cx.subscribe_in(
-                        &page,
-                        window,
-                        |this: &mut Shell, _, event: &FilesSettingsEvent, window, cx| match *event {
-                            FilesSettingsEvent::AutosaveChanged(autosave_enabled) => {
-                                this.settings.files_autosave_enabled = autosave_enabled;
-                                for surface in
-                                    this.files.values().chain(this.file_surfaces.values())
-                                {
-                                    surface.update(cx, |surface, cx| {
-                                        surface.set_autosave_enabled(autosave_enabled, cx)
-                                    });
-                                }
-                                this.schedule_save(cx);
-                                cx.notify();
-                            }
-                            FilesSettingsEvent::AutosaveDelayChanged(autosave_delay_ms) => {
-                                this.settings.files_autosave_delay_ms = autosave_delay_ms;
-                                for surface in
-                                    this.files.values().chain(this.file_surfaces.values())
-                                {
-                                    surface.update(cx, |surface, cx| {
-                                        surface.set_autosave_delay_ms(autosave_delay_ms, cx)
-                                    });
-                                }
-                                this.schedule_save(cx);
-                                cx.notify();
-                            }
-                            FilesSettingsEvent::WordWrapChanged(word_wrap) => {
-                                this.set_files_word_wrap(word_wrap, window, cx);
-                            }
-                            FilesSettingsEvent::ShowAllFilesChanged(show_all_files) => {
-                                this.set_files_show_all(show_all_files, cx);
-                            }
-                        },
-                    ));
-                    self.files_settings_page = Some(page);
-                }
-                match &self.files_settings_page {
-                    Some(page) => page.clone().into_any_element(),
-                    None => Empty.into_any_element(),
-                }
-            }
+            // The file editor's settings left with the editor.
+            SettingsSection::Files => Empty.into_any_element(),
             SettingsSection::Notifications => {
                 if self.notifications_page.is_none() {
                     let page = cx.new(|cx| {
@@ -11996,7 +11790,6 @@ impl Shell {
                 _ => false,
             };
             let ghost_title = title.clone();
-            let workspace_path = None;
             let accessible_name = detail.as_ref().unwrap_or(&title);
             let accessible_label = if dirty {
                 format!("{accessible_name}, unsaved changes")
@@ -12086,7 +11879,6 @@ impl Shell {
                     panel_key: self.panel_key(cx),
                     from: ix,
                     title: ghost_title,
-                    workspace_path,
                 },
                 |payload, _point, _, cx| {
                     let title = payload.title.clone();
@@ -12806,18 +12598,6 @@ impl Render for Shell {
         let wake = shell_clock_wake(self.state.read(cx), now);
         self.clock
             .arm(wake, now, |shell: &mut Shell| &mut shell.clock, cx);
-        let active_files_key = self.panel_key(cx);
-        let hidden_explorers = self
-            .files
-            .iter()
-            .filter(|(key, _)| {
-                key.as_str() != active_files_key || !matches!(self.route, Route::Chat)
-            })
-            .map(|(_, files)| files.clone())
-            .collect::<Vec<_>>();
-        for files in hidden_explorers {
-            files.update(cx, |files, cx| files.suspend_tree_interactions(cx));
-        }
         settings::wallpaper::preload(cx);
         // Settings → Cloud lives only while shown: dropping it cancels a
         // GitHub sign-in poll and its slow status re-checks.
@@ -13103,7 +12883,6 @@ impl Render for Shell {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
             .on_drag_move(cx.listener(Self::on_right_pane_drag))
-            .on_drag_move(cx.listener(Self::on_files_panel_drag))
             .on_drag_move(cx.listener(Self::on_terminal_drag))
             // The panel shortcuts are chat-scoped chrome: in Settings they are
             // no-ops (zeron __root.tsx gates the hotkey on `!isSettings`, and
@@ -13142,13 +12921,6 @@ impl Render for Shell {
                         // Restore a mounted target so the next shortcut can reopen it.
                         window.focus(&this.composer.focus_handle(cx), cx);
                     }
-                }
-            }))
-            // The explorer's own toggle (the titlebar tree button): docks or
-            // undocks the explorer portion without touching the surface host.
-            .on_action(cx.listener(|this, _: &ToggleFiles, window, cx| {
-                if matches!(this.route, Route::Chat) {
-                    this.toggle_files_panel(window, cx);
                 }
             }))
             // Chat-scoped like the panel toggles: Settings has no current
@@ -13393,7 +13165,6 @@ impl Render for Shell {
                 } else {
                     Empty.into_any_element()
                 };
-                let files_panel = self.render_files_panel(window, cx);
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
                 let border_color = Theme::of(cx).border;
@@ -13493,8 +13264,7 @@ impl Render for Shell {
                                             .h_full()
                                             .flex()
                                             .flex_row()
-                                            .child(right)
-                                            .child(files_panel),
+                                            .child(right),
                                     )
                                     .child(right_seam),
                             ),

@@ -88,7 +88,9 @@ impl Panel {
     fn toggle(self, shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) {
         match self {
             Self::Sidebar => shell.toggle_sidebar(cx),
-            Self::Files => shell.toggle_files_panel(window, cx),
+            Self::Files => {
+                let _ = window;
+            }
             Self::Right => shell.toggle_right_pane(cx),
         }
     }

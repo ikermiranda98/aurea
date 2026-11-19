@@ -1,32 +1,14 @@
-//! Global search over actions, conversations and the focused chat's
-//! workspace, using the sidebar's conversation rows. Results are grouped in
-//! sections; tabs narrow them to one kind.
+//! Global search over actions and conversations, using the sidebar's
+//! conversation rows. Results are grouped in sections; tabs narrow them to
+//! one kind. (Aurea has no workspace files to search.)
 use super::*;
 use crate::appearance::AppearanceMode;
-use crate::files::client::{FilesClientError, FilesRequestContext, WorkspaceFilesClient};
-use zeron_proto::{
-    SearchWorkspaceContentRequest, SearchWorkspaceFilesRequest, WorkspaceContentMatch,
-    WorkspaceEntryKind, WorkspaceFileSearchMatch, WorkspaceSearchIndexState, WorkspaceTarget,
-};
 
 /// Key context of the palette card: its mod-1…4 tab bindings live here.
 pub(super) const KEY_CONTEXT: &str = "CommandPalette";
 /// Rows a section shows under All; its own tab shows the long limit.
 const ALL_TAB_LIMIT: usize = 5;
 const THREADS_TAB_LIMIT: usize = 50;
-const FILES_TAB_LIMIT: usize = 50;
-const CONTENT_TAB_LIMIT: usize = 100;
-const CONTENT_MATCHES_PER_FILE: usize = 3;
-/// Shorter workspace queries match nearly everything; they are not sent.
-const MIN_WORKSPACE_QUERY_CHARS: usize = 2;
-/// Content search waits for typing to pause; name search does not.
-const CONTENT_DEBOUNCE: Duration = Duration::from_millis(80);
-/// Refresh partial results until the host finishes its initial scan,
-/// doubling the wait up to [`CONTENT_INDEX_RETRY_MAX`]: without a content
-/// index every refresh is a full grep, and a large folder can scan for long.
-const CONTENT_INDEX_RETRY: Duration = Duration::from_millis(500);
-const CONTENT_INDEX_RETRY_MAX: Duration = Duration::from_secs(2);
-const FILE_INDEX_RETRY: Duration = Duration::from_millis(500);
 const RESULTS_FADE_BAND: f32 = 18.0;
 
 pub(super) struct CommandPalette {
@@ -43,132 +25,9 @@ pub(super) struct CommandPalette {
     // while this input is still absent from the dispatch tree.
     focus_pending: bool,
     scroll: gpui::ScrollHandle,
-    /// File-name matches in the focused chat's workspace.
-    files: WorkspaceQuery<Vec<WorkspaceFileSearchMatch>>,
-    /// The workspace whose index a probe found ready during this palette
-    /// session: name searches there skip the readiness probe, saving a round
-    /// trip per keystroke on remote hosts.
-    files_ready: Option<WorkspaceTarget>,
-    /// Content matches in the focused chat's workspace.
-    content: WorkspaceQuery<Vec<WorkspaceContentMatch>>,
     _search_events: Subscription,
 }
 
-/// An asynchronous workspace section's request state. Rows from the last
-/// answer stay up while a newer query runs.
-#[derive(Default)]
-struct WorkspaceQuery<T> {
-    /// Bumped per request; an answer to an older one is dropped.
-    generation: u64,
-    loading: bool,
-    /// The host's index was still scanning at the last answer.
-    indexing: bool,
-    error: Option<SharedString>,
-    results: T,
-    task: Option<Task<()>>,
-}
-
-impl<T: Default> WorkspaceQuery<T> {
-    /// Forget everything, cancelling any request in flight.
-    fn clear(&mut self) {
-        self.generation += 1;
-        *self = Self {
-            generation: self.generation,
-            ..Self::default()
-        };
-    }
-
-    /// Start a request; the returned generation identifies its answer.
-    fn begin(&mut self) -> u64 {
-        self.generation += 1;
-        self.loading = true;
-        self.generation
-    }
-
-    /// [`Self::status`] without failures: a default list that a host can't
-    /// serve (one that predates empty-query search) quietly shows nothing.
-    fn progress(&self) -> Option<SharedString> {
-        if self.indexing {
-            Some("Indexing…".into())
-        } else if self.loading {
-            Some("Searching…".into())
-        } else {
-            None
-        }
-    }
-
-    /// Header status while loading, while the host indexes, or after a
-    /// failure.
-    fn status(&self) -> Option<SharedString> {
-        if self.indexing {
-            Some("Indexing…".into())
-        } else if self.loading {
-            Some("Searching…".into())
-        } else {
-            self.error.clone()
-        }
-    }
-
-    /// Settle the request `generation` with its answer; `false` when a newer
-    /// request superseded it.
-    fn finish(
-        &mut self,
-        generation: u64,
-        result: Result<(T, bool), FilesClientError>,
-        what: &str,
-    ) -> bool {
-        if self.generation != generation {
-            return false;
-        }
-        self.loading = false;
-        match result {
-            Ok((results, indexing)) => {
-                self.error = None;
-                self.indexing = indexing;
-                self.results = results;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "palette {what} search failed");
-                self.error = Some(search_error_message(&error, what));
-                self.indexing = false;
-                self.results = T::default();
-            }
-        }
-        true
-    }
-}
-
-/// The focused chat's workspace connection, when it has one.
-fn palette_workspace(shell: &Shell, cx: &App) -> Option<WorkspaceFilesClient> {
-    if shell.active_chat.is_empty() {
-        return None;
-    }
-    let state = shell.state.read(cx);
-    let context = FilesRequestContext::for_chat(state, &shell.active_chat)?;
-    Some(WorkspaceFilesClient::new(state.engine()?.clone(), context))
-}
-
-/// `what` ("file" or "content") names the search in the message.
-fn search_error_message(error: &FilesClientError, what: &str) -> SharedString {
-    match error {
-        FilesClientError::Unsupported(_) => {
-            let subject = if what == "content" {
-                "file contents"
-            } else {
-                "files"
-            };
-            format!("The session's device runs an older zeron — update it to search its {subject}")
-                .into()
-        }
-        FilesClientError::Transport(_) => "The session's device is unreachable".into(),
-        FilesClientError::Encode(_)
-        | FilesClientError::Decode(_)
-        | FilesClientError::Request(_) => "Search failed".into(),
-    }
-}
-
-// X11 suppresses synthetic repeat releases but sends repeated keydowns with
-// is_held=false. Keep our own latch until the physical key is released.
 #[derive(Default)]
 struct EnterPress {
     down: bool,
@@ -191,7 +50,6 @@ pub(super) enum Tab {
     All,
     Threads,
     Commands,
-    Files,
 }
 
 impl Tab {
@@ -203,7 +61,6 @@ impl Tab {
             Self::All => "All",
             Self::Threads => "Threads",
             Self::Commands => "Commands",
-            Self::Files => "Files",
         }
     }
 
@@ -225,25 +82,19 @@ impl Tab {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Section {
-    RecentFiles,
     QuickActions,
     RecentThreads,
     Threads,
     Commands,
-    Files,
-    InFiles,
 }
 
 impl Section {
     fn title(self) -> &'static str {
         match self {
-            Self::RecentFiles => "Recent Files",
             Self::QuickActions => "Quick Actions",
             Self::RecentThreads => "Recent Threads",
             Self::Threads => "Threads",
             Self::Commands => "Commands",
-            Self::Files => "Files",
-            Self::InFiles => "In Files",
         }
     }
 }
@@ -251,7 +102,6 @@ impl Section {
 #[derive(Clone, Debug, PartialEq)]
 enum Command {
     NewChat,
-    NewProject,
     Trading,
     Settings,
     Theme(AppearanceMode),
@@ -262,7 +112,6 @@ impl Command {
     fn label(&self) -> &'static str {
         match self {
             Self::NewChat => "New chat",
-            Self::NewProject => "New project",
             Self::Trading => "Abrir mesa de trading",
             Self::Settings => "Open settings",
             Self::Theme(AppearanceMode::System) => "Switch to system theme",
@@ -275,7 +124,6 @@ impl Command {
     fn icon(&self) -> &'static str {
         match self {
             Self::NewChat => icons::PEN_NEW_SQUARE,
-            Self::NewProject => icons::FOLDER,
             Self::Trading => icons::WALLET,
             Self::Settings => icons::SETTINGS,
             Self::Theme(mode) => mode.icon(),
@@ -288,13 +136,6 @@ impl Command {
 enum RowKind {
     Command(Command),
     Chat(String),
-    /// A path in the focused chat's workspace.
-    File {
-        path: String,
-        is_dir: bool,
-    },
-    /// A line of a file in the focused chat's workspace.
-    Content(WorkspaceContentMatch),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -316,10 +157,6 @@ impl PaletteRow {
         let id = match &self.kind {
             RowKind::Command(command) => format!("command:{}", command.label()),
             RowKind::Chat(id) => format!("chat:{id}"),
-            RowKind::File { path, .. } => format!("file:{path}"),
-            RowKind::Content(found) => {
-                format!("content:{}:{}:{}", found.path, found.line, found.column)
-            }
         };
         RowKey(self.section, id)
     }
@@ -377,15 +214,6 @@ fn commands_for(query: &str, is_dark: bool, can_archive: bool) -> Vec<Command> {
     .chain(can_archive.then_some(Command::ArchiveThread))
     .filter(|command| matches_query(query, command.label()))
     .collect()
-}
-
-/// A path's last segment and the folder holding it (empty at the root).
-fn split_path(path: &str) -> (&str, &str) {
-    let trimmed = path.trim_end_matches('/');
-    match trimmed.rsplit_once('/') {
-        Some((parent, name)) => (name, parent),
-        None => (trimmed, ""),
-    }
 }
 
 /// The scroll container's child index of flat row `row_ix`: each section
@@ -466,7 +294,6 @@ impl Shell {
                     palette.reset_active();
                     palette.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
                 }
-                this.search_palette_workspace(cx);
                 cx.notify();
             }
         });
@@ -481,13 +308,8 @@ impl Shell {
             enter_press: EnterPress::default(),
             focus_pending: true,
             scroll: gpui::ScrollHandle::new(),
-            files: WorkspaceQuery::default(),
-            files_ready: None,
-            content: WorkspaceQuery::default(),
             _search_events: events,
         });
-        // Load the default Files list (recently changed files) right away.
-        self.search_palette_workspace(cx);
         cx.notify();
     }
 
@@ -510,131 +332,6 @@ impl Shell {
             }
             cx.notify();
         }
-    }
-
-    /// Look the query up in the focused workspace: file names at once,
-    /// contents once typing pauses.
-    fn search_palette_workspace(&mut self, cx: &mut Context<Self>) {
-        let workspace = palette_workspace(self, cx);
-        let Some(palette) = self.command_palette.as_mut() else {
-            return;
-        };
-        let query = palette.search.read(cx).text().trim().to_owned();
-        // An empty query lists the workspace's recent files (the default
-        // Files list); a single character is too broad to search.
-        let Some(client) =
-            workspace.filter(|_| query.is_empty() || query.chars().count() >= MIN_WORKSPACE_QUERY_CHARS)
-        else {
-            palette.files.clear();
-            palette.content.clear();
-            return;
-        };
-
-        let generation = palette.files.begin();
-        let request = SearchWorkspaceFilesRequest {
-            target: client.target().clone(),
-            query: query.clone(),
-            include_ignored: false,
-            limit: Some(FILES_TAB_LIMIT as u16),
-        };
-        let names = client.clone();
-        let target = client.target().clone();
-        // The default list is a plain request: readiness is probed for typed
-        // queries, whose partial answers are worth retrying.
-        let mut probe = !request.query.is_empty() && palette.files_ready.as_ref() != Some(&target);
-        palette.files.task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let mut ready = false;
-                let result = async {
-                    // SearchWorkspaceFiles keeps its list-shaped wire response.
-                    // Check readiness BEFORE searching: a scan finishing after
-                    // a partial answer must still trigger one final search.
-                    // Once ready, the index stays built while in use, so later
-                    // keystrokes go straight to the search.
-                    let indexing = if probe {
-                        match names.warm_search().await {
-                            Ok(warm) => warm.state == WorkspaceSearchIndexState::Building,
-                            // Older hosts search without the new index/warm method.
-                            Err(FilesClientError::Unsupported(_)) => false,
-                            Err(error) => return Err(error),
-                        }
-                    } else {
-                        false
-                    };
-                    ready = probe && !indexing;
-                    names
-                        .search(request.clone())
-                        .await
-                        .map(|found| (found, indexing))
-                }
-                .await;
-                probe &= !ready;
-                let target = target.clone();
-                let retry = this
-                    .update(cx, |shell, cx| {
-                        let Some(palette) = shell.command_palette.as_mut() else {
-                            return false;
-                        };
-                        if ready {
-                            palette.files_ready = Some(target);
-                        }
-                        if !palette.files.finish(generation, result, "file") {
-                            return false;
-                        }
-                        cx.notify();
-                        palette.files.indexing
-                    })
-                    .unwrap_or(false);
-                if !retry {
-                    break;
-                }
-                // Keep partial rows and selection; replacing the query or
-                // closing the palette drops this task and cancels retries.
-                cx.background_executor().timer(FILE_INDEX_RETRY).await;
-            }
-        }));
-
-        if query.is_empty() {
-            palette.content.clear();
-            return;
-        }
-        let generation = palette.content.begin();
-        let request = SearchWorkspaceContentRequest {
-            target: client.target().clone(),
-            query,
-            limit: Some(CONTENT_TAB_LIMIT as u16),
-            per_file_limit: Some(CONTENT_MATCHES_PER_FILE as u16),
-        };
-        palette.content.task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(CONTENT_DEBOUNCE).await;
-            let mut delay = CONTENT_INDEX_RETRY;
-            loop {
-                let result = client
-                    .search_content(request.clone())
-                    .await
-                    .map(|found| (found.matches, found.indexing));
-                let retry = this
-                    .update(cx, |shell, cx| {
-                        let Some(palette) = shell.command_palette.as_mut() else {
-                            return false;
-                        };
-                        if !palette.content.finish(generation, result, "content") {
-                            return false;
-                        }
-                        cx.notify();
-                        palette.content.indexing
-                    })
-                    .unwrap_or(false);
-                if !retry {
-                    break;
-                }
-                // Keep partial rows and their selection visible. Replacing the
-                // query or closing the palette drops this task, cancelling the
-                // wait as well as any in-flight request.
-                cx.background_executor().timer(delay).await;
-                delay = (delay * 2).min(CONTENT_INDEX_RETRY_MAX);
-            }
-        }));
     }
 
     /// The open palette's sections for its tab and query.
@@ -668,60 +365,6 @@ impl Shell {
                     .map(RowKind::Chat),
             )
         };
-        // Files opened here first, then the workspace's recently changed
-        // files (the host's empty-query list), each path once.
-        let recent_files = |limit| {
-            let mut seen = std::collections::HashSet::new();
-            let opened = self.recent_files(&self.active_chat).map(|path| (path.clone(), false));
-            let changed = palette
-                .files
-                .results
-                .iter()
-                .filter(|found| found.kind != WorkspaceEntryKind::Directory)
-                .map(|found| (found.path.clone(), false));
-            let section = PaletteSection::new(
-                Section::RecentFiles,
-                opened
-                    .chain(changed)
-                    .filter(|(path, _)| seen.insert(path.clone()))
-                    .take(limit)
-                    .map(|(path, is_dir)| RowKind::File { path, is_dir }),
-            );
-            // Only once there are files to show: an empty "Searching…"
-            // section that then finds nothing would shrink the card away.
-            let status = (!section.rows.is_empty())
-                .then(|| palette.files.progress())
-                .flatten();
-            section.with_status(status)
-        };
-        let files = |limit| {
-            PaletteSection::new(
-                Section::Files,
-                palette
-                    .files
-                    .results
-                    .iter()
-                    .take(limit)
-                    .map(|found| RowKind::File {
-                        path: found.path.clone(),
-                        is_dir: found.kind == WorkspaceEntryKind::Directory,
-                    }),
-            )
-            .with_status(palette.files.status())
-        };
-        let in_files = |limit| {
-            PaletteSection::new(
-                Section::InFiles,
-                palette
-                    .content
-                    .results
-                    .iter()
-                    .take(limit)
-                    .cloned()
-                    .map(RowKind::Content),
-            )
-            .with_status(palette.content.status())
-        };
         let sections = match (palette.tab, query.is_empty()) {
             (Tab::All, true) => vec![
                 commands(Section::QuickActions),
@@ -732,8 +375,6 @@ impl Shell {
             (Tab::Threads, false) => vec![threads(THREADS_TAB_LIMIT)],
             (Tab::Commands, true) => vec![commands(Section::QuickActions)],
             (Tab::Commands, false) => vec![commands(Section::Commands)],
-            (Tab::Files, true) => vec![recent_files(FILES_TAB_LIMIT)],
-            (Tab::Files, false) => vec![files(FILES_TAB_LIMIT), in_files(CONTENT_TAB_LIMIT)],
         };
         sections
             .into_iter()
@@ -871,41 +512,17 @@ impl Shell {
         self.close_command_palette(window, cx);
         match row.kind {
             RowKind::Command(Command::NewChat) => self.open_new_session(None, cx),
-            RowKind::Command(Command::NewProject) => self.open_add_space(cx),
             RowKind::Command(Command::Trading) => self.open_trading(cx),
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
             RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
             RowKind::Chat(id) => self.open_chat(id, cx),
-            RowKind::File { path, is_dir } => {
-                self.open_palette_path(path, is_dir, None, window, cx)
-            }
-            RowKind::Content(found) => {
-                let line = u32::try_from(found.line).unwrap_or(u32::MAX);
-                let column = Some(FileColumn::Byte(found.column));
-                self.open_palette_path(found.path, false, Some((line, column)), window, cx)
-            }
         }
-    }
-
-    /// Open a workspace path of the focused chat: a file in an editor tab
-    /// (at `location`, when given), a folder revealed in the files tree.
-    fn open_palette_path(
-        &mut self,
-        path: String,
-        is_dir: bool,
-        location: Option<(u32, Option<FileColumn>)>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // The file editor and explorer are gone in Aurea.
-        let _ = (path, is_dir, location, window, cx);
     }
 
     fn command_shortcut(&self, command: &Command) -> Option<String> {
         let id = match command {
             Command::NewChat => ShortcutId::NewSession,
-            Command::NewProject => ShortcutId::NewProject,
             Command::Settings => return Some(crate::settings::badge_combo("mod-,")),
             Command::ArchiveThread => ShortcutId::ArchiveSession,
             Command::Trading => return None,
@@ -958,100 +575,6 @@ impl Shell {
                     .when_some(shortcut, |row, shortcut| {
                         row.child(popover::kbd_hint(theme, &shortcut))
                     })
-                    .into_any_element()
-            }
-            RowKind::File { path, is_dir } => {
-                let (name, parent) = split_path(path);
-                let identity = if *is_dir {
-                    crate::file_icons::FileIconIdentity::directory(path, false)
-                } else {
-                    crate::file_icons::FileIconIdentity::file(path)
-                };
-                let target = row.clone();
-                popover::menu_row(theme, active, format!("command-file-{ix}"))
-                    .id(("command-file", ix))
-                    .rounded(px(popover::PALETTE_ITEM_RADIUS))
-                    .role(gpui::Role::Button)
-                    .aria_label(SharedString::from(path.clone()))
-                    .min_h(px(30.0))
-                    .py(px(4.0))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate_palette_row(target.clone(), window, cx)
-                    }))
-                    .child(crate::file_icons::icon(identity, theme.appearance).size(px(16.0)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .overflow_hidden()
-                            .child(div().flex_none().child(popover::search_highlight(
-                                SharedString::from(name.to_owned()),
-                                Some(query),
-                                theme,
-                            )))
-                            .when(!parent.is_empty(), |row| {
-                                row.child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_color(theme.text_muted)
-                                        .child(SharedString::from(parent.to_owned())),
-                                )
-                            }),
-                    )
-                    .into_any_element()
-            }
-            RowKind::Content(found) => {
-                let target = row.clone();
-                let ranges = found
-                    .ranges
-                    .iter()
-                    .map(|(start, end)| *start as usize..*end as usize)
-                    .collect();
-                popover::menu_row(theme, active, format!("command-content-{ix}"))
-                    .id(("command-content", ix))
-                    .rounded(px(popover::PALETTE_ITEM_RADIUS))
-                    .role(gpui::Role::Button)
-                    .aria_label(SharedString::from(format!(
-                        "{}:{} {}",
-                        found.path, found.line, found.preview
-                    )))
-                    .min_h(px(30.0))
-                    .py(px(4.0))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate_palette_row(target.clone(), window, cx)
-                    }))
-                    .child(
-                        crate::file_icons::icon(
-                            crate::file_icons::FileIconIdentity::file(&found.path),
-                            theme.appearance,
-                        )
-                        .size(px(16.0)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(px(200.0))
-                            .truncate()
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(format!("{}:{}", found.path, found.line))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .font_family(theme.font_mono.clone())
-                            .child(popover::search_highlight_ranges(
-                                SharedString::from(found.preview.clone()),
-                                ranges,
-                                theme,
-                            )),
-                    )
                     .into_any_element()
             }
             RowKind::Chat(id) => {
@@ -1135,7 +658,6 @@ impl Shell {
         let focus = palette.focus.clone();
         let scroll = palette.scroll.clone();
         let current_tab = palette.tab;
-        let files_loading = palette.files.loading || palette.files.indexing;
         let theme = Theme::of(cx).for_popup();
         let mut children = Vec::new();
         let mut ix = 0;
@@ -1189,14 +711,8 @@ impl Shell {
             .gap(px(SIDEBAR_LIST_GAP))
             .children(children)
             .when(sections.is_empty(), |el| {
-                let (title, hint) = match (current_tab, query.is_empty()) {
-                    (Tab::Files, true) if files_loading => ("Looking for recent files…", ""),
-                    (Tab::Files, true) => (
-                        "No recent files",
-                        "Files you open or change in this workspace show up here.",
-                    ),
-                    _ => ("No results", "Try a command, chat title, project, or device."),
-                };
+                let _ = current_tab;
+                let (title, hint) = ("No results", "Try a command or a chat title.");
                 el.child(palette_empty(&theme, title, hint))
             });
         let body = palette_results_fade(body, &scroll);
@@ -1717,16 +1233,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn file_rows_split_name_and_parent_folder() {
-        assert_eq!(
-            split_path("src/shell/palette.rs"),
-            ("palette.rs", "src/shell")
-        );
-        assert_eq!(split_path("README.md"), ("README.md", ""));
-        assert_eq!(split_path("crates/ui/"), ("ui", "crates"));
-    }
-
     /// The engine side of a shell under test: requests out, replies in.
     struct FakeEngine {
         runtime: tokio::runtime::Runtime,
@@ -1740,7 +1246,7 @@ mod tests {
         fn take(&mut self, method: &str, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
             let mut found = Vec::new();
             loop {
-                cx.executor().advance_clock(CONTENT_DEBOUNCE);
+                cx.executor().advance_clock(std::time::Duration::from_millis(80));
                 cx.run_until_parked();
                 let Ok(request) = self.requests.try_recv() else {
                     return found;
@@ -1845,315 +1351,6 @@ mod tests {
                     .find(|found| found.section == section)
             })
             .unwrap()
-    }
-
-    fn name_match(path: &str, kind: &str) -> serde_json::Value {
-        serde_json::json!({ "path": path, "name": path, "kind": kind, "score": 1 })
-    }
-
-    /// Settle the independent focus warm-up before controlling search probes.
-    fn file_search_palette(
-        cx: &mut TestAppContext,
-    ) -> (gpui::WindowHandle<Shell>, tempfile::TempDir, FakeEngine) {
-        let (window, dir, mut engine) = engine_palette(cx, true);
-        for warm in engine.take(methods::WARM_WORKSPACE_SEARCH, cx) {
-            engine.reply(&warm, serde_json::json!({ "state": "ready" }));
-        }
-        cx.run_until_parked();
-        (window, dir, engine)
-    }
-
-    fn answer_file_index(
-        engine: &mut FakeEngine,
-        state: &str,
-        cx: &mut TestAppContext,
-    ) -> serde_json::Value {
-        let warm = engine.take(methods::WARM_WORKSPACE_SEARCH, cx);
-        assert_eq!(warm.len(), 1);
-        assert_eq!(warm[0]["params"]["chatId"], "focused");
-        engine.reply(&warm[0], serde_json::json!({ "state": state }));
-        let search = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
-        assert_eq!(search.len(), 1);
-        search.into_iter().next().unwrap()
-    }
-
-    /// Every request sent so far, each answered: warm-ups as `warm`, name
-    /// searches with no matches. Returns the methods in order.
-    fn answer_all(engine: &mut FakeEngine, warm: &str, cx: &mut TestAppContext) -> Vec<String> {
-        let mut methods_seen = Vec::new();
-        loop {
-            cx.executor().advance_clock(CONTENT_DEBOUNCE);
-            cx.run_until_parked();
-            let Ok(request) = engine.requests.try_recv() else {
-                return methods_seen;
-            };
-            let request: serde_json::Value = serde_json::from_str(&request).unwrap();
-            let method = request["method"].as_str().unwrap().to_owned();
-            match method.as_str() {
-                methods::WARM_WORKSPACE_SEARCH if warm == "unsupported" => engine.fail(
-                    &request,
-                    &format!("unknown method: {}", methods::WARM_WORKSPACE_SEARCH),
-                ),
-                methods::WARM_WORKSPACE_SEARCH => {
-                    engine.reply(&request, serde_json::json!({ "state": warm }))
-                }
-                methods::SEARCH_WORKSPACE_FILES => engine.reply(&request, serde_json::json!([])),
-                _ => engine.reply(&request, content_answer(Vec::new(), false)),
-            }
-            if method != methods::SEARCH_WORKSPACE_CONTENT {
-                methods_seen.push(method);
-            }
-        }
-    }
-
-    #[gpui::test]
-    fn the_files_tab_lists_recently_changed_files_with_no_query(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = engine_palette(cx, true);
-        let listed = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
-        assert_eq!(listed.len(), 1, "opening asks for the default list once");
-        assert_eq!(listed[0]["params"]["query"], "");
-        engine.reply(
-            &listed[0],
-            serde_json::json!([
-                name_match("src/recent.rs", "file"),
-                name_match("src", "directory"),
-                name_match("README.md", "file"),
-            ]),
-        );
-        cx.run_until_parked();
-        window
-            .update(cx, |shell, _, cx| shell.select_palette_tab(Tab::Files, cx))
-            .unwrap();
-        let recent = palette_section(window, Section::RecentFiles, cx).expect("a default list");
-        let paths: Vec<_> = recent
-            .rows
-            .iter()
-            .filter_map(|row| match &row.kind {
-                RowKind::File { path, .. } => Some(path.as_str()),
-                _ => None,
-            })
-            .collect();
-        // Files only; no content search runs without a query.
-        assert_eq!(paths, ["src/recent.rs", "README.md"]);
-        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
-    }
-
-    #[gpui::test]
-    fn a_ready_index_skips_the_probe_until_the_palette_reopens(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = file_search_palette(cx);
-        let probed = [
-            methods::WARM_WORKSPACE_SEARCH,
-            methods::SEARCH_WORKSPACE_FILES,
-        ];
-        type_query(window, "ne", cx);
-        assert_eq!(answer_all(&mut engine, "ready", cx), probed);
-        for query in ["nee", "need"] {
-            type_query(window, query, cx);
-            assert_eq!(
-                answer_all(&mut engine, "ready", cx),
-                [methods::SEARCH_WORKSPACE_FILES],
-                "{query}"
-            );
-        }
-
-        window
-            .update(cx, |shell, window, cx| {
-                shell.close_command_palette(window, cx);
-                shell.toggle_command_palette(window, cx);
-            })
-            .unwrap();
-        type_query(window, "ne", cx);
-        assert_eq!(answer_all(&mut engine, "ready", cx), probed);
-    }
-
-    #[gpui::test]
-    fn a_building_index_keeps_probing(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = file_search_palette(cx);
-        type_query(window, "ne", cx);
-        answer_all(&mut engine, "building", cx);
-        type_query(window, "nee", cx);
-        assert_eq!(
-            answer_all(&mut engine, "ready", cx),
-            [
-                methods::WARM_WORKSPACE_SEARCH,
-                methods::SEARCH_WORKSPACE_FILES
-            ]
-        );
-    }
-
-    #[gpui::test]
-    fn an_older_host_is_probed_once(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = file_search_palette(cx);
-        type_query(window, "ne", cx);
-        assert_eq!(
-            answer_all(&mut engine, "unsupported", cx),
-            [
-                methods::WARM_WORKSPACE_SEARCH,
-                methods::SEARCH_WORKSPACE_FILES
-            ]
-        );
-        type_query(window, "nee", cx);
-        assert_eq!(
-            answer_all(&mut engine, "unsupported", cx),
-            [methods::SEARCH_WORKSPACE_FILES]
-        );
-    }
-
-    #[gpui::test]
-    fn changing_query_cancels_file_index_retries(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = file_search_palette(cx);
-        type_query(window, "needle", cx);
-        let first = answer_file_index(&mut engine, "building", cx);
-        engine.reply(&first, serde_json::json!([]));
-        cx.run_until_parked();
-        type_query(window, "updated", cx);
-        cx.executor().advance_clock(FILE_INDEX_RETRY);
-        let updated = answer_file_index(&mut engine, "ready", cx);
-        assert_eq!(updated["params"]["query"], "updated");
-        engine.reply(
-            &updated,
-            serde_json::json!([name_match("updated.rs", "file")]),
-        );
-        cx.run_until_parked();
-        cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
-        assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
-    }
-
-    #[gpui::test]
-    fn clearing_or_closing_cancels_file_index_retries(cx: &mut TestAppContext) {
-        for close in [false, true] {
-            let (window, _dir, mut engine) = file_search_palette(cx);
-            type_query(window, "needle", cx);
-            let first = answer_file_index(&mut engine, "building", cx);
-            engine.reply(&first, serde_json::json!([]));
-            cx.run_until_parked();
-            if close {
-                window
-                    .update(cx, |shell, window, cx| {
-                        shell.close_command_palette(window, cx);
-                    })
-                    .unwrap();
-            } else {
-                type_query(window, "", cx);
-            }
-            cx.executor().advance_clock(Duration::from_secs(10));
-            assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
-            assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
-        }
-    }
-
-    #[gpui::test]
-    fn arriving_files_keep_the_selected_row(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = engine_palette(cx, true);
-        type_query(window, "deploy", cx);
-        let requests = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
-        // Select the thread; the Files section then lands below it.
-        window
-            .update(cx, |shell, _, cx| shell.move_palette_selection(false, cx))
-            .unwrap();
-        let selected = |cx: &mut TestAppContext| {
-            window
-                .read_with(cx, |shell, _| {
-                    shell.command_palette.as_ref().unwrap().active.clone()
-                })
-                .unwrap()
-        };
-        let before = selected(cx);
-        engine.reply(
-            &requests[0],
-            serde_json::json!([name_match("deploy.md", "file")]),
-        );
-        cx.run_until_parked();
-        assert_eq!(selected(cx), before);
-        assert!(before.is_some());
-    }
-
-    fn content_match(path: &str, line: u64) -> serde_json::Value {
-        serde_json::json!({
-            "path": path, "line": line, "column": 4,
-            "preview": "let needle = 1;", "ranges": [[4, 10]],
-        })
-    }
-
-    fn content_answer(matches: Vec<serde_json::Value>, indexing: bool) -> serde_json::Value {
-        serde_json::json!({ "matches": matches, "truncated": false, "indexing": indexing })
-    }
-
-    #[gpui::test]
-    fn content_index_retries_back_off_to_two_seconds(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = engine_palette(cx, true);
-        type_query(window, "needle", cx);
-        let mut pending = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        let early = Duration::from_millis(100);
-        for wait in [500, 1000, 2000, 2000].map(Duration::from_millis) {
-            engine.reply(&pending[0], content_answer(Vec::new(), true));
-            cx.run_until_parked();
-            // `take` itself advances the clock by the debounce; stay short of
-            // the wait, then cross it.
-            cx.executor().advance_clock(wait - early);
-            assert!(
-                engine
-                    .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                    .is_empty(),
-                "refreshed before {wait:?}"
-            );
-            cx.executor().advance_clock(early);
-            pending = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-            assert_eq!(pending.len(), 1, "no refresh after {wait:?}");
-        }
-        engine.reply(&pending[0], content_answer(Vec::new(), false));
-        cx.run_until_parked();
-        cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(
-            engine
-                .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                .is_empty()
-        );
-    }
-
-    #[gpui::test]
-    fn changing_the_query_cancels_content_index_retries(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = engine_palette(cx, true);
-        type_query(window, "needle", cx);
-        let first = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        engine.reply(&first[0], content_answer(Vec::new(), true));
-        cx.run_until_parked();
-
-        type_query(window, "updated", cx);
-        cx.run_until_parked();
-        cx.executor().advance_clock(CONTENT_INDEX_RETRY);
-        let updated = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        assert_eq!(updated.len(), 1);
-        assert_eq!(updated[0]["params"]["query"], "updated");
-        engine.reply(&updated[0], content_answer(Vec::new(), false));
-        cx.run_until_parked();
-        cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(
-            engine
-                .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                .is_empty()
-        );
-    }
-
-    #[gpui::test]
-    fn closing_the_palette_cancels_content_index_retries(cx: &mut TestAppContext) {
-        let (window, _dir, mut engine) = engine_palette(cx, true);
-        type_query(window, "needle", cx);
-        let first = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        engine.reply(&first[0], content_answer(Vec::new(), true));
-        cx.run_until_parked();
-        window
-            .update(cx, |shell, window, cx| {
-                shell.close_command_palette(window, cx)
-            })
-            .unwrap();
-        cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(
-            engine
-                .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                .is_empty()
-        );
     }
 
     /// A shell with the real app keymap and two sidebar sessions.

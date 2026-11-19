@@ -9,9 +9,8 @@ impl Shell {
         composer: Entity<Composer>,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let images = composer.clone();
-        let workspace = composer.clone();
-        let mention = composer.clone();
+        let images = composer;
+        let mention = images.clone();
         div()
             .id(id)
             .relative()
@@ -21,12 +20,6 @@ impl Shell {
                 });
                 cx.notify();
             }))
-            .on_drop::<WorkspacePathDrag>(cx.listener(
-                move |this, payload: &WorkspacePathDrag, window, cx| {
-                    this.attach_workspace_drag(payload, &workspace, window, cx);
-                    cx.notify();
-                },
-            ))
             // A session dragged from the sidebar becomes a chat chip here,
             // and its row slides home.
             .on_drop::<SidebarSessionDrag>(cx.listener(
@@ -48,14 +41,6 @@ impl Shell {
                     cx.notify();
                 },
             ))
-            .on_drop::<RightTabDrag>(cx.listener(
-                move |this, payload: &RightTabDrag, window, cx| {
-                    if let Some(path) = &payload.workspace_path {
-                        this.attach_workspace_drag(path, &composer, window, cx);
-                    }
-                    cx.notify();
-                },
-            ))
     }
 
     pub(super) fn attachment_drop_overlay(theme: &Theme) -> gpui::Stateful<gpui::Div> {
@@ -74,14 +59,6 @@ impl Shell {
             .text_size(crate::typography::ui_rems(13.0))
             .text_color(theme.text)
             .drag_over::<gpui::ExternalPaths>(|style, _, _, _| style.opacity(1.0))
-            .drag_over::<WorkspacePathDrag>(|style, _, _, _| style.opacity(1.0))
-            .drag_over::<RightTabDrag>(|style, tab, _, _| {
-                if tab.workspace_path.is_some() {
-                    style.opacity(1.0)
-                } else {
-                    style
-                }
-            })
             .child("Drop to attach")
     }
 
