@@ -918,7 +918,7 @@ mod tests {
         let (window, _) = palette_window(cx);
         window
             .update(cx, |shell, _, cx| {
-                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                shell.settings.sidebar_organization = crate::settings::SidebarOrganization::InOneList;
                 shell.state.update(cx, |state, _| {
                     state.connection = zeron_proto::view::ConnectionStatus::Ready;
                     state.workspace_scope = Some(WorkspaceScope::Local);
@@ -944,24 +944,6 @@ mod tests {
         window
             .read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone())
             .unwrap()
-    }
-
-    #[gpui::test]
-    fn digit_shortcuts_jump_to_sessions_once_the_palette_closes(cx: &mut TestAppContext) {
-        let (window, _dir) = keyed_palette_window(cx);
-        window
-            .update(cx, |shell, window, cx| {
-                shell.toggle_command_palette(window, cx);
-                shell.close_command_palette(window, cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
-            .unwrap();
-
-        cx.simulate_keystrokes(window.into(), &platform_combo("mod-2"));
-        assert_eq!(palette_tab(window, cx), None);
-        assert_eq!(selected_chat(window, cx).as_deref(), Some("second"));
     }
 
     #[test]

@@ -44,8 +44,7 @@ use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, FILES_PANEL_MIN, JUMP_SLOTS, KeymapConfig,
-    RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId,
-    SidebarOrganization, SidebarSort, TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
+    RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId, SidebarSort, TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
     TERMINAL_MIN_HEIGHT, UiSettings, badge_combo, jump_hints_visible, modifier_send_hint_visible,
     platform_combo, sidebar_pin_profile_key,
 };
@@ -74,7 +73,6 @@ mod session_lanes;
 mod settings_search;
 mod side_chats;
 mod sidebar_pins;
-mod sidebar_sections;
 pub(crate) mod spaces;
 mod thread_search;
 mod trading_gate;
@@ -455,11 +453,6 @@ pub fn apply_keymap(
         KeyBinding::new(
             &valid_or_default(&keymap.archive_session, "mod-shift-a"),
             ArchiveSession,
-            None,
-        ),
-        KeyBinding::new(
-            &valid_or_default(&keymap.new_project, ShortcutId::NewProject.default_combo()),
-            AddSpacePalette,
             None,
         ),
         // Fixed: ⌘K summons the command palette.
@@ -1948,12 +1941,6 @@ pub struct Shell {
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
-    sidebar_section_migration: Option<(String, crate::state::EngineHandle)>,
-    section_dialog: Option<sidebar_sections::SectionDialog>,
-    section_menu: Option<(String, Point<Pixels>)>,
-    section_header_hover: Option<String>,
-    section_menu_focus: FocusHandle,
-    section_menu_active: Option<usize>,
     /// Space id awaiting delete confirmation (hard delete + session cascade).
     delete_space_confirm: Option<String>,
     /// The add-space palette (device tabs + folder search), `Some`
@@ -2448,12 +2435,6 @@ impl Shell {
             discard_working_tree_task: None,
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
-            sidebar_section_migration: None,
-            section_dialog: None,
-            section_menu: None,
-            section_header_hover: None,
-            section_menu_focus: cx.focus_handle(),
-            section_menu_active: None,
             delete_space_confirm: None,
             add_space: None,
             project_crumb_menu: popover::Popup::default(),
@@ -5063,7 +5044,6 @@ impl Shell {
 
     fn reconcile_sidebar_pins(&mut self, cx: &mut Context<Self>) {
         self.discard_stale_sidebar_pin_writes(cx);
-        self.migrate_sidebar_sections(cx);
         let Some(profile_key) = self.active_sidebar_pin_profile_key(cx) else {
             return;
         };
@@ -5095,15 +5075,9 @@ impl Shell {
         )
     }
 
-    fn active_sidebar_pins(&self, cx: &App) -> Vec<String> {
-        let mut pins = self.raw_sidebar_pins(cx);
-        let sections = self.active_sidebar_sections(cx);
-        pins.retain(|id| {
-            !sections
-                .iter()
-                .any(|section| section.session_ids.contains(id))
-        });
-        pins
+    /// No pinned chats in Aurea (one chat, no sidebar list).
+    fn active_sidebar_pins(&self, _cx: &App) -> Vec<String> {
+        Vec::new()
     }
 
     fn raw_sidebar_pins(&self, cx: &App) -> Vec<String> {
@@ -5212,7 +5186,6 @@ impl Shell {
             return;
         }
         if pinned && self.raw_sidebar_pins(cx).contains(&chat_id) {
-            self.assign_sidebar_section(&chat_id, None, cx);
             cx.notify();
             return;
         }
@@ -5231,7 +5204,6 @@ impl Shell {
             && pinned
             && self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local)
         {
-            self.assign_sidebar_section(&chat_id, None, cx);
         }
         cx.notify();
     }
@@ -5265,18 +5237,6 @@ impl Shell {
         cx.notify();
     }
 
-    /// A jump shortcut: open the sidebar row at `slot`. A slot past the end of
-    /// a short list does nothing. Reads the DISPLAYED order — sort and
-    /// grouping view options permute the list, and the chip on a row must
-    /// name the key that opens it.
-    fn jump_to_session(&mut self, slot: usize, cx: &mut Context<Self>) {
-        let Some(chat_id) = self.sidebar_visible_order(cx).into_iter().nth(slot) else {
-            return;
-        };
-        // Same path a click on that row takes.
-        self.open_chat(chat_id, cx);
-    }
-
     /// Whether an overlay that owns the keyboard is up — the add-space
     /// palette or a composer picker popover (model selector, traits, repo,
     /// branch…). Session-nav shortcuts (cycle/jump/archive) go quiet
@@ -5287,8 +5247,6 @@ impl Shell {
     /// the keys it records before they can dispatch.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
         self.command_palette.is_some()
-            || self.section_dialog.is_some()
-            || self.section_menu.is_some()
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
             || self.open_side_chat_pickers(cx).is_some()
@@ -7995,7 +7953,6 @@ impl Shell {
         }
 
         overlays.extend(self.render_space_overlays(viewport, window, cx));
-        overlays.extend(self.render_section_overlays(viewport, window, cx));
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
             overlays.push(overlay);
         }
@@ -10513,22 +10470,11 @@ impl Render for Shell {
                     this.archive_selected_chat(cx)
                 }
             }))
-            // A jump routes back to chat itself, so Settings is not a dead
-            // spot — the same call a click on that sidebar row makes. But an
-            // open picker/palette owns the keyboard: no jumping underneath
-            // it. The MODEL menu advertises these same slots on its rows and
-            // this matched binding beats its key handler to the dispatch —
-            // forward the slot instead of eating it.
+            // Aurea has one chat: the digit slots only pick a model in an
+            // open model menu (its rows advertise them).
             .on_action(cx.listener(|this, jump: &JumpSession, _, cx| {
-                // An open model menu — the main composer's or a side
-                // chat's — takes the digit as its model shortcut.
-                let pickers = this
-                    .open_side_chat_pickers(cx)
-                    .unwrap_or_else(|| this.composer.read(cx).pickers().clone());
-                let handled = pickers.update(cx, |pickers, cx| pickers.jump_model_slot(jump.0, cx));
-                if !handled && !this.overlay_owns_keyboard(cx) {
-                    this.jump_to_session(jump.0, cx)
-                }
+                let pickers = this.composer.read(cx).pickers().clone();
+                pickers.update(cx, |pickers, cx| pickers.jump_model_slot(jump.0, cx));
             }))
             .on_modifiers_changed(
                 cx.listener(|this, event, _, cx| this.on_modifiers_changed(event, cx)),
@@ -10540,16 +10486,6 @@ impl Render for Shell {
                 if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
                     let pickers = this.composer.read(cx).pickers().clone();
                     pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
-                }
-            }))
-            .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
-                if matches!(this.route, Route::Settings(_)) {
-                    return;
-                }
-                if this.add_space.is_some() {
-                    this.close_add_space(cx);
-                } else {
-                    this.open_add_space(cx);
                 }
             }));
 
@@ -14129,106 +14065,6 @@ mod settings_modal_regressions {
         }
         assert_eq!(settings_open_route("settings/payments", remembered), None);
         assert_eq!(settings_open_route("new", remembered), None);
-    }
-
-    /// Session navigation shortcuts are not swallowed by Settings: each one
-    /// leaves the page and lands on its target, as it would from chat.
-    #[gpui::test]
-    fn navigation_shortcuts_work_from_settings(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
-        let keymap = KeymapConfig::default();
-        cx.update(|cx| apply_keymap(cx, &keymap, ComposerSendBehavior::default()));
-        let window = cx.add_window(|_, cx| {
-            let mut shell = test_shell(dir.path(), cx);
-            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
-            shell.state.update(cx, |state, _| {
-                state.workspace_scope = Some(WorkspaceScope::Local);
-                state.local_device_id = Some("local".into());
-                state.chats = ["older", "newer"]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(ix, id)| {
-                        serde_json::from_value(serde_json::json!({
-                            "id": id, "title": id, "deviceId": "local", "archived": false,
-                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
-                        }))
-                        .unwrap()
-                    })
-                    .collect();
-                state.selected_chat = Some("older".into());
-            });
-            shell
-        });
-        let mut press = |combo: &str| {
-            window
-                .update(cx, |shell, _, cx| {
-                    shell.open_settings(SettingsSection::Shortcuts, cx)
-                })
-                .unwrap();
-            cx.run_until_parked();
-            cx.simulate_keystrokes(window.into(), &platform_combo(combo));
-            window
-                .read_with(cx, |shell, cx| {
-                    (shell.route, shell.state.read(cx).selected_chat.clone())
-                })
-                .unwrap()
-        };
-        assert_eq!(
-            press(keymap.get(ShortcutId::JumpSession(0))),
-            (Route::Chat, Some("newer".into()))
-        );
-        assert_eq!(
-            press(&keymap.next_session),
-            (Route::Chat, Some("older".into()))
-        );
-        assert_eq!(
-            press(&keymap.prev_session),
-            (Route::Chat, Some("newer".into()))
-        );
-        assert_eq!(press(&keymap.new_session), (Route::Chat, None));
-    }
-
-    /// An AZERTY Mac types ⌘& on the key AppKit reads as ⌘1, and ⌘⇧& — which
-    /// gpui reports as a literal ⌘1 — is no shortcut there. Bound in US keys
-    /// only, Jump to session 1 answered the second and not the first.
-    #[gpui::test]
-    fn azerty_jumps_from_the_key_appkit_reads_as_cmd_1(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
-        let window = cx.add_window(|_, cx| {
-            let mut shell = test_shell(dir.path(), cx);
-            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
-            shell.state.update(cx, |state, _| {
-                state.workspace_scope = Some(WorkspaceScope::Local);
-                state.local_device_id = Some("local".into());
-                state.chats = ["older", "newer"]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(ix, id)| {
-                        serde_json::from_value(serde_json::json!({
-                            "id": id, "title": id, "deviceId": "local", "archived": false,
-                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
-                        }))
-                        .unwrap()
-                    })
-                    .collect();
-                state.selected_chat = Some("older".into());
-            });
-            shell
-        });
-        // `Shell::new` bound the keymap against the test platform, which has
-        // no layout table; localize it as an AZERTY Mac's `apply_keymap` does.
-        cx.run_until_parked();
-        cx.update(|cx| localize_key_bindings(cx, &settings::azerty_key_equivalents()));
-        let mut press = |combo: &str| {
-            cx.simulate_keystrokes(window.into(), &platform_combo(combo));
-            window
-                .read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone())
-                .unwrap()
-        };
-        assert_eq!(press("mod-1"), Some("older".into()));
-        assert_eq!(press("mod-&"), Some("newer".into()));
     }
 
     /// Localizing moves exactly the bindings whose key the layout relocates —

@@ -21,25 +21,6 @@ use zeron_proto::{
     HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
 };
 
-/// Promote the user's ordered pins above the untouched activity projection.
-/// Every unpinned id keeps exactly the relative order supplied by recency.
-pub(super) fn project_pinned_first(recency_ids: &[String], pinned_ids: &[String]) -> Vec<String> {
-    let active: HashSet<&str> = recency_ids.iter().map(String::as_str).collect();
-    let pinned: HashSet<&str> = pinned_ids.iter().map(String::as_str).collect();
-    let mut seen = HashSet::new();
-    pinned_ids
-        .iter()
-        .filter(|id| active.contains(id.as_str()))
-        .chain(
-            recency_ids
-                .iter()
-                .filter(|id| !pinned.contains(id.as_str())),
-        )
-        .filter(|id| seen.insert(id.as_str()))
-        .cloned()
-        .collect()
-}
-
 /// Remove only ids absent from the workspace. Archived sessions remain known
 /// so unarchiving restores their local pin and position.
 pub(super) fn retain_known_pins(
@@ -120,50 +101,6 @@ impl Render for SidebarViewOptionsTooltip {
             .text_size(crate::typography::ui_rems(11.0))
             .text_color(theme.text)
             .child("Sidebar view options")
-    }
-}
-
-/// The Archived shelf shows this many rows, then "Show more" pages by
-/// [`ARCHIVED_PAGE_ROWS`].
-const ARCHIVED_INITIAL_ROWS: usize = 10;
-const ARCHIVED_PAGE_ROWS: usize = 25;
-
-/// Put this machine's device group first without disturbing the recency-based
-/// order of any remote groups. A targeted promotion is more truthful than a
-/// full name sort: local context leads, then the user's chosen chat sort wins.
-fn promote_local_device_group<T>(
-    groups: &mut Vec<(Option<(String, String)>, Vec<T>)>,
-    local_device_id: Option<&str>,
-) {
-    let Some(local_device_id) = local_device_id else {
-        return;
-    };
-    let Some(index) = groups.iter().position(|(group, _)| {
-        group
-            .as_ref()
-            .is_some_and(|(device_id, _)| device_id == local_device_id)
-    }) else {
-        return;
-    };
-    if index > 0 {
-        let local = groups.remove(index);
-        groups.insert(0, local);
-    }
-}
-
-/// Project-mode group of a chat as (key, label). Projects sharing a
-/// repository identity fold into one group named for their representative
-/// space; project-less sessions group per device as "No project".
-fn sidebar_project_group(state: &AppState, chat: &zeron_proto::Chat) -> (String, String) {
-    match state.space_for_chat(chat) {
-        Some(space) => (
-            zeron_proto::view::project_key(space),
-            state.representative_space(space).display_name().to_string(),
-        ),
-        None => match chat.space_id.clone() {
-            Some(space_id) => (space_id, "?".to_string()),
-            None => (format!("home:{}", chat.device_id), "No project".to_string()),
-        },
     }
 }
 
@@ -1264,231 +1201,22 @@ impl Shell {
         view_trigger.into_any_element()
     }
 
-    /// Flat top-to-bottom chat ids exactly as [`Self::render_active_rows`]
-    /// draws them: pins first, then the user's sort, device grouping,
-    /// and local-device promotion. Jump shortcuts and session cycling read
-    /// this projection so keyboard order never drifts from the screen.
+    /// The chats in navigation order. Aurea has no sidebar list: the visible
+    /// (non-archived, top-level) chats, most recently active first.
     pub(super) fn sidebar_visible_order(&self, cx: &Context<Self>) -> Vec<String> {
-        let filter = self.settings.space_filter.clone();
-        let profile_key = self.active_sidebar_pin_profile_key(cx);
-        let saved_pins = self.active_sidebar_pins(cx);
-        let frozen_pinned = self
-            .pinned_session_drag
-            .as_ref()
-            .filter(|drag| {
-                drag.filter == filter && profile_key.as_deref() == Some(&drag.profile_key)
-            })
-            .map(|drag| drag.visible_ids.clone());
-        let pinned_order = frozen_pinned
-            .as_ref()
-            .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
         let mut chats: Vec<zeron_proto::Chat> = state
-            .sidebar_chats(Utc::now(), filter.as_deref())
+            .sidebar_chats(Utc::now(), None)
             .into_iter()
             .map(|(_, chat)| chat.clone())
             .collect();
-        chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
-        let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
-            .into_iter()
-            .partition(|chat| pinned_order.contains(&chat.id));
-        let custom_sections = self.active_sidebar_sections(cx);
-        let mut custom_order = Vec::new();
-        let listed: HashSet<&str> = chats.iter().map(|chat| chat.id.as_str()).collect();
-        for section in &custom_sections {
-            if !section.collapsed {
-                custom_order.extend(
-                    section
-                        .session_ids
-                        .iter()
-                        .filter(|id| listed.contains(id.as_str()))
-                        .cloned(),
-                );
-            }
-        }
-        let chats: Vec<_> = chats
-            .into_iter()
-            .filter(|chat| {
-                !custom_sections
-                    .iter()
-                    .any(|section| section.session_ids.contains(&chat.id))
-            })
-            .collect();
-        let ordered = if self.settings.sidebar_organization != SidebarOrganization::InOneList {
-            let mut groups: Vec<(Option<(String, String)>, Vec<zeron_proto::Chat>)> = Vec::new();
-            for chat in chats {
-                let key = Some((
-                    if self.settings.sidebar_organization == SidebarOrganization::ByProject {
-                        sidebar_project_group(state, &chat).0
-                    } else {
-                        chat.device_id.clone()
-                    },
-                    String::new(),
-                ));
-                if let Some((_, existing)) = groups.iter_mut().find(|(group, _)| group == &key) {
-                    existing.push(chat);
-                } else {
-                    groups.push((key, vec![chat]));
-                }
-            }
-            if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
-                promote_local_device_group(&mut groups, state.local_device_id.as_deref());
-            }
-            groups
-                .into_iter()
-                .flat_map(|(_, rows)| rows)
-                .map(|chat| chat.id)
-                .collect::<Vec<_>>()
-        } else {
-            chats.into_iter().map(|chat| chat.id).collect()
-        };
-        let ordered = pinned_chats
-            .into_iter()
-            .map(|chat| chat.id)
-            .chain(custom_order.iter().cloned())
-            .chain(ordered)
-            .collect::<Vec<_>>();
-        let mut visible = project_pinned_first(&ordered, pinned_order);
-        if !self.sessions_open
-            && self.settings.sidebar_organization == SidebarOrganization::InOneList
-        {
-            visible.retain(|id| pinned_order.contains(id) || custom_order.contains(id));
-        }
-        if !self.pinned_open {
-            let pins: HashSet<&str> = pinned_order.iter().map(String::as_str).collect();
-            visible.retain(|id| !pins.contains(id.as_str()));
-        }
-        visible
+        chats.sort_by(|left, right| compare_sidebar_chats(SidebarSort::LastUpdated, left, right));
+        chats.into_iter().map(|chat| chat.id).collect()
     }
 
-    /// The group a chat's row sits under when the sidebar groups by device or
-    /// by project; `None` in one list.
-    fn sidebar_group_key(&self, state: &AppState, chat: &zeron_proto::Chat) -> Option<String> {
-        match self.settings.sidebar_organization {
-            SidebarOrganization::ByDevice => Some(chat.device_id.clone()),
-            SidebarOrganization::ByProject => Some(sidebar_project_group(state, chat).0),
-            SidebarOrganization::InOneList => None,
-        }
-    }
-
-    /// A device/project group's key in `sidebar_collapsed_groups`.
-    fn sidebar_group_collapse_key(&self, group: &str) -> String {
-        let organization = match self.settings.sidebar_organization {
-            SidebarOrganization::ByDevice => "device",
-            SidebarOrganization::ByProject => "project",
-            SidebarOrganization::InOneList => "list",
-        };
-        format!("{organization}:{group}")
-    }
-
-    /// Open whatever hides `chat_id`'s sidebar row — the sidebar itself, the
-    /// Pinned / Sessions / Archived disclosure, its custom section or group,
-    /// the Archived page — so an inline rename has a row to draw on. Each
-    /// disclosure opens with its usual motion. False when the row cannot be
-    /// shown: the project filter hides it (the filter is the user's to
-    /// clear), or a synced section could not be expanded. Either way the
-    /// sidebar notice says why.
-    pub(super) fn reveal_sidebar_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) -> bool {
-        let (active, archived) = {
-            let state = self.state.read(cx);
-            let active = state
-                .sidebar_chats(Utc::now(), self.settings.space_filter.as_deref())
-                .into_iter()
-                .find(|(_, chat)| chat.id == chat_id)
-                .map(|(_, chat)| chat.clone());
-            let archived = self
-                .archived_sidebar_chats(cx)
-                .iter()
-                .position(|chat| chat.id == chat_id);
-            (active, archived)
-        };
-        if active.is_none() && archived.is_none() {
-            self.show_notice(crate::toast::ToastKind::Error, "Clear the project filter to rename this session", cx);
-            return false;
-        }
-        if let Some(chat) = &active {
-            if self.active_sidebar_pins(cx).contains(&chat.id) {
-                if !self.pinned_open {
-                    self.pinned_open = true;
-                    self.queue_sidebar_reveal("pinned");
-                }
-            } else if let Some(section) = self
-                .active_sidebar_sections(cx)
-                .into_iter()
-                .find(|section| section.session_ids.contains(&chat.id))
-            {
-                if section.collapsed {
-                    if !self.change_sidebar_section(
-                        zeron_proto::SidebarSectionChange::Collapse {
-                            id: section.id.clone(),
-                            collapsed: false,
-                        },
-                        cx,
-                    ) {
-                        return false;
-                    }
-                    self.queue_sidebar_reveal(&format!("custom:{}", section.id));
-                }
-            } else if let Some(group) = self.sidebar_group_key(self.state.read(cx), chat) {
-                let collapse_key = self.sidebar_group_collapse_key(&group);
-                if self.sidebar_collapsed_groups.remove(&collapse_key) {
-                    self.queue_sidebar_reveal(&format!("group:{collapse_key}"));
-                }
-            } else if !self.sessions_open {
-                self.sessions_open = true;
-                self.queue_sidebar_reveal("sessions");
-            }
-        } else if let Some(index) = archived {
-            if !self.settings.sidebar_show_archived {
-                self.settings.sidebar_show_archived = true;
-                self.schedule_save(cx);
-            }
-            if !self.archived_open {
-                self.archived_open = true;
-                self.archived_shown = ARCHIVED_INITIAL_ROWS;
-                self.queue_sidebar_reveal("archived");
-            }
-            // Page the shelf just far enough to include the row, in the
-            // same steps "Show more" takes.
-            let shown = self.archived_shown.max(ARCHIVED_INITIAL_ROWS);
-            if index >= shown {
-                self.archived_shown = ARCHIVED_INITIAL_ROWS
-                    + (index + 1 - ARCHIVED_INITIAL_ROWS).div_ceil(ARCHIVED_PAGE_ROWS)
-                        * ARCHIVED_PAGE_ROWS;
-            }
-        }
-        if self.settings.sidebar_collapsed {
-            self.toggle_sidebar(cx);
-        }
-        cx.notify();
+    /// Aurea has no sidebar list to scroll a chat into: always shown.
+    pub(super) fn reveal_sidebar_chat(&mut self, _chat_id: &str, _cx: &mut Context<Self>) -> bool {
         true
-    }
-
-    /// Mark a disclosure opened for a reveal: its motion starts on the next
-    /// render, where the body height is known. Like a header click, it
-    /// replaces the resort glide for this movement.
-    fn queue_sidebar_reveal(&mut self, key: &str) {
-        self.sidebar_reveal_motions.insert(key.to_owned());
-        self.sidebar_prev_order.clear();
-        self.sidebar_resort.clear();
-        self.sidebar_new_keys.clear();
-    }
-
-    /// The Archived shelf's chats under the project filter, in sidebar order.
-    fn archived_sidebar_chats(&self, cx: &App) -> Vec<zeron_proto::Chat> {
-        let state = self.state.read(cx);
-        let in_filter = state.project_filter(self.settings.space_filter.as_deref());
-        let mut rows: Vec<zeron_proto::Chat> = state
-            .chats
-            .iter()
-            // Spawned children stay out of the Archived section too — the
-            // same top-level rule as `visible_chats`.
-            .filter(|c| c.archived && c.is_top_level())
-            .filter(|chat| in_filter(chat))
-            .cloned()
-            .collect();
-        rows.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
-        rows
     }
 
     // ---- add-space flow ----
