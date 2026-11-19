@@ -1684,10 +1684,9 @@ impl AgentAccounts {
                 self.reap_spawned_flows(HarnessId::ClaudeCode);
                 self.start_claude_login().await
             }
-            HarnessId::Codex => self.start_codex_login(requester).await?,
-            // Aurea keeps opencode (and Claude/Codex's own sign-ins): the
-            // other agents' harnesses are gone.
-            HarnessId::Cursor
+            // Aurea runs opencode: the other agents' harnesses are gone.
+            HarnessId::Codex
+            | HarnessId::Cursor
             | HarnessId::Antigravity
             | HarnessId::Grok
             | HarnessId::Devin
@@ -1998,64 +1997,6 @@ impl AgentAccounts {
         })
     }
 
-    async fn start_codex_login(
-        &self,
-        requester: Option<&str>,
-    ) -> Result<AgentLoginStart, EngineError> {
-        self.reap_spawned_flows(HarnessId::Codex);
-        // `codex login` binds the same fixed port as the ChatGPT sign-ins.
-        self.reap_port_flows(oauth::OPENAI_LOOPBACK_PORT);
-        let login_id = new_id();
-        // A throwaway CODEX_HOME isolates the new login completely — the live
-        // ~/.codex session is never touched until the user explicitly switches.
-        let home = self.login_home(&login_id)?;
-        // Resolve through the harness itself (`CODEX_EXECUTABLE`, PATH, the
-        // login-shell snapshot, install dirs — the Windows npm payload
-        // included) and compose the same child PATH a chat run gets, so
-        // account login never diverges from what the harness can launch.
-        let mut command = match zeron_harness::codex::login_command(&home) {
-            Ok(command) => command,
-            Err(err) => {
-                let _ = std::fs::remove_dir_all(&home);
-                return Err(EngineError::Other(match err {
-                    zeron_harness::HarnessError::NotInstalled(hint) => {
-                        format!(
-                            "The `codex` CLI was not found on this device — install it first. ({hint})"
-                        )
-                    }
-                    other => format!("Could not resolve the codex CLI for login: {other}"),
-                }));
-            }
-        };
-        command
-            .stdin(zeron_harness::process::Stdio::null())
-            .stdout(zeron_harness::process::Stdio::piped())
-            .stderr(zeron_harness::process::Stdio::piped());
-        // The CLI opens the authorization tab itself (via the `webbrowser`
-        // crate) AND the app opens the page when this start reply lands —
-        // users got TWO identical auth.openai.com tabs. `webbrowser` prefers
-        // $BROWSER over xdg-open, so a no-op script there keeps the CLI's
-        // open quiet; a failed open is advisory to `codex login` (it prints
-        // the URL and keeps serving the loopback callback either way).
-        #[cfg(unix)]
-        if let Some(noop_browser) = ensure_noop_browser(&self.inner.config.root_dir()) {
-            command.env("BROWSER", noop_browser);
-        }
-        // codex prints the authorize URL (to stderr as of 0.142 — scan both
-        // streams); grab it so the app can open the single authorization tab
-        // (the CLI's own browser-open is suppressed via BROWSER above).
-        self.spawn_login_child(
-            login_id,
-            HarnessId::Codex,
-            command,
-            home,
-            SpawnedCompletion::CredentialFile,
-            scan_openai_url,
-            requester,
-        )
-        .await
-    }
-
     /// Sign in to `harness` for a credential that LEAVES this device — the
     /// Cloud credential vault (docs/design/cloud-device.md, "Sign-in stays on
     /// the device"). The provider's own flow runs exactly as for "Add
@@ -2080,7 +2021,6 @@ impl AgentAccounts {
                 self.reap_spawned_flows(HarnessId::ClaudeCode);
                 self.start_claude_login_with(Some(capture)).await
             }
-            HarnessId::Codex => self.start_codex_capture(capture).await?,
             other => {
                 return Err(EngineError::Other(format!(
                     "{other:?} sign-ins can't be connected to Cloud"
@@ -2091,117 +2031,6 @@ impl AgentAccounts {
             start.callback_port = loopback_port(&start.url);
         }
         Ok(start)
-    }
-
-    /// Codex half of [`Self::start_capture_login`]: `codex login` into a
-    /// throwaway `CODEX_HOME`; once its `auth.json` holds a ChatGPT token set
-    /// it goes to `capture` and the home is shredded. Holds ChatGPT's fixed
-    /// callback port like every Codex sign-in, so a newer one supersedes it.
-    async fn start_codex_capture(
-        &self,
-        capture: CaptureSink,
-    ) -> Result<AgentLoginStart, EngineError> {
-        self.reap_spawned_flows(HarnessId::Codex);
-        self.reap_port_flows(oauth::OPENAI_LOOPBACK_PORT);
-        let login_id = new_id();
-        let home = self.login_home(&login_id)?;
-        // From here on every exit path — error, success, cancel (abort),
-        // engine shutdown — shreds the throwaway home.
-        let shred = ShredOnDrop(home.clone());
-        let cli = lock(&self.inner.cli_overrides)
-            .get(&HarnessId::Codex)
-            .cloned();
-        let mut command = match cli {
-            Some(cli) => {
-                let mut command = zeron_harness::process::Command::new(cli);
-                command.arg("login").env("CODEX_HOME", &home);
-                command
-            }
-            None => zeron_harness::codex::login_command(&home).map_err(|err| {
-                EngineError::Other(match err {
-                    zeron_harness::HarnessError::NotInstalled(hint) => format!(
-                        "The `codex` CLI was not found on this device — install it first. ({hint})"
-                    ),
-                    other => format!("Could not resolve the codex CLI for login: {other}"),
-                })
-            })?,
-        };
-        command
-            .stdin(zeron_harness::process::Stdio::null())
-            .stdout(zeron_harness::process::Stdio::piped())
-            .stderr(zeron_harness::process::Stdio::piped());
-        // The app opens the one authorization tab (see `start_codex_login`).
-        #[cfg(unix)]
-        if let Some(noop_browser) = ensure_noop_browser(&self.inner.config.root_dir()) {
-            command.env("BROWSER", noop_browser);
-        }
-        let child = zeron_harness::process::spawn_agent(&mut command).map_err(|err| {
-            EngineError::Other(if err.kind() == std::io::ErrorKind::NotFound {
-                "The `codex` CLI was not found on this device — install it first.".into()
-            } else {
-                format!("Could not start the codex sign-in: {err}")
-            })
-        })?;
-        let (child, output, exit) = wire_login_child(child);
-        let kill = KillOnDrop(child);
-        let url = await_login_url(&output, &exit, scan_openai_url).await;
-        if url.is_empty()
-            && let Some(code) = *lock(&exit)
-        {
-            return Err(EngineError::Other(login_child_failure(code, &output)));
-        }
-        let state = Arc::new(Mutex::new(TaskLoginState {
-            url: (!url.is_empty()).then(|| url.clone()),
-            ..Default::default()
-        }));
-        let task_state = state.clone();
-        let auth_file = home.join("auth.json");
-        let handle = tokio::spawn(async move {
-            let waited = tokio::time::timeout(
-                FLOW_TTL,
-                await_codex_capture(&auth_file, &output, &exit, &task_state),
-            )
-            .await
-            .unwrap_or_else(|_| Err("The sign-in timed out — start again.".into()));
-            // The CLI answers the browser right after writing auth.json; give
-            // it a moment to exit on its own, then stop it either way.
-            if waited.is_ok() {
-                for _ in 0..30 {
-                    if lock(&exit).is_some() {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-            drop(kill);
-            // Off the disk before the upload: the token set lives on only in
-            // this task's memory until the capturer has it.
-            drop(shred);
-            let outcome = match waited {
-                Ok(auth) => capture(auth).await,
-                Err(message) => Err(message),
-            };
-            lock(&task_state).outcome = Some(outcome);
-        });
-        lock(&self.inner.flows).insert(
-            login_id.clone(),
-            LoginFlow::Task {
-                harness: HarnessId::Codex,
-                started_at: Instant::now(),
-                state,
-                handle,
-                // The task's own guard shreds the home; a plain remove here
-                // could beat it to the files.
-                home: None,
-                port: Some(oauth::OPENAI_LOOPBACK_PORT),
-            },
-        );
-        Ok(AgentLoginStart {
-            login_id,
-            url,
-            mode: AgentLoginMode::Browser,
-            callback_port: None,
-        })
     }
 
     /// Exchange the pasted `code#state` for tokens and save the account as a

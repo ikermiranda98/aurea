@@ -311,22 +311,6 @@ fn unknown_fields_and_harnesses_are_allowed_for_newer_lists() {
     assert_eq!(list.harnesses.len(), 2);
 }
 
-/// The checked-in staging list must pass this engine's own checks.
-#[test]
-fn the_staging_list_on_the_edge_is_valid() {
-    let list = validate(include_bytes!("../../../edge/src/models/staging-v1.json")).unwrap();
-    let claude = &list.harnesses["claude-code"];
-    assert!(!claude.models.is_empty());
-    // And applied to the real built-in catalog it keeps every built-in row
-    // for a current CLI and marks one default.
-    let builtin = zeron_harness::claude::catalog::static_models();
-    let models = apply(builtin.clone(), claude, Some("2.1.322"), Source::BuiltIn);
-    for model in &builtin {
-        assert!(models.iter().any(|m| m.id == model.id), "{}", model.id);
-    }
-    assert_eq!(models.iter().filter(|m| m.default).count(), 1);
-}
-
 #[test]
 fn only_https_on_zeron_sh_may_serve_the_list() {
     for (edge, url) in [

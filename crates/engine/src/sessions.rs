@@ -149,7 +149,6 @@ impl Drop for VoiceCall {
 }
 
 struct RunHandle {
-    voice: Option<zeron_harness::codex::realtime::RealtimeHandle>,
     voice_active: Arc<VoiceActivity>,
     run_id: String,
     steerable: bool,
@@ -999,71 +998,6 @@ impl SessionsEngine {
         Ok((replay, rx))
     }
 
-    /// Local experimental bootstrap. No Submit, empty user entry or title request.
-    pub async fn start_idle(
-        &self,
-        chat_id: &str,
-        request: RunRequest,
-    ) -> Result<String, EngineError> {
-        // A fresh explicit request may renew an identity-invalidated idle
-        // process. Never interrupt a native delegated turn to recover voice.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
-        loop {
-            let stale = lock(&self.inner.runs).get(chat_id).map(|run| {
-                (
-                    run.voice.as_ref().is_some_and(|v| v.invalidated()),
-                    run.voice_active.live(),
-                )
-            });
-            match stale {
-                Some((true, false)) => {
-                    if self.turn_in_flight(chat_id) {
-                        return Err(EngineError::Other(
-                            "identity changed during delegated work".into(),
-                        ));
-                    }
-                    self.interrupt(chat_id).await?;
-                    break;
-                }
-                Some((true, _)) => {
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(EngineError::Other("voice cleanup in progress".into()));
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
-                _ => break,
-            }
-        }
-        self.dispatch_inner(
-            chat_id,
-            HarnessId::Codex,
-            request,
-            None,
-            false,
-            0,
-            None,
-            true,
-        )
-        .await
-    }
-
-    pub(crate) fn take_voice_bridge(
-        &self,
-        chat_id: &str,
-    ) -> Option<(
-        zeron_harness::codex::realtime::RealtimeHandle,
-        tokio::sync::broadcast::Receiver<zeron_proto::voice::VoiceEvent>,
-        Arc<VoiceActivity>,
-    )> {
-        let mut runs = lock(&self.inner.runs);
-        let run = runs.get_mut(chat_id)?;
-        Some((
-            run.voice.clone()?,
-            run.voice.as_ref()?.events.subscribe(),
-            run.voice_active.clone(),
-        ))
-    }
-
     /// Start (or route) a run for `chat_id`.
     ///
     /// - The user message entry is written to the doc immediately (id = `message_id`).
@@ -1431,10 +1365,9 @@ impl SessionsEngine {
         let turn = TurnControl::default();
         let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let fork_history_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (voice_handle, realtime, _voice_events) = zeron_harness::codex::realtime::channel();
         let voice_active = Arc::new(VoiceActivity::default());
         let controls = RunControls {
-            realtime: (harness_id == HarnessId::Codex).then_some(realtime),
+            realtime: None,
             execution_lease: None,
             request_input,
             steering: steer_rx,
@@ -1493,7 +1426,6 @@ impl SessionsEngine {
         runs.insert(
             chat_id.to_string(),
             RunHandle {
-                voice: (harness_id == HarnessId::Codex).then_some(voice_handle),
                 voice_active: voice_active.clone(),
                 run_id: run_id.clone(),
                 steerable: harness.supports_steering(),
@@ -7161,92 +7093,6 @@ mod tests {
         }
     }
 
-    async fn idle_startup_case(fail: bool) {
-        use super::*;
-        let temp = tempfile::tempdir().unwrap();
-        let idle_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let inference_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let registry = crate::HarnessRegistry::new();
-        registry.register(Arc::new(IdleStartupFixture {
-            idle_calls: idle_calls.clone(),
-            inference_calls: inference_calls.clone(),
-            fail,
-        }));
-        let core = crate::EngineCore::assemble_with_profile(
-            crate::EngineProfile::local(temp.path()).unwrap(),
-            Arc::new(registry),
-            HarnessId::Codex,
-            None,
-        )
-        .unwrap();
-        core.workspace
-            .create_chat("idle", None, Some(&core.device_id), None, None)
-            .unwrap();
-        let mut request = request();
-        request.prompt.clear();
-        core.sessions
-            .inner
-            .remember_harness_session("idle", "old-native-thread", &request.cwd, HarnessId::Codex);
-        core.sessions.start_idle("idle", request).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let completed = if fail {
-                    core.sessions
-                        .session_status("idle")
-                        .is_some_and(|s| s.status == SessionStatus::Errored)
-                } else {
-                    core.sessions
-                        .inner
-                        .resume_for("idle", "/tmp", HarnessId::Codex)
-                        .as_deref()
-                        == Some("new-native-thread")
-                };
-                if completed {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(idle_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(inference_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-        let entries = core
-            .doc_host
-            .open("idle")
-            .unwrap()
-            .doc()
-            .read_entries()
-            .unwrap();
-        assert!(
-            !entries
-                .iter()
-                .any(|entry| entry.role == zeron_doc::MessageRole::User)
-        );
-        if !fail {
-            assert!(entries.is_empty());
-            assert_eq!(
-                core.sessions.session_status("idle").unwrap().status,
-                SessionStatus::Idle
-            );
-            assert_eq!(
-                core.workspace.chat_harness_session("idle").unwrap().session_id,
-                "new-native-thread"
-            );
-            let events = core.sessions.inner.journal.replay("idle", 0).unwrap();
-            assert!(events.iter().any(|(_, event)| matches!(event, AgentEvent::SessionStarted { session_id, .. } if session_id == "new-native-thread")));
-        }
-        core.sessions.shutdown().await;
-    }
-    #[tokio::test]
-    async fn voice_idle_startup_failure_never_retries_as_inference() {
-        idle_startup_case(true).await;
-    }
-    #[tokio::test]
-    async fn voice_idle_startup_remembers_thread_without_creating_messages() {
-        idle_startup_case(false).await;
-    }
-
     #[test]
     fn live_routing_requires_the_same_runtime_configuration() {
         let initial = request();
@@ -7287,34 +7133,6 @@ mod tests {
 
         follow_up.reasoning = Some(zeron_proto::ReasoningLevel::Medium);
         assert!(!config.can_route(HarnessId::Grok, &follow_up));
-    }
-
-    #[test]
-    fn claude_routing_compares_what_the_cli_launches_with() {
-        let claude = || -> Arc<dyn Harness> { Arc::new(zeron_harness::ClaudeHarness::new()) };
-        let mut initial = request();
-        initial.model = Some("claude-opus-5-5".into());
-        initial
-            .model_options
-            .insert("fastMode".into(), serde_json::json!(false));
-        let config = RuntimeConfig::new(HarnessId::ClaudeCode, &initial, claude());
-
-        // The CLI never reads the sandbox level; an option that launches no
-        // flag in either spelling is the same runtime.
-        let mut follow_up = initial.clone();
-        follow_up.sandbox = SandboxLevel::DangerFullAccess;
-        follow_up.model_options.clear();
-        follow_up.worktree = None;
-        assert!(config.can_route(HarnessId::ClaudeCode, &follow_up));
-
-        follow_up
-            .model_options
-            .insert("fastMode".into(), serde_json::json!("true"));
-        assert!(!config.can_route(HarnessId::ClaudeCode, &follow_up));
-        follow_up.model_options.clear();
-
-        follow_up.cwd = "/elsewhere".into();
-        assert!(!config.can_route(HarnessId::ClaudeCode, &follow_up));
     }
 
     #[test]

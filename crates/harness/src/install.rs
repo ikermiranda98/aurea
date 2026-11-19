@@ -192,8 +192,6 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
 pub fn installed(id: HarnessId) -> bool {
     use HarnessId::*;
     match id {
-        ClaudeCode => crate::ClaudeHarness::new().installed(),
-        Codex => crate::CodexHarness::new().installed(),
         
         Opencode => crate::OpencodeHarness::new().installed(),
         
@@ -203,7 +201,7 @@ pub fn installed(id: HarnessId) -> bool {
         
         
         // Aurea runs only opencode (and the test mock).
-        Cursor | Pi | Grok | Hermes | Devin | Antigravity | Muse | Mock | Fx | Registry(_) => false,
+        ClaudeCode | Codex | Cursor | Pi | Grok | Hermes | Devin | Antigravity | Muse | Mock | Fx | Registry(_) => false,
         
         
     }

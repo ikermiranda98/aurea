@@ -6670,10 +6670,9 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
             .collect::<String>()
             .to_ascii_lowercase()
     }
-    let catalog = match harness {
-        HarnessId::ClaudeCode => zeron_harness::claude::catalog::static_models(),
-        _ => Vec::new(),
-    };
+    // Aurea curates no catalog of its own (Claude's static list went with
+    // its harness): rows keep the labels their agent gives them.
+    let catalog: Vec<Model> = Vec::new();
     // Curated label for an id: exact normalized match, else — for bare
     // alphabetic aliases like `opus` — the first (flagship-ordered) family
     // row. Versioned foreign ids never fuzzy-match.
@@ -10423,50 +10422,6 @@ mod tests {
         // Idempotent over a clean list.
         let clean = vec![bare_model("titan-5", "Titan 5")];
         assert_eq!(normalize_model_rows(HarnessId::Codex, clean.clone()), clean);
-    }
-
-    #[test]
-    fn normalize_gives_claude_rows_their_versioned_catalog_labels() {
-        // The real prod shape: alias values with terse names. Claude rows
-        // adopt the curated labels so the version number always shows
-        // (user request), exact ids included; foreign ids pass through.
-        let models = normalize_model_rows(
-            HarnessId::ClaudeCode,
-            vec![
-                bare_model("default", "Default (recommended)"),
-                bare_model("opus[1m]", "Opus (1M context)"),
-                bare_model("claude-fable-5[1m]", "Fable"),
-                bare_model("fable", "Fable"),
-                bare_model("sonnet", "Sonnet"),
-                bare_model("haiku", "Haiku"),
-                bare_model("claude-nova-1", "Nova 1"),
-            ],
-        );
-        // A bare alias takes its family's newest curated row (the catalog is
-        // best-first): fable is Fable 5.2, sonnet Sonnet 5.5, haiku Haiku 5.5,
-        // as the CLI resolves them. An exact id keeps its own version.
-        assert_eq!(
-            models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
-            vec![
-                "Opus 5.5",
-                "Fable 5",
-                "Fable 5.2",
-                "Sonnet 5.5",
-                "Haiku 5.5",
-                "Nova 1"
-            ]
-        );
-        assert_eq!(
-            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            vec![
-                "opus",
-                "claude-fable-5",
-                "fable",
-                "sonnet",
-                "haiku",
-                "claude-nova-1"
-            ]
-        );
     }
 
     #[test]

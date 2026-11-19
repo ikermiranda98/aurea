@@ -5,7 +5,7 @@ use futures::StreamExt;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 use zeron_harness::{
-    CancellationToken, ClaudeHarness, CodexHarness, Harness,
+    CancellationToken, Harness,
     OpencodeHarness, RunControls, SteerMessage,
 };
 use zeron_proto::{AgentEvent, DoneStatus, RunRequest, SandboxLevel};
@@ -15,9 +15,7 @@ async fn main() -> anyhow::Result<()> {
     let name = std::env::args().nth(1).expect("harness name");
     let model = std::env::args().nth(2);
     let require_mid_turn = std::env::args().any(|arg| arg == "--require-mid-turn");
-    let harness: Arc<dyn Harness> = match name.as_str() {
-        "claude" => Arc::new(ClaudeHarness::new()),
-        "codex" => Arc::new(CodexHarness::new()),
+    let harness: Arc<dyn Harness> = match name.as_str() {
         "opencode" => Arc::new(OpencodeHarness::new()),
         _ => anyhow::bail!("unknown harness"),
     };

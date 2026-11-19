@@ -2,8 +2,4 @@
 //! linked against the whole crate, so a handful of tests each cost more to
 //! link than to run.
 
-mod claude_models;
-mod model_catalog;
 mod model_refresh;
-mod run_env;
-mod claude_availability;

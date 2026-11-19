@@ -1,13 +1,8 @@
 //! zeron-harness — one interface over coding agents (plus a mock for tests).
 //!
-//! NATIVE DRIVERS speak each agent's own wire directly: Claude Code over
-//! stream-json ([`ClaudeHarness`]), Codex over the app-server JSON-RPC
-//! ([`CodexHarness`]), Cursor through a pinned @cursor/sdk shim
-//! ([`CursorHarness`]), and opencode over its own HTTP/SSE server protocol
-//! ([`OpencodeHarness`] — what the opencode desktop app speaks). The shared
-//! [`AcpHarness`] remains ONLY for agents built ground-up on ACP — Devin
-//! (`devin acp`), Grok (`grok agent stdio`) Hermes (`hermes acp`) and
-//! Antigravity. Pi uses native JSONL RPC ([`PiHarness`]).
+//! Aurea drives one agent: opencode over its own HTTP/SSE server protocol
+//! ([`OpencodeHarness`] — what the opencode desktop app speaks). The other
+//! native drivers (Claude Code, Codex, Cursor, Pi, the ACP agents) are gone.
 //! Adapter-mediated ACP for claude/codex/cursor was retired — and opencode's
 //! ACP layer with it: the adapters held prompt turns open for background
 //! work the CLIs themselves settle eagerly (and opencode's settles on the
@@ -235,9 +230,16 @@ pub fn same_model_options(
         .all(|key| a.get(key).and_then(canonical) == b.get(key).and_then(canonical))
 }
 
+/// Realtime voice controls of a run (no harness in Aurea takes them).
+pub struct RealtimeControls {
+    _private: (),
+}
+
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
-    pub realtime: Option<codex::realtime::RealtimeControls>,
+    /// Realtime voice controls. Codex's voice calls are gone from Aurea, so
+    /// this is always `None`; the field stays for the drivers that ignore it.
+    pub realtime: Option<RealtimeControls>,
     /// Shared execution gate held until the harness has shut down and reaped
     /// its subprocess, including when the host drops the event stream. Each
     /// detached session task must retain this lease through its cleanup.
@@ -493,7 +495,6 @@ mod catalog_failure;
 pub use zeron_proto::redact;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
-pub mod codex;
 pub mod agent_ports;
 pub(crate) mod executable;
 pub mod install;
@@ -800,8 +801,6 @@ pub(crate) fn crash_message(
     }
 }
 
-pub use claude::ClaudeHarness;
-pub use codex::CodexHarness;
 pub use opencode::OpencodeHarness;
 
 // ---------------------------------------------------------------------------

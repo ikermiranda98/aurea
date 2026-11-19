@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use zeron_doc::SessionCommandPayload;
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{
-    ClaudeHarness, CodexHarness, Harness, OpencodeHarness,
+    Harness, OpencodeHarness,
 };
 use zeron_proto::{
     AgentEvent, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SessionStatus,
@@ -69,8 +69,6 @@ struct Chat<'a> {
 /// unique to it (so parallel suites never count each other's work).
 fn harness(name: &str) -> (HarnessId, Arc<dyn Harness>, u32) {
     match name {
-        "claude" => (HarnessId::ClaudeCode, Arc::new(ClaudeHarness::new()), 270),
-        "codex" => (HarnessId::Codex, Arc::new(CodexHarness::new()), 370),
         "opencode" => (HarnessId::Opencode, Arc::new(OpencodeHarness::new()), 570),
         other => panic!("unknown harness {other}"),
     }

@@ -13470,7 +13470,6 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeron-doc",
  "zeron-proto",
- "zeron-voice-media",
  "zip",
 ]
 
@@ -13887,37 +13886,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
-]
-
-[[package]]
-name = "zeron-voice-media"
-version = "0.3.7"
-dependencies = [
- "async-trait",
- "semver",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-util",
- "zeron-proto",
- "zeron-voice-session",
-]
-
-[[package]]
-name = "zeron-voice-session"
-version = "0.3.7"
-dependencies = [
- "async-trait",
- "futures",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
- "zeron-orb",
- "zeron-proto",
- "zeron-rpc",
 ]
 
 [[package]]

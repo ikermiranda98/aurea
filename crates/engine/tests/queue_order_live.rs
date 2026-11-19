@@ -10,7 +10,7 @@ use std::{sync::Arc, time::Duration};
 use zeron_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionMessageEntry};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{
-    ClaudeHarness, CodexHarness, Harness, OpencodeHarness,
+    Harness, OpencodeHarness,
 };
 use zeron_proto::{ChatConfig, HarnessId, RunRequest, SandboxLevel, SessionStatus};
 
@@ -18,8 +18,6 @@ const CHAT: &str = "order";
 
 fn harness(name: &str) -> Arc<dyn Harness> {
     match name {
-        "claude" => Arc::new(ClaudeHarness::new()),
-        "codex" => Arc::new(CodexHarness::new()),
         "opencode" => Arc::new(OpencodeHarness::new()),
         _ => panic!("unknown harness {name}"),
     }

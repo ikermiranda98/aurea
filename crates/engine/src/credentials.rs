@@ -621,17 +621,8 @@ impl CredentialBroker {
             CodexCheck::FailedAt(at) if at.elapsed() < CODEX_REPAIR_RETRY => return,
             _ => {}
         }
-        *check = match zeron_harness::codex::npm_repair::repair().await {
-            Ok(zeron_harness::codex::npm_repair::Repair::NotNeeded) => CodexCheck::Passed,
-            Ok(zeron_harness::codex::npm_repair::Repair::Repaired { version }) => {
-                tracing::info!(%version, "reinstalled Codex with its native binary");
-                CodexCheck::Passed
-            }
-            Err(error) => {
-                tracing::warn!(%error, "Codex is missing its native binary and the reinstall failed");
-                CodexCheck::FailedAt(Instant::now())
-            }
-        };
+        // Codex's harness (and its npm repair) is gone from Aurea.
+        *check = CodexCheck::Passed;
     }
 
     /// A Codex login the sandbox has on its own (`codex login` inside it, or

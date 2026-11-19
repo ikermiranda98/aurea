@@ -1390,46 +1390,6 @@ mod title_tests {
     use super::*;
 
     #[test]
-    fn title_preferences_persist_and_validate_harness_model_pairs() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = HarnessRegistry::new();
-        registry.load_prefs(dir.path());
-        registry.register(Arc::new(
-            zeron_harness::ClaudeHarness::new().with_executable(std::env::current_exe().unwrap()),
-        ));
-        let settings = TitleSettings {
-            harness: Some(HarnessId::ClaudeCode),
-            model: Some("haiku-test".into()),
-        };
-        registry.set_title_settings(settings.clone()).unwrap();
-        let reloaded = HarnessRegistry::new();
-        reloaded.load_prefs(dir.path());
-        assert_eq!(reloaded.title_settings(), settings);
-        assert!(
-            registry
-                .set_title_settings(TitleSettings {
-                    harness: None,
-                    model: Some("orphan".into())
-                })
-                .is_err()
-        );
-        assert!(
-            registry
-                .set_title_settings(TitleSettings {
-                    harness: Some(HarnessId::Cursor),
-                    model: None
-                })
-                .is_err()
-        );
-        assert_eq!(registry.title_settings(), settings);
-        registry
-            .set_title_settings(TitleSettings::default())
-            .unwrap();
-        reloaded.load_prefs(dir.path());
-        assert_eq!(reloaded.title_settings(), TitleSettings::default());
-    }
-
-    #[test]
     fn old_harness_preferences_default_to_automatic_titles() {
         let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":["codex"]}"#).unwrap();
         assert_eq!(prefs.titles, TitleSettings::default());

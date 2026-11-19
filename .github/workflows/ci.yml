@@ -161,14 +161,6 @@ jobs:
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).installer || '' }}
 
-  voice:
-    needs: [plan, admit]
-    if: fromJSON(needs.plan.outputs.suites).voice
-    uses: ./.github/workflows/voice-tests.yml
-    with:
-      pass-key: ${{ fromJSON(needs.plan.outputs.keys).voice || '' }}
-      skip: ${{ toJSON(fromJSON(needs.plan.outputs.skip).voice || fromJSON('[]')) }}
-
   windows:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).windows
@@ -233,7 +225,7 @@ jobs:
 
   result:
     name: CI result
-    needs: [plan, admit, linux-core, linux-ui, cursor, edge, installer, voice, windows, macos, frame-source, ios, android, zgx]
+    needs: [plan, admit, linux-core, linux-ui, cursor, edge, installer, windows, macos, frame-source, ios, android, zgx]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

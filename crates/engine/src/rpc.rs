@@ -62,8 +62,6 @@
 mod agent_gate;
 mod device_stats;
 mod remote_plugins;
-mod voice_chat;
-mod voice_remote;
 use async_trait::async_trait;
 use base64::Engine as _;
 use futures::StreamExt;
@@ -1985,42 +1983,6 @@ impl EngineRpc {
         }
     }
 
-    async fn prepare_voice_bridge(
-        &self,
-        chat: &str,
-    ) -> Result<
-        (
-            zeron_harness::codex::realtime::RealtimeHandle,
-            tokio::sync::broadcast::Receiver<zeron_proto::voice::VoiceEvent>,
-            std::sync::Arc<crate::sessions::VoiceActivity>,
-        ),
-        zeron_proto::voice::VoiceRejection,
-    > {
-        use zeron_proto::voice::VoiceRejection;
-        // Without Codex here a retry can never connect: ask for an install.
-        if !self
-            .registry
-            .resolve(HarnessId::Codex)
-            .is_ok_and(|codex| codex.installed())
-        {
-            return Err(VoiceRejection::NativeRuntimeUnavailable);
-        }
-        let mut request = self
-            .doc_host
-            .request_from_chat_row(chat, "")
-            .ok_or(VoiceRejection::Unsupported)?;
-        if request.cwd.is_empty() {
-            request.cwd = "~".into();
-        }
-        self.sessions
-            .start_idle(chat, request)
-            .await
-            .map_err(|_| VoiceRejection::Unsupported)?;
-        self.sessions
-            .take_voice_bridge(chat)
-            .ok_or(VoiceRejection::Unsupported)
-    }
-
     fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
         let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
         match params {
@@ -2593,9 +2555,6 @@ fn warp_apagado() -> zeron_proto::warp::WarpStatus {
 }
 
 fn forwardable(method: &str) -> bool {
-    if voice_remote::handles(method) {
-        return true;
-    }
     matches!(
         method,
         methods::FORK_SIDE_CHAT
@@ -3517,9 +3476,6 @@ impl RpcService for EngineRpc {
                 | methods::FORGET_AGENT_ACCOUNT
         ) {
             self.voice.retire();
-        }
-        if voice_remote::handles(method) {
-            return self.voice_remote(method, params).await;
         }
         // Signing out retires this device's plugin signing key first, while
         // the session can still revoke it on the edge.
@@ -6613,30 +6569,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn voice_owner_is_shared_across_services_and_shutdown_retires_it() {
-        let temp = tempfile::tempdir().unwrap();
-        let core = crate::EngineCore::assemble_with_profile(
-            crate::EngineProfile::local(temp.path()).unwrap(),
-            std::sync::Arc::new(HarnessRegistry::new()),
-            HarnessId::Codex,
-            None,
-        )
-        .unwrap();
-        let first = core.rpc_service();
-        let second = core.rpc_service();
-        let lease = first.voice.reserve("chat").unwrap();
-        assert!(second.voice.owns_chat("chat"));
-        assert_eq!(
-            second.voice.reserve("other").unwrap_err(),
-            zeron_proto::voice::VoiceRejection::Busy
-        );
-        let owner = second.voice.own(lease).unwrap();
-        core.sessions.shutdown().await;
-        assert!(!first.voice.owns_chat("chat"));
-        drop(owner);
-    }
-
-    #[tokio::test]
     async fn chats_created_by_a_voice_orchestrator_are_top_level() {
         let temp = tempfile::tempdir().unwrap();
         let core = crate::EngineCore::assemble_with_profile(
@@ -6701,311 +6633,6 @@ mod tests {
             assert_eq!(row.child_kind, expected, "{chat}");
         }
         core.sessions.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn voice_origin_uses_normal_remote_routing() {
-        let temp = tempfile::tempdir().unwrap();
-        let core = crate::EngineCore::assemble_with_profile(
-            crate::EngineProfile::local(temp.path()).unwrap(),
-            std::sync::Arc::new(HarnessRegistry::new()),
-            HarnessId::Codex,
-            None,
-        )
-        .unwrap();
-        let rpc = core.rpc_service();
-        let lease = rpc.voice.reserve("voice-origin").unwrap();
-        let owner = rpc.voice.own(lease).unwrap();
-        for method in [methods::QUEUE_COMMAND, methods::QUEUE_MESSAGE] {
-            let error = match rpc.handle(method, serde_json::json!({"originChatId":"voice-origin","targetDeviceId":"remote","chatId":"other"})).await {
-                Err(error) => error,
-                Ok(_) => panic!("offline remote routing unexpectedly succeeded"),
-            };
-            assert!(
-                matches!(error, RpcError::Failed(ref message) if message == "cannot reach device remote: remote routing unavailable (offline)")
-            );
-        }
-        // Voice origin follows the same forwarding boundary as ordinary MCP
-        // calls; this fixture has no relay configured.
-        rpc.handle(
-            methods::MUTATE,
-            serde_json::json!({"op":"createChat", "chatId":"remote-grok",
-                "originChatId":"voice-origin", "deviceId":"remote",
-                "config":{"harness":"grok","sandbox":"workspace-write"}}),
-        )
-        .await
-        .unwrap();
-        let chat = core.workspace.chat("remote-grok").unwrap().unwrap();
-        assert_eq!(chat.device_id, "remote");
-        assert_eq!(chat.config.unwrap().harness, HarnessId::Grok);
-        drop(owner);
-        core.sessions.shutdown().await;
-    }
-
-    // Each subprocess has private HOME/PATH/overrides, avoiding process-global test races.
-    #[cfg(unix)]
-    async fn installer_rpc_fixture(mode: &str) {
-        use std::{os::unix::fs::PermissionsExt, sync::Arc};
-        if std::env::var_os("ZERON_INSTALL_FIXTURE_CHILD").is_none() {
-            let root = tempfile::tempdir().unwrap();
-            let bin = root.path().join("bin");
-            std::fs::create_dir(&bin).unwrap();
-            let script = match mode {
-                "success" => {
-                    "test -z \"$ZERON_INSTALL_FIXTURE_CHILD\" && test -z \"$CLAUDECODE\" && printf '#!/bin/sh\\necho 99.0.0\\n' > \"$CODEX_EXECUTABLE\" && /bin/chmod +x \"$CODEX_EXECUTABLE\""
-                }
-                "failure" => "echo 'fixture failure api_key=private' >&2; exit 7",
-                "missing" => "exit 0",
-                "cancel" => "echo ready > \"$READY_FILE\"; sleep 60",
-                "npm" => "npm install -g @openai/codex",
-                _ => unreachable!(),
-            };
-            let test = format!("rpc::tests::installer_rpc_{mode}");
-            let output = tokio::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", &test, "--nocapture", "--include-ignored"])
-                .env("ZERON_INSTALL_FIXTURE_CHILD", root.path())
-                .env("ZERON_INSTALLER_COMMAND_CODEX", script)
-                .env("ZERON_NO_LOGIN_SHELL", "1")
-                .env("HOME", root.path())
-                .env("XDG_CONFIG_HOME", root.path().join("config"))
-                .env("CODEX_EXECUTABLE", bin.join("codex"))
-                .env("CLAUDECODE", "nested-test")
-                .env("READY_FILE", root.path().join("ready"))
-                .env("npm_config_prefix", root.path())
-                .env("npm_config_cache", root.path().join("npm-cache"))
-                .env(
-                    "PATH",
-                    std::env::join_paths(
-                        std::iter::once(bin)
-                            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-                    )
-                    .unwrap(),
-                )
-                .output()
-                .await
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            println!("{}", String::from_utf8_lossy(&output.stdout));
-            return;
-        }
-        let root =
-            std::path::PathBuf::from(std::env::var_os("ZERON_INSTALL_FIXTURE_CHILD").unwrap());
-        let registry = Arc::new(HarnessRegistry::new());
-        registry.register(Arc::new(zeron_harness::CodexHarness::new()));
-        let core = crate::EngineCore::assemble(
-            &root.join("engine"),
-            registry.clone(),
-            HarnessId::Codex,
-            None,
-        )
-        .unwrap();
-        let rpc = core.rpc_service();
-        let params = serde_json::json!({"harness": "codex"});
-        assert!(!registry.descriptors()[0].installed);
-        assert_eq!(registry.descriptors()[0].enabled, Some(false));
-        let result = if mode == "cancel" {
-            let rpc = rpc.clone();
-            let task = tokio::spawn(async move {
-                rpc.handle(
-                    methods::INSTALL_HARNESS,
-                    serde_json::json!({"harness": "codex"}),
-                )
-                .await
-            });
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                while !root.join("ready").exists() {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
-            // A second service for the same device must share the in-flight guard.
-            let other = core.rpc_service();
-            assert!(
-                matches!(other.handle(methods::INSTALL_HARNESS, params.clone()).await, Err(RpcError::Failed(e)) if e == "already installing")
-            );
-            other.handle(methods::CANCEL_INSTALL, params).await.unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(5), task)
-                .await
-                .unwrap()
-                .unwrap()
-        } else {
-            rpc.handle(methods::INSTALL_HARNESS, params).await
-        };
-        match mode {
-            "success" | "npm" => {
-                let RpcReply::Value(value) = result.unwrap() else {
-                    panic!("expected descriptors");
-                };
-                let list: Vec<crate::registry::HarnessDescriptor> =
-                    serde_json::from_value(value).unwrap();
-                assert!(list[0].installed);
-                assert_eq!(list[0].enabled, Some(true));
-                assert!(list[0].can_install);
-                let path = root.join("bin/codex");
-                assert!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o111 != 0);
-                println!(
-                    "InstallHarness ({mode}): installed=false/enabled=false -> installed=true/enabled=true; {}",
-                    path.display()
-                );
-            }
-            "failure" => assert!(
-                matches!(result, Err(RpcError::Failed(e)) if e.contains("fixture failure") && e.contains("[REDACTED]") && !e.contains("private"))
-            ),
-            "missing" => assert!(
-                matches!(result, Err(RpcError::Failed(e)) if e.contains("installer finished but `codex` was not found on PATH"))
-            ),
-            "cancel" => {
-                assert!(matches!(result, Err(RpcError::Failed(e)) if e.contains("cancelled")));
-                assert!(registry.installs.begin(HarnessId::Codex).is_ok());
-            }
-            _ => unreachable!(),
-        }
-        assert!(forwardable(methods::CANCEL_INSTALL));
-        core.shutdown().await;
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn installer_rpc_success() {
-        installer_rpc_fixture("success").await;
-    }
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn installer_rpc_failure() {
-        installer_rpc_fixture("failure").await;
-    }
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn installer_rpc_missing() {
-        installer_rpc_fixture("missing").await;
-    }
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn installer_rpc_cancel() {
-        installer_rpc_fixture("cancel").await;
-    }
-    #[cfg(unix)]
-    #[tokio::test]
-    #[ignore = "downloads the official npm package into an isolated temporary prefix"]
-    async fn installer_rpc_npm() {
-        installer_rpc_fixture("npm").await;
-    }
-
-    #[tokio::test]
-    async fn explicit_install_rpc_verifies_archive_and_refreshes_descriptors() {
-        use sha2::{Digest, Sha512};
-        use std::io::Write;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use zeron_harness::archive_install::{ArchivePin, ensure_installed, installed_entry};
-        if std::env::var_os("ZERON_INSTALL_RPC_TEST").is_none() {
-            let root = tempfile::tempdir().unwrap();
-            let output = tokio::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "rpc::tests::explicit_install_rpc_verifies_archive_and_refreshes_descriptors",
-                    "--nocapture",
-                ])
-                .env("ZERON_INSTALL_RPC_TEST", "1")
-                .env("ZERON_ADAPTERS_DIR", root.path())
-                .output()
-                .await
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{} {}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
-        if !zeron_harness::acp::can_install(HarnessId::Antigravity) {
-            return;
-        }
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip.start_file("server", zip::write::SimpleFileOptions::default())
-            .unwrap();
-        zip.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
-        let bytes = zip.finish().unwrap().into_inner();
-        let digest = Box::leak(format!("{:x}", Sha512::digest(&bytes)).into_boxed_str());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = Box::leak(
-            format!("http://{}/archive.zip", listener.local_addr().unwrap()).into_boxed_str(),
-        );
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut headers = Vec::new();
-            let mut buf = [0; 4096];
-            while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                let count = socket.read(&mut buf).await.unwrap();
-                assert!(count > 0, "archive request closed before its headers");
-                headers.extend_from_slice(&buf[..count]);
-            }
-            socket
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        bytes.len()
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-            socket.write_all(&bytes).await.unwrap();
-        });
-        let pin = ArchivePin {
-            name: "explicit-install-test",
-            version: "1",
-            url,
-            entry: "server",
-            sha512: digest,
-        };
-        let registry = HarnessRegistry::new();
-        let descriptor = serde_json::from_value(serde_json::json!({
-            "id": "antigravity", "name": "Antigravity", "supportsSteering": true,
-            "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false
-        }))
-        .unwrap();
-        registry.register_lazy(
-            descriptor,
-            Box::new(move || installed_entry(&pin).is_some()),
-            Box::new(|| panic!("installation must not spawn the harness")),
-        );
-        assert!(!registry.descriptors()[0].installed);
-        let result = install_harness_with(&registry, HarnessId::Antigravity, || async {
-            ensure_installed(pin, "Test adapter").await.map(|_| ())
-        })
-        .await
-        .unwrap();
-        assert!(result[0].installed);
-        assert_eq!(result[0].enabled, Some(true));
-        assert!(result[0].can_install);
-        assert!(installed_entry(&pin).unwrap().is_file());
-        server.await.unwrap();
-        // The verified marker makes another explicit install idempotent, even
-        // after the archive server has stopped.
-        install_harness_with(&registry, HarnessId::Antigravity, || async {
-            ensure_installed(pin, "Test adapter").await.map(|_| ())
-        })
-        .await
-        .unwrap();
-        assert!(
-            install_harness_with(&registry, HarnessId::Mock, || async {
-                panic!("unsupported harness must not invoke an installer")
-            })
-            .await
-            .is_err()
-        );
-        assert!(forwardable(methods::INSTALL_HARNESS));
-        assert_eq!(
-            forward_deadline(methods::INSTALL_HARNESS),
-            std::time::Duration::from_secs(15 * 60)
-        );
     }
 
     /// A reader that kept the transcript (opened before, or reconnecting)
