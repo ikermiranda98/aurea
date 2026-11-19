@@ -12857,6 +12857,14 @@ impl Render for Shell {
                     self.composer
                         .update(cx, |c, cx| c.open_model_menu(window, cx));
                 }
+                // `ZERON_OPEN_DIALOG=menu` opens the drawer's "..." menu.
+                if self.debug_dialog.as_deref() == Some("menu")
+                    && self.splash == SplashPhase::Gone
+                    && self.sidebar_now() > 1.0
+                {
+                    self.debug_dialog = None;
+                    self.open_sidebar_view_menu(window, cx);
+                }
                 // MessageRail width gate: hide below 48rem of main-panel width.
                 let viewport = f32::from(window.viewport_size().width);
                 self.viewport_height = f32::from(window.viewport_size().height);

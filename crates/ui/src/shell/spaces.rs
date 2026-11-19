@@ -3964,7 +3964,7 @@ impl Shell {
         }
     }
 
-    fn open_sidebar_view_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_sidebar_view_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_spaces_menu(cx);
         let focus = cx.focus_handle();
         self.sidebar_view_menu.open(SidebarViewMenu {
@@ -4095,17 +4095,12 @@ impl Shell {
         let active = menu_state.active;
         let focus = menu_state.focus.clone();
         let armed = self.clean_chat_armed;
+        // Plain menu rows at their natural height (user request: smaller,
+        // more natural boxes).
         let row = |ix: usize, id: &'static str| {
-            popover::menu_row_nav(theme, false, active == Some(ix), id)
-                .id(id)
-                .h(px(30.0))
-                .py(px(0.0))
+            popover::menu_row_nav(theme, false, active == Some(ix), id).id(id)
         };
-        let clean_label = if armed {
-            "Click again to delete the whole chat"
-        } else {
-            "Clean Chat"
-        };
+        let clean_label = if armed { "Click again to confirm" } else { "Clean Chat" };
         let clean = row(0, "sidebar-clean-chat")
             // The row already owns `on_hover` (its hover blend): follow the
             // pointer with mouse moves instead.
@@ -4155,8 +4150,9 @@ impl Shell {
                     .text_color(theme.text_muted),
             )
             .child(div().flex_1().child("Settings"));
+        // Sized to its two rows, not to the drawer.
         popover::popover_card(theme)
-            .w(px(self.sidebar_content_width() - 2.0 * Theme::SPACE_SM))
+            .w(px(184.0))
             .track_focus(&focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 this.sidebar_view_menu_key(event, cx)
@@ -4168,7 +4164,6 @@ impl Shell {
             .flex_col()
             .gap(px(2.0))
             .child(clean)
-            .child(popover::menu_separator())
             .child(open_settings)
             .into_any_element()
     }
