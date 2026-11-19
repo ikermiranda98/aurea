@@ -28,8 +28,6 @@ members = [
     "crates/notify",
     "crates/syntax",
     "crates/markdown",
-    "crates/mobile",
-    "crates/mobile-bindgen",
     "crates/client",
     "crates/mcp",
     "crates/text",
@@ -72,7 +70,6 @@ zeron-ui = { path = "crates/ui" }
 zeron-notify = { path = "crates/notify" }
 zeron-syntax = { path = "crates/syntax" }
 zeron-markdown = { path = "crates/markdown" }
-zeron-mobile = { path = "crates/mobile" }
 zeron-client = { path = "crates/client" }
 zeron-theme = { path = "crates/theme" }
 zeron-mcp = { path = "crates/mcp" }
@@ -227,19 +224,3 @@ opt-level = 3
 [profile.dev.package.zeron-visual-gpu]
 opt-level = 3
 
-# Mobile core (scripts/ios/build-core.sh). Always optimized — layout and sync
-# run on the phone's hot paths, so even Debug app builds link an -O core.
-[profile.mobile]
-inherits = "release"
-lto = false
-strip = false
-debug = "line-tables-only"
-incremental = true
-codegen-units = 16
-
-# TestFlight/App Store archives.
-[profile.mobile-dist]
-inherits = "release"
-lto = "thin"
-codegen-units = 1
-strip = "debuginfo"
