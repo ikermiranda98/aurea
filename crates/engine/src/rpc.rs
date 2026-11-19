@@ -2772,6 +2772,130 @@ fn is_stream_method(method: &str) -> bool {
 }
 
 /// A watch receiver as a stream: current value first, then every change.
+/// Trading methods that move money or bots (or answer for the person): only
+/// the local app may call them, never an agent's MCP server or a peer.
+fn trading_needs_person(method: &str) -> bool {
+    matches!(
+        method,
+        methods::TRADING_SYSTEM_START
+            | methods::TRADING_SYSTEM_STOP
+            | methods::TRADING_TASK_ADD
+            | methods::TRADING_TASK_CANCEL
+            | methods::TRADING_POSITION_CLOSE
+            | methods::TRADING_POSITIONS_CLOSE_ALL
+            | methods::TRADING_PANIC
+            | methods::TRADING_PROPOSAL_RESOLVE
+            | methods::TRADING_LINK_ADD
+            | methods::TRADING_LINK_REMOVE
+            | methods::TRADING_POOL_SELECT
+            | methods::TRADING_CONNECT
+            | methods::TRADING_DISCONNECT
+            | methods::TRADING_ACCOUNT_SELECT
+    )
+}
+
+#[cfg(test)]
+mod trading_person_tests {
+    use super::*;
+
+    #[test]
+    fn money_and_bot_methods_are_the_persons_and_reads_and_proposals_are_not() {
+        for method in [
+            methods::TRADING_POSITION_CLOSE,
+            methods::TRADING_POSITIONS_CLOSE_ALL,
+            methods::TRADING_PANIC,
+            methods::TRADING_SYSTEM_START,
+            methods::TRADING_SYSTEM_STOP,
+            methods::TRADING_TASK_ADD,
+            methods::TRADING_PROPOSAL_RESOLVE,
+            methods::TRADING_CONNECT,
+        ] {
+            assert!(trading_needs_person(method), "{method}");
+        }
+        for method in [
+            methods::TRADING_SNAPSHOT,
+            methods::WATCH_TRADING_SNAPSHOT,
+            methods::TRADING_PROPOSE,
+            methods::TRADING_IBKR_DETECT,
+        ] {
+            assert!(!trading_needs_person(method), "{method}");
+        }
+    }
+
+    /// An agent cannot close a position itself; it proposes, and only the
+    /// person's approval on the desk runs the close.
+    #[tokio::test]
+    async fn an_agent_proposes_and_only_the_persons_approval_runs_it() {
+        use zeron_rpc::{Caller, with_caller};
+        let dir = tempfile::tempdir().unwrap();
+        let registry = std::sync::Arc::new(HarnessRegistry::new());
+        let core = crate::EngineCore::assemble(
+            &dir.path().join("engine"),
+            registry,
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let agent = || Caller::Agent { chat: Some("chat-1".into()) };
+        let value = |reply: Result<RpcReply, RpcError>| match reply {
+            Ok(RpcReply::Value(value)) => value,
+            Ok(_) => panic!("streamed"),
+            Err(error) => panic!("{error}"),
+        };
+
+        // Directly: refused, whatever the method.
+        for (method, params) in [
+            (methods::TRADING_POSITION_CLOSE, serde_json::json!({ "symbol": "EURUSD" })),
+            (methods::TRADING_PANIC, serde_json::json!({})),
+            (methods::TRADING_PROPOSAL_RESOLVE, serde_json::json!({ "id": "x", "approve": true })),
+        ] {
+            let refused = with_caller(agent(), rpc.handle(method, params)).await;
+            assert!(refused.is_err(), "{method} ran for an agent");
+        }
+
+        // Proposed: it waits on the desk, attributed to the asking chat.
+        let proposal = value(
+            with_caller(
+                agent(),
+                rpc.handle(
+                    methods::TRADING_PROPOSE,
+                    serde_json::json!({
+                        "action": { "kind": "close_position", "symbol": "EURUSD" },
+                        "reason": "La persona pidio cerrar EURUSD",
+                    }),
+                ),
+            )
+            .await,
+        );
+        assert_eq!(proposal["status"], "pending");
+        assert_eq!(proposal["chatId"], "chat-1");
+        let id = proposal["id"].as_str().unwrap().to_owned();
+        let snapshot = value(rpc.handle(methods::TRADING_SNAPSHOT, serde_json::json!({})).await);
+        assert_eq!(snapshot["proposals"][0]["id"], id.as_str());
+
+        // The person approves: the (demo) close runs and the verdict lands.
+        let resolved = value(
+            rpc.handle(
+                methods::TRADING_PROPOSAL_RESOLVE,
+                serde_json::json!({ "id": id, "approve": true }),
+            )
+            .await,
+        );
+        assert_eq!(resolved["status"], "done", "{resolved}");
+        assert!(resolved["result"].as_str().is_some_and(|r| !r.is_empty()));
+        // Answered once: approving again runs nothing.
+        assert!(
+            rpc.handle(
+                methods::TRADING_PROPOSAL_RESOLVE,
+                serde_json::json!({ "id": id, "approve": true }),
+            )
+            .await
+            .is_err()
+        );
+    }
+}
+
 fn watch_stream<T>(rx: watch::Receiver<T>) -> BoxStream<'static, serde_json::Value>
 where
     T: serde::Serialize + Clone + Send + Sync + 'static,
@@ -3290,6 +3414,13 @@ impl RpcService for EngineRpc {
         // An agent's chats: capped at its own access, runs as the chat is
         // set, attributed by Zeron (rpc/agent_gate.rs). Before forwarding.
         let params = self.agent_gate(method, params)?;
+        // Money moves and bots: only the person at this computer. An agent
+        // proposes (`TradingPropose`) and the person approves on the desk.
+        if trading_needs_person(method) && !zeron_rpc::caller().is_local() {
+            return Err(RpcError::Failed(format!(
+                "{method}: an agent can't move money or bots directly. Use TradingPropose; the person approves it on the trading desk."
+            )));
+        }
         // Machine stats: answered here, or asked of another of the
         // account's devices with its own deadline and error words.
         if method == methods::DEVICE_STATS {
@@ -4313,6 +4444,72 @@ impl RpcService for EngineRpc {
                 } else {
                     Ok(RpcReply::Stream(watch_stream(self.trading.watch())))
                 }
+            }
+            methods::TRADING_PROPOSE => {
+                let p: zeron_proto::trading::ProposeParams = parse_params(params)?;
+                // The asking chat, as its MCP server claims it (for the desk's label).
+                let chat = match zeron_rpc::caller() {
+                    zeron_rpc::Caller::Agent { chat } => chat,
+                    _ => None,
+                }
+                .or(p.chat_id);
+                let proposal = self.trading.propose(p.action, p.reason, chat);
+                RpcReply::value(&proposal)
+            }
+            methods::TRADING_PROPOSAL_RESOLVE => {
+                let p: zeron_proto::trading::ResolveProposalParams = parse_params(params)?;
+                use zeron_proto::trading::{ProposalAction, ProposalStatus};
+                let action = self
+                    .trading
+                    .start_proposal(&p.id)
+                    .map_err(RpcError::Failed)?;
+                if !p.approve {
+                    self.trading.finish_proposal(
+                        &p.id,
+                        ProposalStatus::Rejected,
+                        Some("Rechazada en la mesa.".into()),
+                    );
+                    return RpcReply::value(&self.trading.proposals().into_iter().find(|x| x.id == p.id));
+                }
+                // The person's click is the confirmation: run it as the desk would.
+                let (method, params) = match action {
+                    ProposalAction::ClosePosition { symbol } => (
+                        methods::TRADING_POSITION_CLOSE,
+                        serde_json::json!({ "symbol": symbol, "requestId": format!("proposal:{}", p.id) }),
+                    ),
+                    ProposalAction::CloseAll => (
+                        methods::TRADING_POSITIONS_CLOSE_ALL,
+                        serde_json::json!({ "requestId": format!("proposal:{}", p.id) }),
+                    ),
+                    ProposalAction::Panic => (methods::TRADING_PANIC, serde_json::json!({})),
+                    ProposalAction::StartSystem { system_id } => (
+                        methods::TRADING_SYSTEM_START,
+                        serde_json::json!({ "systemId": system_id }),
+                    ),
+                    ProposalAction::StopSystem { system_id } => (
+                        methods::TRADING_SYSTEM_STOP,
+                        serde_json::json!({ "systemId": system_id }),
+                    ),
+                };
+                let outcome = Box::pin(self.handle(method, params)).await;
+                let (status, result) = match outcome {
+                    Ok(RpcReply::Value(value)) => {
+                        let ok = value.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let message = value
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| "Hecho.".into());
+                        (
+                            if ok { ProposalStatus::Done } else { ProposalStatus::Failed },
+                            Some(message),
+                        )
+                    }
+                    Ok(_) => (ProposalStatus::Done, Some("Hecho.".into())),
+                    Err(error) => (ProposalStatus::Failed, Some(error.to_string())),
+                };
+                self.trading.finish_proposal(&p.id, status, result);
+                RpcReply::value(&self.trading.proposals().into_iter().find(|x| x.id == p.id))
             }
             methods::TRADING_SNAPSHOT => {
                 if let Some(engine) = &self.trading_engine {

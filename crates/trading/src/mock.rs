@@ -237,6 +237,7 @@ pub fn fixture() -> Snapshot {
             tws: ProgramState::Running,
             mt5: Some(ProgramState::Running),
         }),
+        proposals: None,
     }
 }
 

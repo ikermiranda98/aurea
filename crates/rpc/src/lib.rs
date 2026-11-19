@@ -66,6 +66,10 @@ pub mod methods {
     pub const TRADING_MT5_DETECT: &str = "TradingMt5Detect";
     pub const TRADING_IBKR_DETECT: &str = "TradingIbkrDetect";
     pub const TRADING_POOL_SELECT: &str = "TradingPoolSelect";
+    /// An agent asks for a money action; it waits on the desk for approval.
+    pub const TRADING_PROPOSE: &str = "TradingPropose";
+    /// The person approves (runs) or rejects a proposal. Never an agent's.
+    pub const TRADING_PROPOSAL_RESOLVE: &str = "TradingProposalResolve";
     // WARP ring (free-model egress rotation).
     pub const WARP_STATUS: &str = "WarpStatus";
     pub const WARP_ROTATE: &str = "WarpRotate";

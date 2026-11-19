@@ -386,6 +386,77 @@ pub struct Snapshot {
     /// TWS's and MetaTrader 5's state on this computer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub programs: Option<Programs>,
+    /// Money actions an agent asked for, newest first: they run only when
+    /// the person approves them on the desk (`TradingProposalResolve`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposals: Option<Vec<TradingProposal>>,
+}
+
+/// What an agent may ask the desk to do. Every variant moves money or a
+/// bot, so none runs without the person's approval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProposalAction {
+    ClosePosition { symbol: String },
+    CloseAll,
+    Panic,
+    StartSystem { system_id: String },
+    StopSystem { system_id: String },
+}
+
+/// Where a proposal stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalStatus {
+    /// Waiting for the person.
+    Pending,
+    /// The person said no; nothing ran.
+    Rejected,
+    /// Approved and run; `result` holds the verdict.
+    Done,
+    /// Approved but the action failed; `result` says why.
+    Failed,
+}
+
+/// One agent request on the desk.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradingProposal {
+    pub id: String,
+    pub action: ProposalAction,
+    /// The agent's one-line reason, shown beside the buttons.
+    #[serde(default)]
+    pub reason: String,
+    /// The chat that asked, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+    pub status: ProposalStatus,
+    /// Epoch ms.
+    pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<i64>,
+    /// The action's verdict once it ran (or the refusal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+}
+
+/// `TradingPropose` params.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposeParams {
+    pub action: ProposalAction,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+}
+
+/// `TradingProposalResolve` params.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveProposalParams {
+    pub id: String,
+    pub approve: bool,
 }
 
 /// Errors the engine's action surface returns; carried as the RPC error payload.

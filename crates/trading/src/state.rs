@@ -369,6 +369,7 @@ impl TradingState {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
             programs: self.programs.clone(),
+            proposals: None,
         }
     }
 }

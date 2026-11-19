@@ -297,9 +297,119 @@ fn catalog() -> Vec<ToolDef> {
             "required": ["task_ids"]
         }),
     });
+    tools.extend(trading_catalog());
     tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
     tools
+}
+
+const TRADING_SNAPSHOT_TOOL: &str = "trading_snapshot";
+const TRADING_PROPOSE_TOOL: &str = "trading_propose";
+
+/// Aurea's trading desk: read freely, ask for money actions.
+fn trading_catalog() -> Vec<ToolDef> {
+    vec![
+        ToolDef {
+            name: TRADING_SNAPSHOT_TOOL,
+            description: "Aurea's trading desk right now: whether it is the DEMO fixture or a live TWS paper link, the shown account (equity, cash, P&L of the day), open positions (symbol, side, size, entry, current price, P&L) plus how many are open across every account, the bot systems (running or not, symbol, P&L), scheduled tasks, connections, the newest engine log rows, and any pending proposals. Read-only; call it before answering about positions or proposing anything.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "logs": { "type": "integer", "minimum": 0, "maximum": 100, "description": "How many recent log rows to include (default 20)." }
+                }
+            }),
+        },
+        ToolDef {
+            name: TRADING_PROPOSE_TOOL,
+            description: "Ask the person to run a money or bot action on the trading desk. It NEVER runs by itself: it appears on the desk with Approve / Reject, and this call waits (default 120 s) for the answer and returns it (approved and its verdict, rejected, or still pending). Actions: close_position (needs symbol, exactly as trading_snapshot names it), close_all (every closable position of the engine account), panic (stop every bot, cancel pending tasks, close everything), start_system / stop_system (need system_id). Always give a short reason in the person's language; propose one action at a time and only when the person asked for it or clearly agreed.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["close_position", "close_all", "panic", "start_system", "stop_system"] },
+                    "symbol": { "type": "string", "description": "close_position: the position's symbol." },
+                    "system_id": { "type": "string", "description": "start_system / stop_system: the system id." },
+                    "reason": { "type": "string", "description": "One line the person reads beside the buttons." },
+                    "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 600, "description": "How long to wait for the answer (default 120). 0 returns at once." }
+                },
+                "required": ["action", "reason"]
+            }),
+        },
+    ]
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TradingSnapshotArgs {
+    logs: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TradingProposeArgs {
+    action: String,
+    symbol: Option<String>,
+    system_id: Option<String>,
+    reason: String,
+    wait_seconds: Option<u64>,
+}
+
+/// The desk's state, trimmed to what an agent reasons about.
+fn summarize_trading(snapshot: &Value, logs: usize) -> Value {
+    let pick = |value: &Value, keys: &[&str]| -> Value {
+        let mut out = serde_json::Map::new();
+        for key in keys {
+            if let Some(v) = value.get(*key).filter(|v| !v.is_null()) {
+                out.insert((*key).to_string(), v.clone());
+            }
+        }
+        Value::Object(out)
+    };
+    let list = |key: &str, keys: &[&str]| -> Value {
+        Value::Array(
+            snapshot
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|rows| rows.iter().map(|row| pick(row, keys)).collect())
+                .unwrap_or_default(),
+        )
+    };
+    let demo = snapshot.get("version").and_then(Value::as_str) == Some("0.1.0-mock");
+    let recent_logs: Vec<Value> = snapshot
+        .get("logs")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            let mut rows: Vec<Value> = rows
+                .iter()
+                .map(|row| pick(row, &["ts", "level", "system", "message"]))
+                .collect();
+            rows.sort_by_key(|row| std::cmp::Reverse(row.get("ts").and_then(Value::as_i64).unwrap_or(0)));
+            rows.truncate(logs);
+            rows
+        })
+        .unwrap_or_default();
+    let pending: Vec<Value> = snapshot
+        .get("proposals")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter(|p| p.get("status").and_then(Value::as_str) == Some("pending"))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "mode": if demo { "demo (invented data, nothing real)" } else { "live (TWS paper)" },
+        "connected": snapshot.get("connected").cloned().unwrap_or(Value::Null),
+        "account": snapshot
+            .get("account")
+            .map(|a| pick(a, &["id", "type", "equity", "cash", "pnlDay", "pnlRealized", "buyingPower"]))
+            .unwrap_or(Value::Null),
+        "positions": list("positions", &["symbol", "side", "size", "entry", "current", "pnl", "pnlPct"]),
+        "openPositionsAllAccounts": snapshot.get("openPositions").and_then(Value::as_array).map(Vec::len),
+        "systems": list("systems", &["id", "name", "running", "symbol", "timeframe", "pnlDay"]),
+        "tasks": list("tasks", &["id", "kind", "status", "runAt", "systemIds"]),
+        "links": list("links", &["id", "label", "broker", "connected"]),
+        "pendingProposals": pending,
+        "recentLogs": recent_logs,
+    })
 }
 
 /// Shows a page in the CALLING chat, so it is offered only to an agent that
@@ -874,6 +984,8 @@ impl Tools {
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             SHOW_IMAGE => self.show_image(parse(args)?).await,
             WAIT_ON_BACKGROUND => self.wait_on_background(parse(args)?).await,
+            TRADING_SNAPSHOT_TOOL => self.trading_snapshot(parse(args)?).await,
+            TRADING_PROPOSE_TOOL => self.trading_propose(parse(args)?).await,
             plugins::CREATE_PLUGIN => return self.create_plugin(args).await,
             plugins::LIST_PLUGINS => return self.list_plugins().await,
             plugins::DESCRIBE_ELEMENTS => return self.describe_elements().await,
@@ -933,6 +1045,84 @@ impl Tools {
         ))
         .await;
         Ok(json!({"results": results}))
+    }
+
+    async fn trading_snapshot(&self, args: TradingSnapshotArgs) -> anyhow::Result<Value> {
+        let snapshot = self
+            .zeron
+            .call(zeron_rpc::methods::TRADING_SNAPSHOT, json!({}))
+            .await?;
+        Ok(summarize_trading(&snapshot, args.logs.unwrap_or(20).min(100)))
+    }
+
+    async fn trading_propose(&self, args: TradingProposeArgs) -> anyhow::Result<Value> {
+        let action = match args.action.as_str() {
+            "close_position" => json!({
+                "kind": "close_position",
+                "symbol": args
+                    .symbol
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("close_position needs symbol"))?,
+            }),
+            "close_all" => json!({ "kind": "close_all" }),
+            "panic" => json!({ "kind": "panic" }),
+            "start_system" | "stop_system" => json!({
+                "kind": args.action,
+                "system_id": args
+                    .system_id
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("{} needs system_id", args.action))?,
+            }),
+            other => anyhow::bail!("unknown action: {other}"),
+        };
+        anyhow::ensure!(!args.reason.trim().is_empty(), "give the person a reason");
+        let proposal = self
+            .zeron
+            .call(
+                zeron_rpc::methods::TRADING_PROPOSE,
+                json!({ "action": action, "reason": args.reason, "chatId": self.zeron.origin().chat_id }),
+            )
+            .await?;
+        let id = proposal
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("the desk did not return a proposal id"))?
+            .to_owned();
+        let wait = Duration::from_secs(args.wait_seconds.unwrap_or(120).min(600));
+        let deadline = Instant::now() + wait;
+        loop {
+            let snapshot = self
+                .zeron
+                .call(zeron_rpc::methods::TRADING_SNAPSHOT, json!({}))
+                .await?;
+            let current = snapshot
+                .get("proposals")
+                .and_then(Value::as_array)
+                .and_then(|rows| {
+                    rows.iter()
+                        .find(|p| p.get("id").and_then(Value::as_str) == Some(id.as_str()))
+                })
+                .cloned();
+            let status = current
+                .as_ref()
+                .and_then(|p| p.get("status").and_then(Value::as_str))
+                .unwrap_or("pending")
+                .to_owned();
+            if status != "pending" || Instant::now() >= deadline {
+                let note = if status == "pending" {
+                    "Still waiting on the desk: the person has not answered yet. Do not propose it again; tell them it waits for their approval."
+                } else {
+                    "Resolved by the person on the desk."
+                };
+                return Ok(json!({
+                    "id": id,
+                    "status": status,
+                    "result": current.as_ref().and_then(|p| p.get("result")).cloned().unwrap_or(Value::Null),
+                    "note": note,
+                }));
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
 
     async fn whoami(&self) -> anyhow::Result<Value> {

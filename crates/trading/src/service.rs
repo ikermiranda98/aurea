@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::{Mutex as AsyncMutex, broadcast, watch};
 use zeron_proto::trading::{
-    Account, Broker, EquityPoint, Link, Log, LogLevel, ProgramState, Programs, Snapshot,
-    TradingError,
+    Account, Broker, EquityPoint, Link, Log, LogLevel, ProgramState, Programs, ProposalAction,
+    ProposalStatus, Snapshot, TradingError, TradingProposal,
 };
 use zeron_tws::client::{IbClient, IbClientConfig, IbEvent};
 use zeron_tws::inbound::{self, IbInbound};
@@ -49,6 +49,8 @@ const EQUITY_SAMPLE_MS: i64 = 15_000;
 const MAX_LOGS: usize = 200;
 /// `reqId` for the account-summary burst (TWS only needs it to be unique).
 const SUMMARY_REQ_ID: i64 = 9001;
+/// The most proposals the desk keeps.
+const MAX_PROPOSALS: usize = 50;
 /// `trading_meta` key of the account the dashboard shows (`trading.ts:931`).
 pub const ACTIVE_ACCOUNT_META: &str = "cuenta_activa";
 
@@ -118,6 +120,8 @@ struct Inner {
     /// Every decoded inbound message, for the close cycle's request/answer
     /// waits (contract details, open orders, executions, order status).
     inbound: broadcast::Sender<IbInbound>,
+    /// Agents' money requests, newest first (see [`TradingProposal`]).
+    proposals: Mutex<Vec<TradingProposal>>,
 }
 
 impl Default for TradingService {
@@ -137,6 +141,7 @@ impl TradingService {
             connecting: AsyncMutex::new(()),
             store: Mutex::new(None),
             inbound: broadcast::channel(1024).0,
+            proposals: Mutex::new(Vec::new()),
         });
         // The demo fixture ticks every 2 s; keep forwarding it while no live
         // link owns the snapshot. Without a runtime (unit tests, a CLI probe)
@@ -180,6 +185,76 @@ impl TradingService {
             return Vec::new();
         }
         state.ledger.foreign_positions()
+    }
+
+    /// Files an agent's money request on the desk. Nothing runs until the
+    /// person approves it ([`Self::start_proposal`]).
+    pub fn propose(
+        &self,
+        action: ProposalAction,
+        reason: String,
+        chat_id: Option<String>,
+    ) -> TradingProposal {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = now_ms();
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let proposal = TradingProposal {
+            id: format!("p-{now}-{seq}"),
+            action,
+            reason: reason.trim().chars().take(280).collect(),
+            chat_id,
+            status: ProposalStatus::Pending,
+            created_at: now,
+            resolved_at: None,
+            result: None,
+        };
+        {
+            let mut list = lock(&self.inner.proposals);
+            list.insert(0, proposal.clone());
+            // Keep the desk short: the newest 50, pending ones first kept.
+            while list.len() > MAX_PROPOSALS {
+                match list.iter().rposition(|p| p.status != ProposalStatus::Pending) {
+                    Some(old) => {
+                        list.remove(old);
+                    }
+                    None => {
+                        list.pop();
+                    }
+                }
+            }
+        }
+        self.inner.publish();
+        proposal
+    }
+
+    /// The desk's proposals, newest first.
+    pub fn proposals(&self) -> Vec<TradingProposal> {
+        lock(&self.inner.proposals).clone()
+    }
+
+    /// Takes a pending proposal's action to run it, or says why not.
+    pub fn start_proposal(&self, id: &str) -> Result<ProposalAction, String> {
+        let list = lock(&self.inner.proposals);
+        match list.iter().find(|p| p.id == id) {
+            None => Err(format!("No such proposal: {id}")),
+            Some(p) if p.status != ProposalStatus::Pending => {
+                Err("That proposal was already resolved.".into())
+            }
+            Some(p) => Ok(p.action.clone()),
+        }
+    }
+
+    /// Records how a proposal ended (rejected, done, failed).
+    pub fn finish_proposal(&self, id: &str, status: ProposalStatus, result: Option<String>) {
+        {
+            let mut list = lock(&self.inner.proposals);
+            if let Some(p) = list.iter_mut().find(|p| p.id == id) {
+                p.status = status;
+                p.resolved_at = Some(now_ms());
+                p.result = result;
+            }
+        }
+        self.inner.publish();
     }
 
     /// Every inbound message from now on. Subscribe *before* sending the
@@ -440,7 +515,7 @@ impl Inner {
 
     /// Publishes what the state says: the demo fixture while no link is live.
     fn publish(&self) {
-        let snapshot = {
+        let mut snapshot = {
             let mut state = lock(&self.state);
             if !state.live {
                 mock::current()
@@ -449,6 +524,8 @@ impl Inner {
                 state.live_snapshot()
             }
         };
+        let proposals = lock(&self.proposals).clone();
+        snapshot.proposals = (!proposals.is_empty()).then_some(proposals);
         self.snapshot.send_replace(snapshot);
     }
 
@@ -660,6 +737,7 @@ impl State {
                 },
                 mt5: None,
             }),
+            proposals: None,
         }
     }
 }
@@ -673,6 +751,50 @@ mod tests {
     use zeron_tws::codec::{Decoder, encode_message};
 
     const WAIT: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn a_proposal_waits_for_the_person_and_records_the_outcome() {
+        use zeron_proto::trading::{ProposalAction, ProposalStatus};
+        let service = TradingService::new();
+        let p = service.propose(
+            ProposalAction::ClosePosition { symbol: "MNQZ6".into() },
+            "  The person asked to close MNQ  ".into(),
+            Some("chat-1".into()),
+        );
+        assert_eq!(p.status, ProposalStatus::Pending);
+        assert_eq!(p.reason, "The person asked to close MNQ");
+        // Published on the snapshot the desk and the agent read.
+        let on_desk = service.snapshot().proposals.unwrap_or_default();
+        assert_eq!(on_desk.len(), 1);
+        assert_eq!(on_desk[0].id, p.id);
+
+        assert_eq!(
+            service.start_proposal(&p.id).unwrap(),
+            ProposalAction::ClosePosition { symbol: "MNQZ6".into() }
+        );
+        service.finish_proposal(&p.id, ProposalStatus::Done, Some("Cerrada.".into()));
+        let done = &service.proposals()[0];
+        assert_eq!(done.status, ProposalStatus::Done);
+        assert_eq!(done.result.as_deref(), Some("Cerrada."));
+        assert!(done.resolved_at.is_some());
+        // Answered once: a second approval is refused, nothing runs twice.
+        assert!(service.start_proposal(&p.id).is_err());
+        assert!(service.start_proposal("nope").is_err());
+    }
+
+    #[tokio::test]
+    async fn the_desk_keeps_at_most_fifty_proposals_pending_first() {
+        use zeron_proto::trading::{ProposalAction, ProposalStatus};
+        let service = TradingService::new();
+        let first = service.propose(ProposalAction::Panic, "keep me".into(), None);
+        for i in 0..60 {
+            let p = service.propose(ProposalAction::CloseAll, format!("{i}"), None);
+            service.finish_proposal(&p.id, ProposalStatus::Rejected, None);
+        }
+        let list = service.proposals();
+        assert_eq!(list.len(), MAX_PROPOSALS);
+        assert!(list.iter().any(|p| p.id == first.id), "a pending one is never dropped first");
+    }
 
     /// A TWS that completes the handshake and hands the socket to the test.
     struct FakeTws {

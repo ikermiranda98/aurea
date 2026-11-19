@@ -11,7 +11,8 @@ use gpui::{
 use serde_json::json;
 use zeron_proto::trading::{
     Broker, IbkrPort, Link, LogLevel, Mt5Detected, PanicResult, Position, PositionCloseResult,
-    PositionSide, Snapshot, System, Task as TradingTask, TaskKind, TaskStatus,
+    PositionSide, ProposalAction, ProposalStatus, Snapshot, System, Task as TradingTask,
+    TaskKind, TaskStatus, TradingProposal,
 };
 use zeron_rpc::methods;
 
@@ -292,6 +293,15 @@ impl TradingSurface {
             )
             .child(div().flex_1())
             .child(
+                button("trading-open-chat", "Chat", ButtonTone::Ghost, theme).on_click(
+                    cx.listener(|_, _, window, cx| {
+                        // A new chat with the agent: it reads the desk through
+                        // its trading tools and asks here before moving money.
+                        window.dispatch_action(Box::new(crate::shell::NewSession), cx);
+                    }),
+                ),
+            )
+            .child(
                 button("trading-close-all", "Cerrar todo", ButtonTone::Ghost, theme).on_click(
                     cx.listener(|this, _, _, cx| this.ask(Confirm::CloseAll, cx)),
                 ),
@@ -509,6 +519,7 @@ impl TradingSurface {
             .flex()
             .flex_col()
             .gap(px(14.0))
+            .children(self.proposals_card(&snapshot, theme, cx))
             .child(self.kpi_strip(&snapshot, theme))
             .child(
                 div()
@@ -549,6 +560,105 @@ impl TradingSurface {
                     ),
             )
             .into_any_element()
+    }
+
+    /// The agent's money requests: pending ones with Approve / Reject, then
+    /// the last few answered, so the person sees what ran.
+    fn proposals_card(
+        &self,
+        snapshot: &Snapshot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let proposals = snapshot.proposals.clone().unwrap_or_default();
+        let pending: Vec<&TradingProposal> = proposals
+            .iter()
+            .filter(|p| p.status == ProposalStatus::Pending)
+            .collect();
+        let answered: Vec<&TradingProposal> = proposals
+            .iter()
+            .filter(|p| p.status != ProposalStatus::Pending)
+            .take(3)
+            .collect();
+        if pending.is_empty() && answered.is_empty() {
+            return None;
+        }
+        let mut rows: Vec<Div> = Vec::new();
+        for (ix, proposal) in pending.iter().enumerate() {
+            let approve_id = proposal.id.clone();
+            let reject_id = proposal.id.clone();
+            rows.push(
+                proposal_row(proposal, theme)
+                    .child(
+                        button(("trading-proposal-reject", ix), "Rechazar", ButtonTone::Ghost, theme)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.resolve_proposal(reject_id.clone(), false, cx)
+                            })),
+                    )
+                    .child(
+                        button(("trading-proposal-approve", ix), "Aprobar", ButtonTone::Primary, theme)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.resolve_proposal(approve_id.clone(), true, cx)
+                            })),
+                    ),
+            );
+        }
+        for proposal in answered {
+            let (label, tone) = match proposal.status {
+                ProposalStatus::Done => ("HECHA", theme.success),
+                ProposalStatus::Failed => ("FALLÓ", theme.danger),
+                ProposalStatus::Rejected => ("RECHAZADA", theme.text_faint),
+                ProposalStatus::Pending => ("PENDIENTE", theme.warning),
+            };
+            rows.push(
+                proposal_row(proposal, theme)
+                    .opacity(0.7)
+                    .child(chip(label, tone)),
+            );
+        }
+        Some(
+            card(theme)
+                .border_color(if pending.is_empty() {
+                    theme.border
+                } else {
+                    theme.accent.opacity(0.6)
+                })
+                .child(section_header(
+                    theme,
+                    "Peticiones del agente",
+                    SharedString::from(if pending.is_empty() {
+                        "nada pendiente".to_string()
+                    } else {
+                        format!("{} pendiente(s) de tu aprobación", pending.len())
+                    }),
+                ))
+                .children(rows),
+        )
+    }
+
+    /// Approves (runs) or rejects one proposal; the verdict lands as a notice.
+    fn resolve_proposal(&mut self, id: String, approve: bool, cx: &mut Context<Self>) {
+        self.notice = Some(if approve {
+            "Ejecutando la petición aprobada…".into()
+        } else {
+            "Petición rechazada.".into()
+        });
+        self.call_with(
+            methods::TRADING_PROPOSAL_RESOLVE,
+            json!({ "id": id, "approve": approve }),
+            cx,
+            |this, value, _cx| {
+                if let Ok(Some(proposal)) = serde_json::from_value::<Option<TradingProposal>>(value) {
+                    let line = proposal.result.unwrap_or_default();
+                    match proposal.status {
+                        ProposalStatus::Failed => this.error = Some(line.into()),
+                        _ if !line.is_empty() => this.notice = Some(line.into()),
+                        _ => {}
+                    }
+                }
+            },
+        );
+        cx.notify();
     }
 
     fn kpi_strip(&self, snapshot: &Snapshot, theme: &Theme) -> Div {
@@ -1393,6 +1503,56 @@ fn chip(label: impl Into<SharedString>, tone: Hsla) -> Div {
         .border_1()
         .border_color(tone.opacity(0.18))
         .child(label.into())
+}
+
+/// What a proposal asks for, in the desk's words.
+fn proposal_title(action: &ProposalAction) -> String {
+    match action {
+        ProposalAction::ClosePosition { symbol } => format!("Cerrar la posición de {symbol}"),
+        ProposalAction::CloseAll => "Cerrar todas las posiciones".into(),
+        ProposalAction::Panic => "Pánico: parar bots, cancelar tareas y cerrar todo".into(),
+        ProposalAction::StartSystem { system_id } => format!("Arrancar el sistema {system_id}"),
+        ProposalAction::StopSystem { system_id } => format!("Parar el sistema {system_id}"),
+    }
+}
+
+/// One proposal's text column; the caller appends its buttons or chip.
+fn proposal_row(proposal: &TradingProposal, theme: &Theme) -> Div {
+    let detail = match &proposal.result {
+        Some(result) if proposal.status != ProposalStatus::Pending => result.clone(),
+        _ => proposal.reason.clone(),
+    };
+    div()
+        .px(px(12.0))
+        .py(px(8.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .border_t_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .truncate()
+                        .child(SharedString::from(proposal_title(&proposal.action))),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.text_muted)
+                        .truncate()
+                        .child(SharedString::from(detail)),
+                ),
+        )
 }
 
 fn card(theme: &Theme) -> Div {

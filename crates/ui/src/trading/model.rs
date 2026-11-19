@@ -378,6 +378,7 @@ mod tests {
             links: None,
             systems_dir: None,
             programs: None,
+            proposals: None,
         }
     }
 
