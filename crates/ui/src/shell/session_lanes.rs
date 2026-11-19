@@ -591,15 +591,6 @@ impl Shell {
                     .inset_0(),
                 )
             })
-            .children(row.change_request.clone().map(|summary| {
-                crate::change_requests::pull_request_badge(
-                    format!("{key}-pr").into(),
-                    summary,
-                    crate::change_requests::ChangeRequestBadgeSurface::Sidebar,
-                    Some(row.device_id.clone()),
-                    theme,
-                )
-            }))
             .child(time_label(row.time_ago.clone(), theme))
     }
 

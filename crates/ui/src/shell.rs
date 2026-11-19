@@ -2546,7 +2546,6 @@ impl Shell {
         settings.sidebar_organization = settings::SidebarOrganization::InOneList;
         state.update(cx, |state, cx| {
             state.watch_clock_transitions(cx);
-            state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
         });
         crate::appshots::set_enabled(settings.appshots_enabled);
         crate::appshots::set_capture_sound_enabled(settings.appshot_sound_enabled);
@@ -7839,11 +7838,6 @@ impl Shell {
             .find(|chat| chat.id == id)
             .map(|chat| chat.device_id.clone());
         let compact = search_query.is_none() && self.settings.sidebar_compact;
-        let pr_surface = if search_query.is_some() {
-            crate::change_requests::ChangeRequestBadgeSurface::Sidebar
-        } else {
-            crate::change_requests::ChangeRequestBadgeSurface::SessionRow
-        };
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
         let host = self
             .state
@@ -8486,25 +8480,7 @@ impl Shell {
                             .then(|| subagent_pill("compact"))
                             .flatten();
                         let archive_id = id.clone();
-                        el.children(change_request.clone().map(|summary| {
-                            if preview {
-                                crate::change_requests::pull_request_badge_preview(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    pr_surface,
-                                    theme,
-                                )
-                            } else {
-                                crate::change_requests::pull_request_badge(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    pr_surface,
-                                    pr_device.clone(),
-                                    theme,
-                                )
-                            }
-                        }))
-                        .child(
+                        el.child(
                             div()
                                 .id(SharedString::from(format!("{row_id}-corner")))
                                 .debug_selector({
@@ -8605,28 +8581,7 @@ impl Shell {
                                     .child(popover::search_highlight(branch, search_query, theme)),
                             ))
                         })
-                        // Stable invisible spring keeps the optional PR badge
-                        // pinned right without changing no-PR paint.
-                        .child(div().flex_1().min_w_0())
-                        .when_some(change_request, |el, summary| {
-                            el.child(if preview {
-                                crate::change_requests::pull_request_badge_preview(
-                                    format!("{row_id}-pr").into(),
-                                    summary,
-                                    pr_surface,
-                                    theme,
-                                )
-                            } else {
-                                crate::change_requests::pull_request_badge_with_query(
-                                    format!("{row_id}-pr").into(),
-                                    summary,
-                                    pr_surface,
-                                    search_query,
-                                    pr_device.clone(),
-                                    theme,
-                                )
-                            })
-                        }),
+                        .child(div().flex_1().min_w_0()),
                 )
             })
             .into_any_element()

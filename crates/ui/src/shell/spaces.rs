@@ -2901,14 +2901,10 @@ fn clone_row(
     cx: &Context<Shell>,
 ) -> gpui::Stateful<gpui::Div> {
     let owner = clone.label.split('/').next().unwrap_or_default().to_owned();
-    let leading = if clone.github {
-        crate::github_avatar::avatar(
-            &owner,
-            SharedString::from(format!("clone-avatar-{}", clone.label)),
-            16.0,
-            theme,
-        )
-    } else {
+    // GitHub avatars went with the pull-request views: every row takes the
+    // branch glyph.
+    let _ = &owner;
+    let leading = {
         icon(icons::GIT_BRANCH)
             .size(px(16.0))
             .flex_none()
@@ -4247,10 +4243,6 @@ impl Shell {
             }
             SidebarViewRow::ShowPullRequest => {
                 self.settings.sidebar_show_pull_request = !self.settings.sidebar_show_pull_request;
-                let visible = self.settings.sidebar_show_pull_request;
-                self.state.update(cx, |state, cx| {
-                    state.set_change_requests_visible(visible, cx)
-                });
             }
             SidebarViewRow::ShowHarness => {
                 self.settings.sidebar_show_harness = !self.settings.sidebar_show_harness

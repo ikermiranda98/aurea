@@ -55,7 +55,6 @@ pub mod overscroll;
 pub mod pickers;
 pub mod popover;
 pub mod project_actions;
-mod github_avatar;
 mod device_presence;
 pub mod queue;
 pub mod rail;
