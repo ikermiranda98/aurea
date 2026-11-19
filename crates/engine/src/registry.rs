@@ -862,8 +862,14 @@ pub fn registry_for_platform(platform: &str) -> HarnessRegistry {
     if platform == zeron_proto::CLOUD_PLATFORM {
         registry.retain(|id| id == HarnessId::Mock || CLOUD_HARNESS_IDS.contains(&id));
     }
+    // Aurea runs one agent: opencode (DeepSeek by default). The mock stays for
+    // tests and is hidden from production pickers.
+    registry.retain(|id| AUREA_HARNESS_IDS.contains(&id));
     registry
 }
+
+/// The agents an Aurea build offers.
+pub const AUREA_HARNESS_IDS: [HarnessId; 2] = [HarnessId::Mock, HarnessId::Opencode];
 
 fn full_registry() -> HarnessRegistry {
     // Warm the login-shell PATH snapshot in the background so the first
@@ -1256,86 +1262,15 @@ mod tests {
     }
 
     #[test]
-    fn default_registry_lists_mock_claude_codex_and_grok_slots() {
-        let registry = default_registry();
-        let ids: Vec<HarnessId> = registry.descriptors().iter().map(|d| d.id).collect();
-        assert_eq!(
-            ids,
-            vec![
-                HarnessId::Mock,
-                HarnessId::ClaudeCode,
-                HarnessId::Codex,
-                HarnessId::Cursor,
-                HarnessId::Devin,
-                HarnessId::Grok,
-                HarnessId::Hermes,
-                HarnessId::Fx,
-                HarnessId::Pi,
-                HarnessId::Opencode,
-                HarnessId::Antigravity,
-                HarnessId::Muse
-            ]
-        );
-        assert!(registry.resolve(HarnessId::Mock).is_ok());
-        assert!(registry.resolve(HarnessId::ClaudeCode).is_ok());
-        // A codex-configured chat resolves the right harness (construction is
-        // cheap; CLI discovery is deferred to models()/run()).
-        let codex = registry.resolve(HarnessId::Codex).unwrap();
-        assert_eq!(codex.id(), HarnessId::Codex);
-        // Grok resolves through the shared ACP harness; its descriptor must
-        // mirror the resolved harness (descriptor-stability rule).
-        let grok = registry.resolve(HarnessId::Grok).unwrap();
-        assert_eq!(grok.id(), HarnessId::Grok);
-        assert_eq!(grok.display_name(), "Grok");
-        assert_eq!(grok.steering_mode(), SteeringMode::StepBoundary);
-        assert_eq!(
-            grok.reasoning_levels(),
-            &[
-                ReasoningLevel::Low,
-                ReasoningLevel::Medium,
-                ReasoningLevel::High
-            ]
-        );
-        // Cursor, Devin, Hermes and Pi mirror their specs the same way.
-        let cursor = registry.resolve(HarnessId::Cursor).unwrap();
-        assert_eq!(cursor.id(), HarnessId::Cursor);
-        assert_eq!(cursor.display_name(), "Cursor");
-        assert_eq!(cursor.steering_mode(), SteeringMode::StepBoundary);
-        assert!(cursor.reasoning_levels().is_empty());
-        let devin = registry.resolve(HarnessId::Devin).unwrap();
-        assert_eq!(devin.id(), HarnessId::Devin);
-        assert_eq!(devin.display_name(), "Devin");
-        assert_eq!(devin.steering_mode(), SteeringMode::StepBoundary);
-        assert!(devin.reasoning_levels().is_empty());
-        let hermes = registry.resolve(HarnessId::Hermes).unwrap();
-        assert_eq!(hermes.id(), HarnessId::Hermes);
-        assert_eq!(hermes.display_name(), "Hermes");
-        assert_eq!(hermes.steering_mode(), SteeringMode::TurnBoundary);
-        assert!(hermes.reasoning_levels().is_empty());
-        let opencode = registry.resolve(HarnessId::Opencode).unwrap();
-        assert_eq!(opencode.id(), HarnessId::Opencode);
-        assert_eq!(opencode.display_name(), "OpenCode");
-        assert_eq!(opencode.steering_mode(), SteeringMode::StepBoundary);
-        assert_eq!(
-            opencode.reasoning_levels(),
-            &[
-                ReasoningLevel::Low,
-                ReasoningLevel::Medium,
-                ReasoningLevel::High,
-                ReasoningLevel::XHigh,
-                ReasoningLevel::Max,
-            ]
-        );
-        let antigravity = registry.resolve(HarnessId::Antigravity).unwrap();
-        assert_eq!(antigravity.id(), HarnessId::Antigravity);
-        assert_eq!(antigravity.display_name(), "Antigravity");
-        assert_eq!(antigravity.steering_mode(), SteeringMode::TurnBoundary);
-        assert!(antigravity.reasoning_levels().is_empty());
-        let pi = registry.resolve(HarnessId::Pi).unwrap();
-        assert_eq!(pi.id(), HarnessId::Pi);
-        assert_eq!(pi.display_name(), "Pi");
-        assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
-        assert!(pi.reasoning_levels().is_empty());
+    fn aurea_registry_offers_opencode_only() {
+        for platform in ["macos", "windows", "linux", zeron_proto::CLOUD_PLATFORM] {
+            let registry = registry_for_platform(platform);
+            let mut ids: Vec<HarnessId> =
+                registry.descriptors().iter().map(|descriptor| descriptor.id).collect();
+            ids.sort_by_key(|id| format!("{id:?}"));
+            assert!(ids.iter().all(|id| AUREA_HARNESS_IDS.contains(id)), "{platform}: {ids:?}");
+            assert!(!ids.contains(&HarnessId::ClaudeCode) && !ids.contains(&HarnessId::Codex));
+        }
     }
 
     /// Catalogs serialized by engines that predate the `installed`/`enabled`
@@ -1649,32 +1584,6 @@ mod tests {
         assert_eq!(reloaded.enabled_set(), Vec::<HarnessId>::new());
     }
 
-    /// The Codex lazy descriptor must be indistinguishable from `describe()`
-    /// after the first resolve — otherwise the catalog entry silently changes
-    /// the moment the harness is used (name/ladder flip in the picker rail).
-    /// (KNOWN GAP, predates this slot: the claude-code descriptor advertises
-    /// `[Ultrathink]` while the resolved adapter reports `[Low..Max]` — left
-    /// as-is here; flagged for its own pass.)
-    #[test]
-    fn codex_lazy_descriptor_matches_resolved_harness() {
-        let registry = default_registry();
-        let before = registry
-            .descriptors()
-            .into_iter()
-            .find(|d| d.id == HarnessId::Codex)
-            .unwrap();
-        registry.resolve(HarnessId::Codex).unwrap();
-        let after = registry
-            .descriptors()
-            .into_iter()
-            .find(|d| d.id == HarnessId::Codex)
-            .unwrap();
-        assert_eq!(before.name, after.name);
-        assert_eq!(before.supports_steering, after.supports_steering);
-        assert_eq!(before.steering_mode, after.steering_mode);
-        assert_eq!(before.reasoning_levels, after.reasoning_levels);
-    }
-
     #[test]
     fn native_subagents_switch_off_per_harness_and_persist() {
         let dir = tempfile::tempdir().unwrap();
@@ -1941,40 +1850,6 @@ mod gate_tests {
         );
         assert!(!called);
         registry.end_update(HarnessId::Codex);
-    }
-
-    #[test]
-    fn cloud_platform_registers_only_codex_and_claude() {
-        let registry = registry_for_platform(zeron_proto::CLOUD_PLATFORM);
-        let ids: Vec<HarnessId> = registry.descriptors().iter().map(|d| d.id).collect();
-        assert_eq!(
-            ids,
-            vec![HarnessId::Mock, HarnessId::ClaudeCode, HarnessId::Codex]
-        );
-        for hidden in [
-            HarnessId::Cursor,
-            HarnessId::Devin,
-            HarnessId::Grok,
-            HarnessId::Hermes,
-            HarnessId::Fx,
-            HarnessId::Pi,
-            HarnessId::Opencode,
-            HarnessId::Antigravity,
-            HarnessId::Muse,
-        ] {
-            assert!(!registry.is_registered(hidden), "{hidden:?}");
-            // Never resolved, so never probed or spawned.
-            assert!(registry.resolve(hidden).is_err(), "{hidden:?}");
-        }
-        let enabled = registry.enabled_set();
-        assert!(
-            enabled.iter().all(|id| CLOUD_HARNESS_IDS.contains(id)),
-            "{enabled:?}"
-        );
-        // Laptops keep the full catalog.
-        let laptop = registry_for_platform("macos");
-        assert!(laptop.is_registered(HarnessId::Cursor));
-        assert!(laptop.is_registered(HarnessId::Opencode));
     }
 
     #[test]

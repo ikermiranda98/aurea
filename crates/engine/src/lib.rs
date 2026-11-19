@@ -478,7 +478,7 @@ impl EngineCore {
         );
         // Agents added from the ACP registry (this engine's own, under its
         // data dir): harnesses before the update coordinator lists them.
-        acp_registry::start(data_dir, &registry);
+        // Aurea offers opencode only: no ACP registry agents.
         let harness_updates =
             harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
         harness_updates.start();
