@@ -56,12 +56,7 @@ pub mod overscroll;
 pub mod pickers;
 pub mod popover;
 pub mod project_actions;
-pub mod pull_request_detail;
-mod pull_request_media;
-mod pull_request_skeleton;
-#[cfg(test)]
-mod pull_request_test_support;
-pub mod pull_requests;
+mod github_avatar;
 pub mod queue;
 pub mod rail;
 pub(crate) mod reply_images;

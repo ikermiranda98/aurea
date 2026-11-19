@@ -224,7 +224,8 @@ fn render_badge_model(
                 .hover(move |style| style.bg(color.opacity(0.16)).text_color(color))
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
-                    crate::pull_request_detail::open_on_device(&url, device.clone(), window, cx);
+                    let _ = (&device, window);
+                    cx.open_url(&url);
                 })
         })
         // Sidebar rows spell the pull request out in their hover card.

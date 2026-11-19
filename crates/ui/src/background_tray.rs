@@ -762,6 +762,9 @@ mod tests {
         assert!(!earlier);
     }
 
+    use crate::state::AppState;
+    use gpui::AppContext as _;
+
     #[test]
     fn state_forgets_ended_processes() {
         let mut state = BackgroundTrayState::default();
@@ -775,9 +778,6 @@ mod tests {
         assert!(!state.is_stopping("a"));
         assert!(state.outputs.is_empty());
     }
-
-    use crate::state::AppState;
-    use gpui::AppContext as _;
 
     fn window(
         cx: &mut gpui::TestAppContext,

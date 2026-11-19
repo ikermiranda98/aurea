@@ -2900,7 +2900,7 @@ fn clone_row(
 ) -> gpui::Stateful<gpui::Div> {
     let owner = clone.label.split('/').next().unwrap_or_default().to_owned();
     let leading = if clone.github {
-        crate::pull_request_media::avatar(
+        crate::github_avatar::avatar(
             &owner,
             SharedString::from(format!("clone-avatar-{}", clone.label)),
             16.0,
@@ -3193,9 +3193,6 @@ impl Shell {
         }
         self.close_spaces_menu(cx);
         self.schedule_save(cx);
-        if let Some(page) = self.pull_requests_page.as_ref() {
-            page.update(cx, |page, cx| page.on_project_scope_changed(cx));
-        }
         cx.notify();
     }
 
