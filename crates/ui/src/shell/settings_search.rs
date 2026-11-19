@@ -383,7 +383,7 @@ mod tests {
 
     use super::*;
     use crate::settings::search::{
-        SettingId, lit, per_provider_rows, take_anchored, unanchored, unindexed,
+        SettingId, lit, take_anchored, unanchored, unindexed,
     };
     use crate::settings::widgets::take_row_titles;
 

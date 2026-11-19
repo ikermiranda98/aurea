@@ -6,9 +6,6 @@ use crate::appearance::AppearanceMode;
 
 /// Key context of the palette card: its mod-1…4 tab bindings live here.
 pub(super) const KEY_CONTEXT: &str = "CommandPalette";
-/// Rows a section shows under All; its own tab shows the long limit.
-const ALL_TAB_LIMIT: usize = 5;
-const THREADS_TAB_LIMIT: usize = 50;
 const RESULTS_FADE_BAND: f32 = 18.0;
 
 pub(super) struct CommandPalette {
@@ -48,18 +45,16 @@ impl EnterPress {
 pub(super) enum Tab {
     #[default]
     All,
-    Threads,
     Commands,
 }
 
 impl Tab {
-    // Aurea has no workspace files: the Files tab is gone from the bar.
-    pub(super) const ALL: [Tab; 3] = [Tab::All, Tab::Threads, Tab::Commands];
+    // Aurea has one chat and no workspace files: commands only.
+    pub(super) const ALL: [Tab; 2] = [Tab::All, Tab::Commands];
 
     fn label(self) -> &'static str {
         match self {
             Self::All => "All",
-            Self::Threads => "Threads",
             Self::Commands => "Commands",
         }
     }
@@ -83,8 +78,6 @@ impl Tab {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Section {
     QuickActions,
-    RecentThreads,
-    Threads,
     Commands,
 }
 
@@ -92,8 +85,6 @@ impl Section {
     fn title(self) -> &'static str {
         match self {
             Self::QuickActions => "Quick Actions",
-            Self::RecentThreads => "Recent Threads",
-            Self::Threads => "Threads",
             Self::Commands => "Commands",
         }
     }
@@ -135,7 +126,6 @@ impl Command {
 #[derive(Clone, Debug, PartialEq)]
 enum RowKind {
     Command(Command),
-    Chat(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -156,7 +146,6 @@ impl PaletteRow {
     fn key(&self) -> RowKey {
         let id = match &self.kind {
             RowKind::Command(command) => format!("command:{}", command.label()),
-            RowKind::Chat(id) => format!("chat:{id}"),
         };
         RowKey(self.section, id)
     }
@@ -349,96 +338,14 @@ impl Shell {
                     .map(RowKind::Command),
             )
         };
-        let threads = |limit| {
-            PaletteSection::new(
-                Section::Threads,
-                self.thread_matches(&query, limit, cx)
-                    .into_iter()
-                    .map(RowKind::Chat),
-            )
-        };
-        let recent_threads = |limit| {
-            PaletteSection::new(
-                Section::RecentThreads,
-                self.recent_threads(limit, cx)
-                    .into_iter()
-                    .map(RowKind::Chat),
-            )
-        };
         let sections = match (palette.tab, query.is_empty()) {
-            (Tab::All, true) => vec![
-                commands(Section::QuickActions),
-                recent_threads(ALL_TAB_LIMIT),
-            ],
-            (Tab::All, false) => vec![threads(ALL_TAB_LIMIT), commands(Section::Commands)],
-            (Tab::Threads, true) => vec![recent_threads(THREADS_TAB_LIMIT)],
-            (Tab::Threads, false) => vec![threads(THREADS_TAB_LIMIT)],
-            (Tab::Commands, true) => vec![commands(Section::QuickActions)],
-            (Tab::Commands, false) => vec![commands(Section::Commands)],
+            (_, true) => vec![commands(Section::QuickActions)],
+            (_, false) => vec![commands(Section::Commands)],
         };
         sections
             .into_iter()
             .filter(|section| !section.is_empty())
             .collect()
-    }
-
-    /// Unarchived top-level chats by latest activity, the focused one aside.
-    fn recent_threads(&self, limit: usize, cx: &App) -> Vec<String> {
-        let state = self.state.read(cx);
-        let mut chats: Vec<_> = state
-            .chats
-            .iter()
-            .filter(|chat| chat.is_top_level() && !chat.archived && chat.id != self.active_chat)
-            .collect();
-        chats
-            .sort_by_key(|chat| std::cmp::Reverse(chat.last_message_at.unwrap_or(chat.created_at)));
-        chats
-            .into_iter()
-            .take(limit)
-            .map(|chat| chat.id.clone())
-            .collect()
-    }
-
-    /// Top-level chats matching every word of `query`, best match first
-    /// (see `thread_search`).
-    fn thread_matches(&self, query: &str, limit: usize, cx: &App) -> Vec<String> {
-        let state = self.state.read(cx);
-        let terms = thread_search::search_terms(query);
-        // Global history deliberately ignores the sidebar's project filter and
-        // collapsed groups. Archived conversations remain searchable too.
-        // Like the sidebar, only list top-level sessions, not side chats or MCP workers.
-        let scored = state
-            .chats
-            .iter()
-            .filter(|chat| chat.is_top_level())
-            .filter_map(|chat| {
-                let pull_request = state
-                    .change_request_for_chat(chat)
-                    .map(|pr| {
-                        format!(
-                            "#{} {} {} {}",
-                            pr.number, pr.title, pr.head_ref, pr.base_ref
-                        )
-                    })
-                    .unwrap_or_default();
-                let fields = thread_search::ThreadFields {
-                    title: chat.title.as_deref().unwrap_or("New session"),
-                    project: state
-                        .space_for_chat(chat)
-                        .map(|s| s.display_name())
-                        .unwrap_or(""),
-                    branch: crate::change_requests::conversation_branch(chat, &state.spaces)
-                        .unwrap_or(""),
-                    device: state.device_name(&chat.device_id).unwrap_or(""),
-                    pull_request: &pull_request,
-                    archived: chat.archived,
-                };
-                let score = thread_search::score_thread(&fields, &terms)?;
-                let active = chat.last_message_at.unwrap_or(chat.created_at);
-                Some((chat.id.clone(), score, active.timestamp_millis()))
-            })
-            .collect();
-        thread_search::rank(scored, limit)
     }
 
     /// Pointer motion moves the highlight, so hover and keyboard never light
@@ -516,7 +423,6 @@ impl Shell {
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
             RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
-            RowKind::Chat(id) => self.open_chat(id, cx),
         }
     }
 
@@ -576,63 +482,6 @@ impl Shell {
                         row.child(popover::kbd_hint(theme, &shortcut))
                     })
                     .into_any_element()
-            }
-            RowKind::Chat(id) => {
-                let state = self.state.read(cx);
-                let chat = state.chats.iter().find(|chat| &chat.id == id)?;
-                // Project-less sessions name only their device.
-                let project = match (state.space_for_chat(chat), chat.space_id.as_deref()) {
-                    (Some(space), _) => Some(space.display_name()),
-                    (None, None) => None,
-                    _ => Some("?"),
-                };
-                // A Cloud chat's own machine isn't a device worth naming.
-                let device = (!zeron_proto::is_cloud_device(&chat.device_id, ""))
-                    .then(|| state.device_name(&chat.device_id))
-                    .flatten();
-                let folder = match (project, device) {
-                    (Some(project), Some(device)) => format!("{project} @ {device}"),
-                    (Some(project), None) => project.to_string(),
-                    (None, device) => device.unwrap_or_default().to_string(),
-                };
-                let branch = self
-                    .settings
-                    .sidebar_show_branch
-                    .then(|| crate::change_requests::conversation_branch(chat, &state.spaces))
-                    .flatten()
-                    .map(str::trim)
-                    .filter(|branch| !branch.is_empty())
-                    .map(SharedString::from);
-                let pr = self
-                    .settings
-                    .sidebar_show_pull_request
-                    .then(|| state.change_request_for_chat(chat).cloned())
-                    .flatten();
-                let harness = self
-                    .settings
-                    .sidebar_show_harness
-                    .then(|| chat.config.as_ref().map(|c| c.harness))
-                    .flatten();
-                self.render_chat_row(
-                    id.clone(),
-                    transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), Utc::now())
-                        .into(),
-                    folder.into(),
-                    branch,
-                    pr,
-                    harness,
-                    state.display_status_for(chat, Utc::now()),
-                    active,
-                    chat.archived,
-                    false,
-                    None,
-                    None,
-                    false,
-                    Some(query),
-                    theme,
-                    cx,
-                )
             }
         })
     }
@@ -1036,194 +885,6 @@ mod tests {
         .unwrap()
     }
 
-    fn search_chats(shell: &Shell, query: &str, cx: &mut Context<Shell>) -> Vec<String> {
-        shell
-            .command_palette
-            .as_ref()
-            .unwrap()
-            .search
-            .update(cx, |input, cx| {
-                input.set_text(query, cx);
-            });
-        shell
-            .palette_sections(cx)
-            .into_iter()
-            .flat_map(|section| section.rows)
-            .filter_map(|row| match row.kind {
-                RowKind::Chat(id) => Some(id),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[gpui::test]
-    fn history_excludes_child_chats_with_and_without_search(cx: &mut TestAppContext) {
-        let (window, _dir) = palette_window(cx);
-        window
-            .update(cx, |shell, window, cx| {
-                shell.state.update(cx, |state, _| {
-                    state.apply_chats(vec![
-                        chat("manual-sidechat", Some("main-session"), false, 0),
-                        chat("mcp-worker", Some("main-session"), false, 1),
-                        chat("archived-sidechat", Some("main-session"), true, 2),
-                        chat("orphan-sidechat", Some("deleted-parent"), false, 3),
-                        chat("main-session", None, false, 4),
-                        chat("archived-session", None, true, 5),
-                    ]);
-                });
-                shell.toggle_command_palette(window, cx);
-                // Recent Threads leaves archived threads to search.
-                assert_eq!(search_chats(shell, "", cx), ["main-session"]);
-                for query in [
-                    "manual-sidechat",
-                    "mcp-worker",
-                    "archived-sidechat",
-                    "orphan-sidechat",
-                ] {
-                    assert!(
-                        search_chats(shell, query, cx).is_empty(),
-                        "{query} must stay out of global history"
-                    );
-                }
-                assert_eq!(search_chats(shell, "main-session", cx), ["main-session"]);
-                assert_eq!(
-                    search_chats(shell, "archived-session", cx),
-                    ["archived-session"]
-                );
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn child_chats_do_not_consume_history_result_slots(cx: &mut TestAppContext) {
-        let (window, _dir) = palette_window(cx);
-        window
-            .update(cx, |shell, window, cx| {
-                shell.state.update(cx, |state, _| {
-                    let children = (0..THREADS_TAB_LIMIT).map(|ix| {
-                        chat(&format!("child-{ix}"), Some("session-0"), false, ix as i64)
-                    });
-                    let sessions = (0..=THREADS_TAB_LIMIT).map(|ix| {
-                        chat(
-                            &format!("session-{ix}"),
-                            None,
-                            false,
-                            (THREADS_TAB_LIMIT + ix) as i64,
-                        )
-                    });
-                    state.apply_chats(children.chain(sessions).collect());
-                });
-                shell.toggle_command_palette(window, cx);
-                shell.select_palette_tab(Tab::Threads, cx);
-                let expected: Vec<_> = (0..THREADS_TAB_LIMIT)
-                    .map(|ix| format!("session-{ix}"))
-                    .collect();
-                assert_eq!(search_chats(shell, "", cx), expected);
-                let oldest = format!("session-{THREADS_TAB_LIMIT}");
-                assert_eq!(search_chats(shell, &oldest, cx), [oldest]);
-            })
-            .unwrap();
-    }
-
-    fn sections(shell: &Shell, cx: &App) -> Vec<(Section, Vec<RowKind>)> {
-        shell
-            .palette_sections(cx)
-            .into_iter()
-            .map(|section| {
-                (
-                    section.section,
-                    section.rows.into_iter().map(|row| row.kind).collect(),
-                )
-            })
-            .collect()
-    }
-
-    fn titled(id: &str, title: &str, archived: bool, age: i64) -> zeron_proto::Chat {
-        let mut chat = chat(id, None, archived, age);
-        chat.title = Some(title.into());
-        chat
-    }
-
-    #[gpui::test]
-    fn thread_search_ranks_by_score_with_archived_below(cx: &mut TestAppContext) {
-        let (window, _dir) = palette_window(cx);
-        window
-            .update(cx, |shell, window, cx| {
-                shell.state.update(cx, |state, _| {
-                    state.apply_chats(vec![
-                        titled("mid-word", "Redeploy the edge", false, 0),
-                        titled("archived", "Deploy notes", true, 1),
-                        titled("older", "Deploy staging", false, 3),
-                        titled("newer", "Deploy production", false, 2),
-                        titled("unrelated", "Fix the composer", false, 0),
-                    ]);
-                });
-                shell.toggle_command_palette(window, cx);
-                assert_eq!(
-                    search_chats(shell, "deploy", cx),
-                    ["newer", "older", "mid-word", "archived"]
-                );
-                shell.select_palette_tab(Tab::Threads, cx);
-                assert_eq!(search_chats(shell, "deploy staging", cx), ["older"]);
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn all_tab_lists_threads_before_commands_and_caps_them(cx: &mut TestAppContext) {
-        let (window, _dir) = palette_window(cx);
-        window
-            .update(cx, |shell, window, cx| {
-                shell.state.update(cx, |state, _| {
-                    state.apply_chats(
-                        (0..8)
-                            .map(|ix| titled(&format!("t{ix}"), "New project idea", false, ix))
-                            .collect(),
-                    );
-                });
-                shell.toggle_command_palette(window, cx);
-                shell
-                    .command_palette
-                    .as_ref()
-                    .unwrap()
-                    .search
-                    .update(cx, |input, cx| input.set_text("new", cx));
-                let sections = sections(shell, cx);
-                assert_eq!(sections[0].0, Section::Threads);
-                assert_eq!(sections[0].1.len(), ALL_TAB_LIMIT);
-                assert_eq!(sections[1].0, Section::Commands);
-                shell.select_palette_tab(Tab::Threads, cx);
-                assert_eq!(search_chats(shell, "new", cx).len(), 8);
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn empty_state_without_a_focused_chat_has_no_files_or_archive(cx: &mut TestAppContext) {
-        let (window, _dir) = palette_window(cx);
-        window
-            .update(cx, |shell, window, cx| {
-                shell.state.update(cx, |state, _| {
-                    state.apply_chats(vec![chat("only", None, false, 0)]);
-                });
-                shell.toggle_command_palette(window, cx);
-                let sections = sections(shell, cx);
-                assert_eq!(
-                    sections
-                        .iter()
-                        .map(|(section, _)| *section)
-                        .collect::<Vec<_>>(),
-                    [Section::QuickActions, Section::RecentThreads]
-                );
-                assert!(
-                    !sections[0]
-                        .1
-                        .contains(&RowKind::Command(Command::ArchiveThread))
-                );
-            })
-            .unwrap();
-    }
-
     #[test]
     fn archive_is_offered_only_with_a_focused_chat() {
         assert!(!commands_for("archive", true, false).contains(&Command::ArchiveThread));
@@ -1301,34 +962,6 @@ mod tests {
         cx.simulate_keystrokes(window.into(), &platform_combo("mod-2"));
         assert_eq!(palette_tab(window, cx), None);
         assert_eq!(selected_chat(window, cx).as_deref(), Some("second"));
-    }
-
-    #[test]
-    fn selection_follows_its_row_when_rows_arrive_above_it() {
-        let chats = |ids: &[&str]| {
-            PaletteSection::new(
-                Section::Threads,
-                ids.iter().map(|id| RowKind::Chat((*id).into())),
-            )
-        };
-        let before = [chats(&["a", "b", "c"])];
-        let active = flat_rows(&before)[2].key();
-        let after = [
-            PaletteSection::new(Section::Commands, [RowKind::Command(Command::NewChat)]),
-            chats(&["a", "b", "c"]),
-        ];
-        assert_eq!(row_position(Some(&active), 2, &flat_rows(&after)), 3);
-        // A vanished row falls back to its old place, clamped.
-        let shorter = [chats(&["a"])];
-        assert_eq!(row_position(Some(&active), 2, &flat_rows(&shorter)), 0);
-        // Two headers precede the fourth row in the scroll container.
-        assert_eq!(child_index(&after, 3), 5);
-        assert_eq!(child_index(&after, 0), 1);
-        // Keyboard scrolling brings a section's header along with its first
-        // row; later rows scroll to themselves.
-        assert_eq!(scroll_child_index(&after, 0), 0);
-        assert_eq!(scroll_child_index(&after, 1), 2);
-        assert_eq!(scroll_child_index(&after, 2), 4);
     }
 
     #[test]

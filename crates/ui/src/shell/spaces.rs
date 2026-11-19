@@ -17,7 +17,7 @@ use crate::pickers::{
 use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
 use zeron_proto::{
-    ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
+    Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
     HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
 };
 
@@ -50,29 +50,6 @@ pub(super) fn retain_known_pins(
     let mut seen = HashSet::new();
     pinned_ids.retain(|id| known_chat_ids.contains(id) && seen.insert(id.clone()));
     pinned_ids.len() != before
-}
-
-pub(super) fn pinned_drag_scroll_delta(
-    pointer_y: f32,
-    viewport_top: f32,
-    viewport_bottom: f32,
-) -> f32 {
-    if viewport_bottom <= viewport_top {
-        return 0.0;
-    }
-    if pointer_y < viewport_top + super::SIDEBAR_DRAG_SCROLL_BAND {
-        let penetration = ((viewport_top + super::SIDEBAR_DRAG_SCROLL_BAND - pointer_y)
-            / super::SIDEBAR_DRAG_SCROLL_BAND)
-            .clamp(0.0, 1.0);
-        -super::SIDEBAR_DRAG_SCROLL_MAX * penetration
-    } else if pointer_y > viewport_bottom - super::SIDEBAR_DRAG_SCROLL_BAND {
-        let penetration = ((pointer_y - (viewport_bottom - super::SIDEBAR_DRAG_SCROLL_BAND))
-            / super::SIDEBAR_DRAG_SCROLL_BAND)
-            .clamp(0.0, 1.0);
-        super::SIDEBAR_DRAG_SCROLL_MAX * penetration
-    } else {
-        0.0
-    }
 }
 
 pub(super) fn pinned_drag_snapshot_is_valid(
@@ -797,27 +774,6 @@ pub(super) struct RenameSpaceDialog {
     pub _events: Subscription,
 }
 
-/// Dot color for a chat's display status (tab dots + Sessions rows).
-pub(crate) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hsla {
-    match status {
-        // Preset activity tone, not warning amber: running is routine.
-        // Non-done statuses sit well below full
-        // strength: at full alpha the colored words shouted across the
-        // whole sidebar (user request) — only Done keeps its pop.
-        // (Waiting reads as Working here: `display_status_for`.)
-        ChatIndicator::Working | ChatIndicator::Waiting => theme.busy.opacity(0.55),
-        // Blue: "asking you a question" must read differently from "busy
-        // working" at a glance.
-        ChatIndicator::AwaitingInput => theme.accent.opacity(0.6),
-        ChatIndicator::Errored => theme.danger.opacity(0.65),
-        // Green: finished-but-unseen reads as "ready for you".
-        ChatIndicator::Completed => {
-            theme.success.opacity(0.9) // emerald-400
-        }
-        ChatIndicator::Idle => crate::theme::ink(0.14),
-    }
-}
-
 // Handle-based rail host for the spaces dropdown: its list is a plain
 // tracked scroller, so the trait's default metrics/press/drag (off the live
 // ScrollHandle) apply unchanged.
@@ -868,120 +824,6 @@ impl Shell {
     }
 
     // ---- sidebar sections ----
-
-    pub(super) fn begin_sidebar_session_transfer(
-        &mut self,
-        payload: &SidebarSessionDrag,
-        cursor_offset: Point<Pixels>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.chat_status_hover = None;
-        self.cancel_pinned_session_drag(cx);
-        self.sidebar_session_return = None;
-        self.pinned_session_drag_generation = self.pinned_session_drag_generation.wrapping_add(1);
-        let lifted = window.mouse_position() - cursor_offset;
-        self.sidebar_session_transfer = Some(SidebarSessionTransfer {
-            payload: payload.clone(),
-            origin: std::rc::Rc::new(std::cell::Cell::new(
-                window.mouse_position() - cursor_offset,
-            )),
-            cursor_offset,
-            pointer: window.mouse_position(),
-            viewport: None,
-            preview: None,
-            source_group: String::new(),
-            source_index: 0,
-            row_height: 0.0,
-            source_collapse: SidebarSessionSlide {
-                from: 0.0,
-                to: 0.0,
-                epoch: 0,
-                started: std::time::Instant::now(),
-            },
-            collapsed_height: 0.0,
-            section_gaps: Default::default(),
-            siblings: Default::default(),
-            slide: SidebarSessionSlide {
-                from: f32::from(lifted.y),
-                to: f32::from(lifted.y),
-                epoch: self.pinned_session_drag_generation << 32,
-                started: std::time::Instant::now(),
-            },
-            slide_x: SidebarSessionSlide {
-                from: f32::from(lifted.x),
-                to: f32::from(lifted.x),
-                epoch: self.pinned_session_drag_generation << 32,
-                started: std::time::Instant::now(),
-            },
-        });
-        {
-            let origin = self
-                .sidebar_session_transfer
-                .as_ref()
-                .unwrap()
-                .origin
-                .clone();
-            cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(
-                            SIDEBAR_DRAG_SCROLL_FRAME_MS,
-                        ))
-                        .await;
-                    let keep_running = this
-                        .update(cx, |shell, cx| {
-                            let Some(transfer) = shell.sidebar_session_transfer.as_ref() else {
-                                return false;
-                            };
-                            if !cx.has_active_drag()
-                                || !std::rc::Rc::ptr_eq(&origin, &transfer.origin)
-                            {
-                                return false;
-                            }
-                            // Layout also animates while the pointer is stationary.
-                            cx.notify();
-                            // Pinned drags already have their own edge-scroll loop.
-                            if transfer
-                                .payload
-                                .visible_ids
-                                .contains(&transfer.payload.chat_id)
-                            {
-                                return true;
-                            }
-                            let Some(viewport) = transfer.viewport else {
-                                return true;
-                            };
-                            if !viewport.contains(&transfer.pointer) {
-                                return true;
-                            }
-                            let delta = pinned_drag_scroll_delta(
-                                f32::from(transfer.pointer.y),
-                                f32::from(viewport.top()),
-                                f32::from(viewport.bottom()),
-                            );
-                            let offset = shell.sidebar_scroll.offset();
-                            let scroll_top = -f32::from(offset.y);
-                            let max_scroll = f32::from(shell.sidebar_scroll.max_offset().y);
-                            let next = (scroll_top + delta).clamp(0.0, max_scroll);
-                            if next != scroll_top {
-                                shell
-                                    .sidebar_scroll
-                                    .set_offset(gpui::point(offset.x, px(-next)));
-                                cx.notify();
-                            }
-                            true
-                        })
-                        .unwrap_or(false);
-                    if !keep_running {
-                        break;
-                    }
-                }
-            })
-            .detach();
-        }
-        cx.notify();
-    }
 
     pub(super) fn sidebar_session_transfer_is_valid(
         &self,
