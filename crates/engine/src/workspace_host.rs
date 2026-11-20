@@ -182,9 +182,6 @@ fn new_projectless_cwd(
 /// show the account's one Cloud device instead).
 fn device_capabilities() -> Vec<String> {
     let mut capabilities = zeron_proto::capabilities::current();
-    if crate::runner::session().is_some() {
-        capabilities.push(zeron_proto::CLOUD_SESSION_CAPABILITY.to_string());
-    }
     if crate::doc_host::relay_layer_enabled() {
         capabilities.push(zeron_proto::relay_gen::CHAT_RELAY_CAPABILITY.to_string());
     }

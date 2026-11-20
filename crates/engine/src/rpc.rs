@@ -897,8 +897,6 @@ pub struct EngineRpc {
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<zeron_update::Updater>,
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
-    /// Cloud runner only: vault grants (ListGithubRepos, credentialed CloneRepo).
-    credentials: Option<crate::credentials::CredentialBroker>,
     /// Viewports' window focus, for desktop banners.
     viewport_focus: crate::desktop_notify::ViewportFocus,
     /// The trading surface's source (demo fixture or a live TWS paper link).
@@ -967,7 +965,6 @@ impl EngineRpc {
             links: None,
             updater: None,
             harness_updates: None,
-            credentials: None,
             viewport_focus: Default::default(),
             engine_info,
             trading,
@@ -1048,12 +1045,6 @@ impl EngineRpc {
         self
     }
 
-    /// Attach the Cloud runner's credential broker.
-    pub fn with_credentials(mut self, broker: crate::credentials::CredentialBroker) -> Self {
-        self.credentials = Some(broker);
-        self
-    }
-
     fn auth(&self) -> Result<&Auth, RpcError> {
         self.auth
             .as_ref()
@@ -1092,19 +1083,6 @@ impl EngineRpc {
         let _ = chat_ids;
     }
 
-    /// The logical Cloud device (no engine; the edge writes its row with the
-    /// `cloud-account` capability), as opposed to a session's device.
-    fn is_cloud_account_device(&self, device_id: &str) -> bool {
-        self.workspace.read_devices().is_ok_and(|devices| {
-            devices.iter().any(|d| {
-                d.id == device_id
-                    && d.capabilities
-                        .iter()
-                        .any(|c| c == zeron_proto::CLOUD_ACCOUNT_CAPABILITY)
-            })
-        })
-    }
-
     /// Requests aimed at a Zeron Cloud device: none exist in Aurea, so
     /// they fail fast instead of dialing. `None` = forward as usual.
     async fn answer_for_cloud(
@@ -1133,24 +1111,6 @@ impl EngineRpc {
             return Err(RpcError::Failed(CLOUD_UNAVAILABLE.into()));
         }
         Ok(None)
-    }
-
-    /// Wait for a chat row written elsewhere (the edge, for a delegate) to
-    /// reach this engine's registry, so what follows — a first prompt, a
-    /// title — finds it.
-    async fn await_chat_row(&self, chat_id: &str) -> Result<(), RpcError> {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            if self.workspace.chat(chat_id).ok().flatten().is_some() {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(RpcError::Failed(
-                    "The Cloud session started, but its chat hasn't synced here yet; try again shortly.".into(),
-                ));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
     }
 
     fn updater(&self) -> Result<&zeron_update::Updater, RpcError> {
@@ -4200,7 +4160,7 @@ impl RpcService for EngineRpc {
             methods::TRADING_SYSTEM_START => {
                 if let Some(engine) = &self.trading_engine {
                     let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
-                    let mut guard = engine.lock().unwrap();
+                    let guard = engine.lock().unwrap();
                     guard.start_system(&p.system_id).map_err(|e| RpcError::Failed(e.to_string()))?;
                     // Return the system from snapshot.
                     let snap = guard.snapshot();
@@ -4223,7 +4183,7 @@ impl RpcService for EngineRpc {
             methods::TRADING_SYSTEM_STOP => {
                 if let Some(engine) = &self.trading_engine {
                     let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
-                    let mut guard = engine.lock().unwrap();
+                    let guard = engine.lock().unwrap();
                     guard.stop_system(&p.system_id).map_err(|e| RpcError::Failed(e.to_string()))?;
                     let snap = guard.snapshot();
                     let system = snap.systems.into_iter().find(|s| s.id == p.system_id)
@@ -4255,7 +4215,7 @@ impl RpcService for EngineRpc {
             methods::TRADING_TASK_ADD => {
                 if let Some(engine) = &self.trading_engine {
                     let p: zeron_proto::trading::TaskAddInput = parse_params(params)?;
-                    let mut guard = engine.lock().unwrap();
+                    let guard = engine.lock().unwrap();
                     match guard.task_add(&p) {
                         Ok(task) => RpcReply::value(&task),
                         Err(error) => return Err(RpcError::Failed(error.to_string())),
@@ -4272,7 +4232,7 @@ impl RpcService for EngineRpc {
             methods::TRADING_TASK_CANCEL => {
                 if let Some(engine) = &self.trading_engine {
                     let p: zeron_proto::trading::TaskIdParams = parse_params(params)?;
-                    let mut guard = engine.lock().unwrap();
+                    let guard = engine.lock().unwrap();
                     match guard.task_cancel(&p.task_id) {
                         Ok(task) => RpcReply::value(&task),
                         Err(error) => return Err(RpcError::Failed(error.to_string())),
@@ -5182,29 +5142,8 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&repo)
             }
-            methods::LIST_GITHUB_REPOS => {
-                #[derive(Deserialize, Default)]
-                #[serde(default)]
-                struct P {
-                    query: Option<String>,
-                }
-                let p: P = if params.is_null() {
-                    P::default()
-                } else {
-                    parse_params(params)?
-                };
-                // A session machine lists with its own grant; any other device
-                // asks the edge, whose vault calls GitHub without the token
-                // ever leaving it.
-                let repos = match &self.credentials {
-                    Some(broker) => broker
-                        .list_github_repos(p.query.as_deref())
-                        .await
-                        .map_err(RpcError::Failed)?,
-                    None => return Err(RpcError::Failed(CLOUD_UNAVAILABLE.into())),
-                };
-                RpcReply::value(&serde_json::json!({ "repos": repos }))
-            }
+            // GitHub listings came from Zeron Cloud's vault: none in Aurea.
+            methods::LIST_GITHUB_REPOS => Err(RpcError::Failed(CLOUD_UNAVAILABLE.into())),
             methods::CLONE_REPO => {
                 #[derive(Deserialize)]
                 struct P {
@@ -5214,12 +5153,6 @@ impl RpcService for EngineRpc {
                     parent: Option<String>,
                 }
                 let p: P = parse_params(params)?;
-                // Cloud: wire the GitHub grant into git's credential helper
-                // first, so private repositories clone.
-                let no_credentials = match &self.credentials {
-                    Some(broker) => broker.ensure_git_credentials().await.err(),
-                    None => None,
-                };
                 let cloned = match p
                     .parent
                     .as_deref()
@@ -5228,12 +5161,7 @@ impl RpcService for EngineRpc {
                     Some(parent) => self.repos.clone_repo_in(&p.url, parent).await,
                     None => self.repos.clone_repo(&p.url).await,
                 };
-                let repo = cloned.map_err(|e| {
-                    let github = no_credentials
-                        .map(|reason| format!(" (no GitHub access: {reason})"))
-                        .unwrap_or_default();
-                    RpcError::Failed(format!("{e}{github}"))
-                })?;
+                let repo = cloned.map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&repo)
             }
             methods::CREATE_REPO => {

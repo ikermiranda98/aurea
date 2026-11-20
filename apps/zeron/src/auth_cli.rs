@@ -82,13 +82,6 @@ pub async fn login(config: EngineConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)?;
     let _lock = engine_lock(&config, "sign in")?;
     let auth = Engine::build_auth(&config).await;
-    if let Some(runner) = auth.runner_identity() {
-        println!(
-            "This is a Cloud device ({}) — it authenticates with its enrolled key; there is nothing to sign in to.",
-            runner.device_id()
-        );
-        return Ok(());
-    }
     if !auth.workos_enabled() {
         println!("Auth is in dev mode (no WorkOS client id) — there is nothing to sign in to.");
         return Ok(());
@@ -133,13 +126,6 @@ pub async fn logout(config: EngineConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)?;
     let _lock = engine_lock(&config, "sign out")?;
     let auth = Engine::build_auth(&config).await;
-    if let Some(runner) = auth.runner_identity() {
-        println!(
-            "This is a Cloud device ({}) — it has no session to sign out of. Delete it from Settings → Cloud on another device instead.",
-            runner.device_id()
-        );
-        return Ok(());
-    }
     if !auth.workos_enabled() {
         // Dev mode has no live session, but clear any stale session.json from a
         // previous WorkOS-mode run so the next real run starts signed out.
@@ -181,14 +167,6 @@ pub async fn status(config: EngineConfig) -> anyhow::Result<()> {
     let account = account_status(scope, &auth.state());
     println!("Data dir: {}", config.data_dir.display());
     println!("Edge:     {}", config.edge_url);
-    if let Some(runner) = auth.runner_identity() {
-        println!(
-            "Runner:   Cloud device {} (org {}, user {})",
-            runner.device_id(),
-            runner.org_id(),
-            runner.user_id()
-        );
-    }
     println!("Mode:     {}", account.mode);
     println!("Auth:     {}", account.auth);
     match InstanceLock::holder(&config.data_dir) {

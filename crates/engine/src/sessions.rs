@@ -816,29 +816,6 @@ impl SessionsEngine {
         })?
     }
 
-    /// What this engine's runs are doing, for the Cloud runner heartbeat:
-    /// turns in flight, those parked on a question, and runs whose turn ended
-    /// with background work still live. A runaway subagent can't hold the
-    /// machine forever: the idle reaper ends a parked run whose subagents
-    /// fall silent.
-    pub fn run_counts(&self) -> crate::runner::RunCounts {
-        let (active, waiting) = {
-            let statuses = lock(&self.inner.statuses);
-            (
-                statuses.values().filter(|s| is_active(s)).count(),
-                statuses
-                    .values()
-                    .filter(|s| s.status == SessionStatus::AwaitingInput)
-                    .count(),
-            )
-        };
-        crate::runner::RunCounts {
-            active,
-            waiting,
-            background: self.background_count(),
-        }
-    }
-
     /// Chats whose turn has ended but whose runtime still runs background
     /// work (subagents, background shells).
     pub fn background_count(&self) -> usize {
@@ -2032,11 +2009,6 @@ impl SessionsEngine {
             answers: Some(answers),
         });
         Ok(true)
-    }
-
-    /// Boot recovery has a revival of this chat on its way.
-    pub(crate) fn reviving(&self, chat_id: &str) -> bool {
-        lock(&self.inner.revivals).contains_key(chat_id)
     }
 
     /// Boot recovery: pick back up every turn the engine itself cut off — a
@@ -4543,53 +4515,6 @@ async fn drive_run(
     let mut entry_id = new_id();
     let mut segment_started = now_ms();
     let mut writer: Option<SegmentWriter<'_>> = None;
-    // A Cloud session machine's own setup (started or woke, cloning,
-    // checked out) opens its first answer after it boots, as tool chips
-    // under the message that brought it up, updated live while the clone
-    // runs; the harness starts once the checkout is ready. The entry id is
-    // derived from that message so the sender's placeholder chip (its
-    // optimistic echo) is replaced in place.
-    if crate::runner::setup_pending() {
-        let user_id = resume_state.user_message_id.clone();
-        entry_id = zeron_proto::cloud_setup_entry_id(&user_id);
-        let sent_at = doc_ref.read_entries().ok().and_then(|entries| {
-            entries
-                .iter()
-                .find(|entry| entry.id == user_id)
-                .map(|entry| entry.created_at)
-        });
-        let waited = sent_at.map(|sent| {
-            std::time::Duration::from_millis(now_ms().saturating_sub(sent).max(0) as u64)
-        });
-        let mut changes = crate::runner::watch_setup();
-        loop {
-            let (parts, done) = crate::runner::setup_snapshot(&user_id, waited);
-            folded = parts;
-            if let Err(err) = sync_segment(
-                doc_ref,
-                &mut writer,
-                &entry_id,
-                &device_id,
-                segment_started,
-                &folded,
-            ) {
-                tracing::warn!(chat = %chat_id, error = %err, "cloud setup steps write failed");
-            }
-            if done {
-                break;
-            }
-            tokio::select! {
-                changed = changes.changed() => if changed.is_err() { break },
-                _ = controls.interrupt.cancelled() => break,
-            }
-        }
-        // The turn began at the send, not when this machine got to it:
-        // "Worked for" counts the machine's setup too.
-        if let (Some(writer), Some(sent)) = (writer.as_mut(), sent_at) {
-            writer.count_duration_from(sent);
-        }
-        crate::runner::mark_setup_shown();
-    }
     let prepared = if let Some(refused) = auto_unavailable(&request, harness.access_modes()) {
         Err(refused)
     } else if harness_id == HarnessId::Cursor {
@@ -4688,7 +4613,6 @@ async fn drive_run(
                 match prepared {
                     Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
                     Ok(()) => {
-                        crate::wake_trace::mark(crate::wake_trace::Stage::AgentSpawn);
                         match warm.take() {
                             Some(taken) => {
                                 harness.run_warm(&taken.key, wire_request, controls).await
@@ -5306,7 +5230,6 @@ async fn drive_run(
                 next = stream.next() => match next {
                     Some(Ok(event)) => {
                         let started = matches!(event, AgentEvent::SessionStarted { .. });
-                        crate::wake_trace::note_agent_event(started);
                         // The agent's first output: its chat's title may start.
                         // (Not its startup's reports: the session, its usage
                         // and its commands come before its request.)

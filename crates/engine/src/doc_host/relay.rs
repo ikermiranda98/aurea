@@ -27,11 +27,6 @@ const MAINTENANCE_TICK: Duration = Duration::from_secs(1);
 const MODE_REFRESH: Duration = Duration::from_secs(10);
 /// How long a host keeps storing after it last heard of an old reader.
 const LEGACY_HOLD: Duration = Duration::from_secs(600);
-/// Cloud checkpoints: a turn has ended after this long without a commit; never
-/// closer together than the gap, and at least this often during a long turn.
-const CLOUD_QUIET: Duration = Duration::from_secs(3);
-const CLOUD_MIN_GAP: Duration = Duration::from_secs(10);
-const CLOUD_MAX_GAP: Duration = Duration::from_secs(60);
 /// How long a Cloud sleep waits for its final checkpoint.
 const SLEEP_CHECKPOINT_WAIT: Duration = Duration::from_secs(20);
 const CHECKPOINT_RETRY_MIN: Duration = Duration::from_secs(2);
@@ -345,9 +340,7 @@ impl ChatDocHandle {
         if state.relay.recently_active(LINGER_AFTER_PEER) || state.heal_owed.load(Ordering::Acquire) {
             return false;
         }
-        !(state.relaying()
-            && crate::runner::session().is_some()
-            && !state.checkpoint_covers(&self.doc.doc().oplog_vv()))
+        true
     }
 
     pub(crate) fn note_journaled(&self, ordinal: i64) {
@@ -475,9 +468,6 @@ impl DocHost {
                             last_commits = commits;
                             last_commit_at = now;
                         }
-                        if state.relaying() && crate::runner::session().is_some() {
-                            host.cloud_checkpoint_due(&handle, &state, now, last_commit_at);
-                        }
                         // Nothing time can move: no answer awaited, nothing to
                         // retire or heal, no Cloud checkpoint to follow, no
                         // commit since the last look. Rest until something
@@ -485,7 +475,6 @@ impl DocHost {
                         resting = room.is_some()
                             && state.caught_up()
                             && !state.heal_owed.load(Ordering::Acquire)
-                            && crate::runner::session().is_none()
                             && last_commit_at < now
                             && state.settled();
                         next_tick = if resting {
@@ -612,25 +601,6 @@ impl DocHost {
             .set_queue_pushes(!is_host && offered && generation >= RELAY_ROOM_GEN && host_reads_queue);
         state.relay.set_policy(RelayPolicy { confirm_queue: is_host });
         state.relay.set_host(Some(chat.device_id));
-    }
-
-    fn cloud_checkpoint_due(
-        &self,
-        handle: &Arc<ChatDocHandle>,
-        state: &ChatRelayState,
-        now: Instant,
-        last_commit_at: Instant,
-    ) {
-        let version = handle.doc.doc().oplog_vv();
-        if state.checkpoint_covers(&version) {
-            return;
-        }
-        let last_at = lock(&state.checkpointed).as_ref().map(|(_, at)| *at);
-        let since = last_at.map_or(Duration::MAX, |at| now - at);
-        let turn_ended = now - last_commit_at >= CLOUD_QUIET && since >= CLOUD_MIN_GAP;
-        if turn_ended || since >= CLOUD_MAX_GAP {
-            self.spawn_chat2_checkpoint(handle, "relay-cloud");
-        }
     }
 
     /// Before a Cloud sleep: the room must hold every relaying chat's latest

@@ -757,20 +757,6 @@ pub(super) fn host_in(host: &str, domains: &[&str]) -> bool {
         .any(|d| host == *d || host.ends_with(&format!(".{d}")))
 }
 
-/// `url` is an `https` page on one of `domains` (or a subdomain), with no
-/// userinfo and no explicit port: a sign-in page a CLI printed that is safe
-/// to open on the requesting device.
-pub(super) fn trusted_page(url: &str, domains: &[&str]) -> bool {
-    reqwest::Url::parse(url).is_ok_and(|parsed| {
-        parsed.scheme() == "https"
-            && parsed.username().is_empty()
-            && parsed.password().is_none()
-            && parsed.port().is_none()
-            // `domain()` is `None` for IP literals.
-            && parsed.domain().is_some_and(|host| host_in(host, domains))
-    })
-}
-
 /// The REST root for a Copilot login: GitHub's, or `https://api.<tenant>.ghe.com`
 /// for a GitHub Enterprise Cloud (`*.ghe.com`) `enterpriseUrl`. Any other
 /// enterprise host — self-hosted GHES included, whose REST root would be

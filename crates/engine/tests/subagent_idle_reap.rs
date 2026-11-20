@@ -263,16 +263,15 @@ async fn background_work_holds_a_machine_awake() {
         core, feed: _feed, turn, _dir,
     } = park_after_spawn().await;
     let turn = turn.lock().unwrap().clone().expect("the main run's turn control");
-    assert_eq!(core.sessions.run_counts().background, 0);
+    assert_eq!(core.sessions.background_count(), 0);
 
     turn.set_background(1);
-    let counts = core.sessions.run_counts();
-    assert_eq!((counts.active, counts.background), (0, 1));
+    assert_eq!((core.sessions.any_active(), core.sessions.background_count()), (false, 1));
     let busy = core.doc_host.quiesce_for_sleep().await.unwrap_err();
     assert!(busy.contains("background work"), "{busy}");
 
     turn.set_background(0);
-    assert_eq!(core.sessions.run_counts().background, 0);
+    assert_eq!(core.sessions.background_count(), 0);
     core.doc_host.quiesce_for_sleep().await.expect("idle now");
     core.doc_host.lift_quiesce();
     core.sessions.shutdown().await;

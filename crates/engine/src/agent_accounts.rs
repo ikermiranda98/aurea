@@ -246,9 +246,7 @@ impl AgentAccountsConfig {
             Some(dir) => dir.join(".claude.json"),
             None => home_dir().join(".claude.json"),
         };
-        // A Cloud device's logins are files the credential broker writes;
-        // it never has (or prompts for) a keychain.
-        let keychain = cfg!(target_os = "macos") && !crate::runner::is_cloud_platform();
+        let keychain = cfg!(target_os = "macos");
         Self {
             data_dir: data_dir.to_path_buf(),
             claude_keychain_service: keychain
@@ -3375,11 +3373,6 @@ mod keychain {
 
     /// [`exec`] with the exit code (`None`: never ran or timed out).
     async fn exec_code(args: &[&str]) -> (Option<i32>, String, String) {
-        // A Cloud device never uses a keychain (see `detect`); this also
-        // covers lookups that don't go through the config.
-        if crate::runner::is_cloud_platform() {
-            return (None, String::new(), "a Cloud device has no keychain".into());
-        }
         // Absolute path: a PATH-planted `security` must never see secrets.
         let run = tokio::process::Command::new(security_bin())
             .args(args)
@@ -4146,21 +4139,6 @@ fn short_duration(ms: i64) -> String {
     } else {
         format!("{}h", (secs + 3599) / 3600)
     }
-}
-
-/// A usage reply from `harness`'s plan endpoint (Claude's `/api/oauth/usage`,
-/// Codex's `/wham/usage`) as windows and the live plan label — for logins
-/// whose usage is read elsewhere (Cloud's, by the vault).
-pub(crate) fn usage_windows_from_reply(
-    harness: HarnessId,
-    body: &serde_json::Value,
-) -> Option<(Vec<AgentUsageWindow>, Option<String>)> {
-    let snapshot = match harness {
-        HarnessId::ClaudeCode => claude_usage_windows(body),
-        HarnessId::Codex => codex_usage_snapshot(body),
-        _ => None,
-    }?;
-    Some((snapshot.windows, snapshot.plan_label))
 }
 
 /// Codex `/wham/usage`: primary/secondary windows + the live plan.

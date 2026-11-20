@@ -1459,79 +1459,6 @@ impl DocHost {
         }
     }
 
-    /// Boot recovery reads this disk, and a machine that died can come back
-    /// with a disk older than its chat's room: a turn that was running then
-    /// has no open journal here, so recovery never saw it. Once the room has
-    /// caught up, a reply still streaming from this device with no run behind
-    /// it, or a message marked delivered that this disk's ledger has never
-    /// heard of, is such a turn. It says so; a message still pending just runs.
-    async fn settle_rolled_back_turn(&self, weak: Weak<ChatDocHandle>) {
-        const CATCH_UP_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
-        let deadline = tokio::time::Instant::now() + CATCH_UP_WAIT;
-        let handle = loop {
-            let Some(handle) = weak.upgrade() else {
-                return;
-            };
-            let caught_up = self.inner.config.edge.is_none()
-                || lock(&handle.chat2).as_ref().is_some_and(|c| c.caught_up());
-            if caught_up {
-                break handle;
-            }
-            drop(handle);
-            if tokio::time::Instant::now() >= deadline {
-                return; // the next boot looks again
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        };
-        let Some(sessions) = self.sessions() else {
-            return;
-        };
-        if !self.is_host(&handle.chat_id)
-            || sessions.has_run(&handle.chat_id)
-            || sessions.reviving(&handle.chat_id)
-        {
-            return;
-        }
-        let Ok(commands) = handle.doc.read_commands() else {
-            return;
-        };
-        let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(true);
-        // Running or about to: this isn't a lost turn.
-        if commands.iter().any(|c| {
-            c.status == SessionCommandStatus::Pending || lock(&self.inner.executing).contains(&c.id)
-        }) {
-            return;
-        }
-        let stamped = match handle.mark_abandoned_streams(ROLLED_BACK_NOTE) {
-            Ok(stamped) => stamped,
-            Err(err) => {
-                tracing::warn!(chat = %handle.chat_id, error = %err, "settling a lost turn failed");
-                return;
-            }
-        };
-        if !stamped.is_empty() {
-            tracing::warn!(chat = %handle.chat_id, "a turn was lost with this machine's disk");
-            return;
-        }
-        let Ok(entries) = handle.doc.read_entries_shared() else {
-            return;
-        };
-        let Some(last) = entries.last().filter(|entry| entry.role == MessageRole::User) else {
-            return;
-        };
-        let lost = commands.iter().any(|c| {
-            matches!(&c.payload, SessionCommandPayload::Run { message_id, .. } if *message_id == last.id)
-                && c.status == SessionCommandStatus::Applied
-                && !is_processed(&c.id)
-        });
-        if lost {
-            tracing::warn!(chat = %handle.chat_id, "a turn was lost with this machine's disk");
-            if let Err(err) = handle.note_turn_failure(&last.id, ROLLED_BACK_NOTE) {
-                tracing::warn!(chat = %handle.chat_id, error = %err, "noting a lost turn failed");
-            }
-        }
-    }
-
     /// A hosted chat has a command no drain has executed yet.
     pub(crate) fn has_waiting_commands(&self) -> bool {
         let handles: Vec<_> = lock(&self.inner.handles).values().cloned().collect();
@@ -4310,23 +4237,6 @@ impl DocHost {
         self.queue_command_with_transfers(chat_id, payload, Vec::new())
     }
 
-    /// [`Self::queue_command`] plus queued-attachment transfers: the command's
-    /// `pending://` refs name bytes already committed to THIS device's uploads
-    /// dir; when another device hosts the chat, a background task pushes them
-    /// over the peer link (retry until they land) while the command is
-    /// already durably queued. The send is a local write — attachment bytes
-    /// chase it, never gate it (2026-08-19 incident).
-    /// The question (or approval) `chat_id` waits on, latest first: its
-    /// request id, or `None` when nothing waits.
-    pub(crate) fn pending_input(&self, chat_id: &str) -> Result<Option<String>, EngineError> {
-        let handle = self.open(chat_id)?;
-        let entries = handle.doc.read_entries_shared()?;
-        Ok(entries.iter().rev().flat_map(|e| e.parts.iter().rev()).find_map(|part| match part {
-            zeron_doc::MessagePart::Input { request_id, resolved: false, .. } => Some(request_id.clone()),
-            _ => None,
-        }))
-    }
-
     pub fn queue_command_with_transfers(
         &self,
         chat_id: &str,
@@ -6209,7 +6119,6 @@ impl DocHost {
                         entry.payload,
                         SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }
                     ) {
-                        crate::wake_trace::mark_command(entry.issued_at);
                         tracing::debug!(target: "first_word", chat = %handle.chat_id, "drain picked the run");
                         self.await_earlier_controls(handle, &entry.id).await;
                     }
@@ -7723,12 +7632,6 @@ mod queued_message_prompt_tests {
     }
 }
 
-/// Per-chat background task: reacts to doc changes (local commits and remote imports)
-/// by re-publishing the transcript watch, draining commands, and debouncing snapshots.
-/// Why a Cloud chat's reply stopped when its machine lost its place.
-const ROLLED_BACK_NOTE: &str =
-    "The Cloud machine stopped during this turn and lost its place. Send a message to continue.";
-
 /// Holds only a weak handle so a dropped host tears the task down.
 async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: watch::Receiver<u64>) {
     // Prompt delivery may wait for mailbox capacity. Keep a separate watcher
@@ -7748,11 +7651,6 @@ async fn chat_task(host: DocHost, weak: Weak<ChatDocHandle>, mut changed_rx: wat
             }
         }
     });
-    if crate::runner::session().is_some() {
-        let settling = host.clone();
-        let settling_weak = weak.clone();
-        host.spawn_worker(async move { settling.settle_rolled_back_turn(settling_weak).await });
-    }
     // Initial pass: the snapshot may already carry pending commands. The
     // mirror stays lazy — it materializes on the first watch attach.
     {
