@@ -66,6 +66,8 @@ pub mod methods {
     pub const TRADING_MT5_DETECT: &str = "TradingMt5Detect";
     pub const TRADING_IBKR_DETECT: &str = "TradingIbkrDetect";
     pub const TRADING_POOL_SELECT: &str = "TradingPoolSelect";
+    /// The systems folder in use and its system count (null: none chosen).
+    pub const TRADING_POOL_CURRENT: &str = "TradingPoolCurrent";
     /// An agent asks for a money action; it waits on the desk for approval.
     pub const TRADING_PROPOSE: &str = "TradingPropose";
     /// The person approves (runs) or rejects a proposal. Never an agent's.

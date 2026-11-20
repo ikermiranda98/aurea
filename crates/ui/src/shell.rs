@@ -580,15 +580,18 @@ pub enum SettingsSection {
     General,
     /// The desk chat's system prompt (Aurea).
     Chat,
+    /// The folder holding the desk's trading systems (Aurea).
+    Systems,
     Appshots,
     Archived,
 }
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 13] = [
+    pub const ALL: [SettingsSection; 14] = [
         SettingsSection::General,
         SettingsSection::Chat,
+        SettingsSection::Systems,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Voice,
@@ -668,6 +671,7 @@ impl SettingsSection {
             SettingsSection::Shortcuts => "shortcuts",
             SettingsSection::General => "general",
             SettingsSection::Chat => "chat",
+            SettingsSection::Systems => "systems",
             SettingsSection::Appshots => "appshots",
             SettingsSection::Archived => "archived",
         }
@@ -688,6 +692,7 @@ impl SettingsSection {
             "shortcuts" => SettingsSection::Shortcuts,
             "general" | "conversations" => SettingsSection::General,
             "chat" | "system-prompt" => SettingsSection::Chat,
+            "systems" | "sistemas" => SettingsSection::Systems,
             "appshots" => SettingsSection::Appshots,
             "archived" => SettingsSection::Archived,
             _ => return None,
@@ -716,6 +721,7 @@ impl SettingsSection {
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::General => "General",
             SettingsSection::Chat => "Chat",
+            SettingsSection::Systems => "Sistemas",
             SettingsSection::Appshots => "Appshots",
             SettingsSection::Archived => "Archived sessions",
         }
@@ -736,6 +742,7 @@ impl SettingsSection {
             SettingsSection::Shortcuts => icons::KEYBOARD,
             SettingsSection::General => icons::SETTINGS,
             SettingsSection::Chat => icons::CHAT_ROUND_LINE,
+            SettingsSection::Systems => icons::FOLDER,
             SettingsSection::Appshots => icons::MONITOR,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         }
@@ -1905,6 +1912,7 @@ pub struct Shell {
     notifications_page: Option<Entity<NotificationsPage>>,
     /// Settings → Chat (the desk chat's system prompt), built on first visit.
     chat_prompt_page: Option<Entity<crate::settings::chat_prompt::ChatPromptPage>>,
+    systems_folder_page: Option<Entity<crate::settings::systems_folder::SystemsFolderPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
@@ -2388,6 +2396,7 @@ impl Shell {
             appearance_page: None,
             notifications_page: None,
             chat_prompt_page: None,
+            systems_folder_page: None,
             shortcuts_page: None,
             accounts_page: None,
             harnesses_page: None,
@@ -4738,6 +4747,15 @@ impl Shell {
                 self.chat_prompt_page
                     .get_or_insert_with(|| {
                         cx.new(|cx| crate::settings::chat_prompt::ChatPromptPage::new(data_dir, cx))
+                    })
+                    .clone()
+                    .into_any_element()
+            }
+            SettingsSection::Systems => {
+                let state = self.state.clone();
+                self.systems_folder_page
+                    .get_or_insert_with(|| {
+                        cx.new(|cx| crate::settings::systems_folder::SystemsFolderPage::new(state, cx))
                     })
                     .clone()
                     .into_any_element()

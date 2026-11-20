@@ -77,6 +77,8 @@ settings_index! {
         "titles rename sessions model"),
     (SystemPrompt, Chat, None, "System prompt",
         "instructions instrucciones agent agente opencode trading desk mesa prompt"),
+    (SystemsFolder, Systems, None, "Carpeta de sistemas",
+        "systems folder carpeta sistemas bots pool directorio trading"),
     (ColorScheme, Appearance, None, "Color scheme",
         "system light dark mode"),
     (LightTheme, Appearance, None, "Light theme",
@@ -356,6 +358,7 @@ fn page_terms(section: SettingsSection) -> &'static str {
     match section {
         SettingsSection::General => "preferences composer conversations behavior",
         SettingsSection::Chat => "system prompt instructions agent trading desk",
+        SettingsSection::Systems => "systems folder carpeta sistemas bots pool",
         SettingsSection::Appearance => "theme look colors fonts",
         SettingsSection::Notifications => "alerts sounds banners",
         SettingsSection::Voice => "speech dictation microphone codex",

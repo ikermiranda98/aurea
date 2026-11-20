@@ -22,6 +22,7 @@ pub mod accounts;
 pub mod appearance;
 pub mod archived;
 pub mod chat_prompt;
+pub mod systems_folder;
 pub mod composer;
 pub mod harnesses;
 pub mod notifications;

@@ -4357,6 +4357,12 @@ impl RpcService for EngineRpc {
                     &zeron_trading::TradingService::detect(p.host.as_deref(), p.port).await,
                 )
             }
+            methods::TRADING_POOL_CURRENT => RpcReply::value(
+                &self
+                    .trading_engine
+                    .as_ref()
+                    .and_then(|engine| engine.lock().unwrap().pool_current()),
+            ),
             methods::TRADING_POOL_SELECT => {
                 let p: zeron_proto::trading::PoolSelectParams = parse_params(params)?;
                 if let Some(engine) = &self.trading_engine {

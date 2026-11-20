@@ -32,6 +32,16 @@ impl TradingEngine {
             _ => Store::open_in_memory().map_err(|e| e.to_string())?,
         };
 
+        // The folder chosen in Settings → Sistemas (`pool_select`) when no
+        // TRADING_SYSTEMS_DIR overrides it, as long as it still exists.
+        let systems_dir = systems_dir.or_else(|| {
+            store
+                .meta_get("carpeta-sistemas")
+                .ok()
+                .flatten()
+                .map(PathBuf::from)
+                .filter(|dir| dir.is_dir())
+        });
         let mut state = TradingState::new();
         if let Some(dir) = &systems_dir {
             state.scan_pool(dir);
@@ -378,6 +388,22 @@ impl TradingEngine {
             let guard = conn.lock().unwrap();
             tasks::list_tasks(&guard, 50).unwrap_or_default()
         }
+    }
+
+    /// The systems folder in use and how many systems it holds (`None` when
+    /// none is chosen: the desk shows the demo pool).
+    pub fn pool_current(&self) -> Option<PoolSelectResult> {
+        let dir = self
+            .state
+            .lock()
+            .unwrap()
+            .systems_dir
+            .clone()
+            .or_else(|| self.systems_dir.clone())?;
+        Some(PoolSelectResult {
+            systems: pool::scan_dirs(&dir).len() as u32,
+            dir: dir.to_string_lossy().into_owned(),
+        })
     }
 
     pub fn pool_select(&mut self, dir: &str) -> Result<PoolSelectResult, TradingError> {
@@ -777,6 +803,37 @@ mod tests {
     async fn start_system_unknown_returns_error() {
         let engine = TradingEngine::new(None, None).unwrap();
         assert!(engine.start_system("99").is_err());
+    }
+
+    #[tokio::test]
+    async fn the_chosen_systems_folder_outlasts_a_restart() {
+        let seq = std::sync::atomic::AtomicU64::new(0).fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!("aurea_pool_restart_{}_{}", std::process::id(), seq));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("sistemas");
+        fs::create_dir_all(dir.join("01_uno")).unwrap();
+        fs::create_dir_all(dir.join("02_dos")).unwrap();
+        fs::create_dir_all(dir.join("notas")).unwrap();
+        let db = root.join("trading.db");
+
+        let mut engine = TradingEngine::new(None, Some(db.clone())).unwrap();
+        assert_eq!(engine.pool_current(), None);
+        engine.pool_select(dir.to_str().unwrap()).unwrap();
+        drop(engine);
+
+        let engine = TradingEngine::new(None, Some(db.clone())).unwrap();
+        let current = engine.pool_current().expect("remembered folder");
+        assert_eq!(current.dir, dir.to_string_lossy());
+        assert_eq!(current.systems, 2);
+        assert_eq!(engine.snapshot().systems.len(), 2);
+        drop(engine);
+
+        // A folder that no longer exists is forgotten, not fatal.
+        fs::remove_dir_all(&dir).unwrap();
+        let engine = TradingEngine::new(None, Some(db)).unwrap();
+        assert_eq!(engine.pool_current(), None);
+        drop(engine);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

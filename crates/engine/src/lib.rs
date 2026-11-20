@@ -375,7 +375,12 @@ impl EngineCore {
         let diff_sync = CheckoutDiffSync::start(repos.clone(), workspace.clone(), &device_id, edge);
         let trading_engine = {
             let dir = std::env::var("TRADING_SYSTEMS_DIR").ok().map(std::path::PathBuf::from);
-            let db_path = std::env::var("TRADING_DB_PATH").ok().map(std::path::PathBuf::from);
+            // The desk's own store (tasks, the chosen systems folder) lives in
+            // the data dir so it outlasts a restart; TRADING_DB_PATH overrides.
+            let db_path = std::env::var("TRADING_DB_PATH")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .or_else(|| Some(data_dir.join("trading").join("trading.db")));
             zeron_trading::TradingEngine::new(dir, db_path)
                 .ok()
                 .map(|e| std::sync::Arc::new(std::sync::Mutex::new(e)))
