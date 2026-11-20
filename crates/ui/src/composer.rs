@@ -2471,16 +2471,6 @@ impl ComposerInput {
         cx.notify();
     }
 
-    /// Insert a workspace reference at the current selection. Drag-and-drop
-    /// uses the same strict local Markdown transport and projected chip as an
-    /// `@` mention selected from completion.
-    fn insert_dropped_mention(&mut self, path: &str, is_dir: bool, cx: &mut Context<Self>) -> bool {
-        if !local_path_is_safe(path) {
-            return false;
-        }
-        self.insert_reference(&local_file_link(path, is_dir), cx)
-    }
-
     /// Delete every chip that mentions attachment `index`, along with one separator
     /// when the chip sat between spaces. Returns whether anything was removed.
     pub(crate) fn remove_attachment_chips(&mut self, index: u32, cx: &mut Context<Self>) -> bool {
@@ -14259,58 +14249,6 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn inserting_references_preserves_surrounding_markdown_and_punctuation(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        with_composer_input(cx, |input, window, cx| {
-            for raw in [
-                "**see @src**",
-                "_see @src_",
-                "~~see @src~~",
-                "See (@src)",
-                "- @src\r\nnext",
-            ] {
-                let start = raw.find("@src").unwrap();
-                let token = mention_token(raw, start + 4).unwrap();
-                input.set_text(raw, cx);
-                let file = local_file_link("src/main.rs", false);
-                input.replace_mention(token.range, "src/main.rs", false, cx);
-                assert_eq!(input.text(), raw.replacen("@src", &file, 1));
-                assert_eq!(input.projection.mentions.len(), 1);
-                input.undo(&Undo, window, cx);
-                assert_eq!(input.text(), raw);
-                let source = raw.replace("@src", "$review");
-                input.set_text(&source, cx);
-                let skill = zeron_proto::invocation::Invocation::Skill {
-                    name: "review".into(),
-                    path: "/repo/SKILL.md".into(),
-                    command: None,
-                }
-                .link();
-                let token = invocation_token(&source, start + 7, '$').unwrap();
-                input.replace_plain_token(token.range, &skill, cx);
-                assert_eq!(input.text(), source.replacen("$review", &skill, 1));
-                assert_eq!(input.projection.mentions.len(), 1);
-            }
-            input.set_text("**selected**", cx);
-            input.selected_range = 2..10;
-            for outside in ["/tmp/file.rs", "../file.rs"] {
-                assert!(!input.insert_dropped_mention(outside, false, cx));
-            }
-            assert!(input.insert_dropped_mention("src/main.rs", false, cx));
-            assert_eq!(
-                input.text(),
-                format!("**{}**", local_file_link("src/main.rs", false))
-            );
-            assert!(
-                composer_markdown::faces(input.text())
-                    .iter()
-                    .any(|(_, face)| *face == composer_markdown::Face::Bold)
-            );
-        });
-    }
-
     fn button_annotation() -> zeron_proto::annotation::BrowserAnnotation {
         zeron_proto::annotation::BrowserAnnotation {
             index: 1,
@@ -14423,27 +14361,6 @@ mod tests {
             input.layout_text(px(160.), &window.text_style(), window, cx);
             assert_eq!(input.line_indents[0], px(0.));
             assert!(input.projection.display.starts_with(">     - literal"));
-        });
-    }
-
-    #[gpui::test]
-    fn dropped_chip_replacement_rebuilds_same_length_layout(cx: &mut gpui::TestAppContext) {
-        with_composer_input(cx, |input, window, cx| {
-            input.set_text(local_file_link("src/a.rs", false), cx);
-            input.layout_text(px(320.), &window.text_style(), window, cx);
-            let rebuilds = input.layout_rebuilds;
-            input.selected_range = 0..input.content.len();
-            assert!(input.insert_dropped_mention("src/b.rs", false, cx));
-            assert!(input.needs_measure);
-            input.layout_text(px(320.), &window.text_style(), window, cx);
-            assert_eq!(input.layout_rebuilds, rebuilds + 1);
-            assert!(input.projection.display.contains("b.rs"));
-            input.set_text("    - code\n\nactive", cx);
-            input.layout_text(px(160.), &window.text_style(), window, cx);
-            assert_eq!(input.line_indents[0], px(0.));
-            input.move_to(7, cx);
-            assert!(!input.indent_list(false, window, cx));
-            assert_eq!(input.text(), "    - code\n\nactive");
         });
     }
 
@@ -16796,69 +16713,6 @@ mod tests {
             vec!["custom answer"],
             "typed overrides picked, trimmed"
         );
-    }
-
-    #[gpui::test]
-    fn composition_drops_and_atomic_chip_edits_preserve_rich_draft_history(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        fn assert_ranges(input: &ComposerInput) {
-            for range in std::iter::once(&input.selected_range).chain(input.marked_range.iter()) {
-                assert!(range.start <= range.end && range.end <= input.content.len());
-                assert!(input.content.is_char_boundary(range.start));
-                assert!(input.content.is_char_boundary(range.end));
-            }
-            for (chip, display) in &input.projection.mentions {
-                assert!(input.content.get(chip.range.clone()).is_some());
-                assert!(input.projection.display.get(display.clone()).is_some());
-            }
-        }
-        with_composer_input(cx, |input, window, cx| {
-            let chip = local_file_link("src/café.rs", false);
-            let raw = format!("**bold** e\u{301} 👨‍👩‍👧‍👦 {chip}\n`{chip}`\nactive ");
-            input.set_text(&raw, cx);
-            assert_eq!(input.projection.mentions.len(), 1);
-            input.replace_and_mark_text_in_range(None, "かな", Some(0..1), window, cx);
-            let composed = input.text().to_owned();
-            let selection = input.selected_range.clone();
-            let marked = input.marked_range.clone();
-            let history = input.undo_stack.len();
-            assert!(!input.insert_dropped_mention("src/dropped.rs", false, cx));
-            assert_eq!(input.text(), composed);
-            assert_eq!(input.selected_range, selection);
-            assert_eq!(input.marked_range, marked);
-            assert_eq!(input.undo_stack.len(), history);
-            assert_ranges(input);
-            input.replace_and_mark_text_in_range(None, "かんじ", Some(1..2), window, cx);
-            assert_eq!(&input.content[input.selected_range.clone()], "ん");
-            assert_ranges(input);
-            input.replace_text_in_range(None, "漢字", window, cx);
-            let committed = format!("{raw}漢字");
-            assert_eq!(input.text(), committed);
-            assert!(input.marked_range.is_none());
-            assert_ranges(input);
-            input.undo(&Undo, window, cx);
-            assert_eq!(input.text(), raw);
-            input.redo(&Redo, window, cx);
-            assert_eq!(input.text(), committed);
-            assert_ranges(input);
-            let link = input.projection.mentions[0].0.range.clone();
-            let partial = input.range_to_utf16(&(link.start + 1..link.end - 1));
-            input.replace_text_in_range(Some(partial), "🦀", window, cx);
-            assert!(input.projection.mentions.is_empty());
-            assert!(input.text().contains(&format!("`{chip}`")));
-            assert_ranges(input);
-            input.undo(&Undo, window, cx);
-            assert_eq!(input.text(), committed);
-            assert_eq!(input.projection.mentions.len(), 1);
-            input.move_to(input.content.len(), cx);
-            assert!(input.insert_dropped_mention("src/dropped.rs", false, cx));
-            assert_eq!(input.projection.mentions.len(), 2);
-            assert_ranges(input);
-            input.undo(&Undo, window, cx);
-            assert_eq!(input.text(), committed);
-            assert_ranges(input);
-        });
     }
 
     #[gpui::test]

@@ -71,12 +71,10 @@ pub(crate) mod project_icon;
 mod session_info;
 mod session_lanes;
 mod settings_search;
-mod side_chats;
 mod sidebar_pins;
 pub(crate) mod spaces;
 mod thread_search;
 mod trading_gate;
-use side_chats::SideChatTab;
 mod tabs;
 #[cfg(test)]
 use tabs::NewSessionTarget;
@@ -811,7 +809,6 @@ pub enum RightSurface {
     /// A subagent's transcript, read-only (per-subagent viz) — the handle
     /// keys [`Shell::subagent_tabs`].
     Subagent(u64),
-    SideChat(u64),
 }
 
 fn workspace_file_title(path: &str) -> SharedString {
@@ -1878,7 +1875,6 @@ pub struct Shell {
     /// [`Transcript`] pinned to its subagent doc.
     subagent_tabs: std::collections::HashMap<u64, SubagentTab>,
     subagent_seq: u64,
-    side_chats: std::collections::HashMap<u64, SideChatTab>,
     side_chat_seq: u64,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
     browser_subs: std::collections::HashMap<u64, Subscription>,
@@ -2389,7 +2385,6 @@ impl Shell {
             pending_exit: None,
             subagent_tabs: std::collections::HashMap::new(),
             subagent_seq: 0,
-            side_chats: std::collections::HashMap::new(),
             side_chat_seq: 0,
             browsers: std::collections::HashMap::new(),
             browser_subs: std::collections::HashMap::new(),
@@ -2622,7 +2617,6 @@ impl Shell {
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         self.refresh_harness_update_watch(cx);
         if state.read(cx).engine().is_none() {
-            self.side_chats.clear();
         }
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.show_notice(crate::toast::ToastKind::Info, notice, cx);
@@ -3247,15 +3241,6 @@ impl Shell {
                     .iter()
                     .find(|(k, _, _)| k == tab)
                     .map(|(_, title, _)| (*surface, title.clone(), false, None)),
-                RightSurface::SideChat(id) => self.side_chats.get(id).map(|tab| {
-                    let title = tab
-                        .state
-                        .read(cx)
-                        .selected_chat_row()
-                        .and_then(|c| c.title.clone())
-                        .unwrap_or_else(|| "Side chat".into());
-                    (*surface, title.into(), false, None)
-                }),
                 RightSurface::Subagent(id) => self
                     .subagent_tabs
                     .get(id)
@@ -3368,16 +3353,6 @@ impl Shell {
                     panel.request_focus(cx);
                 });
             }
-            // The tab's feed (watch or snapshot) runs from open to close —
-            // activation needs no revalidation.
-            RightSurface::SideChat(id) => {
-                if let Some(tab) = self.side_chats.get(&id) {
-                    tab.composer.update(cx, |composer, cx| {
-                        composer.focus_pending = true;
-                        cx.notify();
-                    });
-                }
-            }
             RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
             RightSurface::Picker => {}
         }
@@ -3409,13 +3384,26 @@ impl Shell {
         self.right_tabs
             .get(&self.panel_key(cx))
             .is_some_and(|tabs| {
-                tabs.iter().any(|tab| match tab {
-                    RightSurface::SideChat(id) => self.side_chats.get(id).is_some_and(|side| {
-                        side.state.read(cx).selected_chat.as_deref() == Some(chat_id)
-                    }),
-                    _ => false,
-                })
+                // No side chats in Aurea.
+                let _ = (tabs, chat_id);
+                false
             })
+    }
+
+    /// Close the right pane when its last surface went away.
+    pub(super) fn close_empty_right_pane(&mut self, key: &str, cx: &mut Context<Self>) {
+        let empty = if key == self.panel_key(cx) {
+            self.right_surface_rows(cx).is_empty()
+        } else {
+            self.right_tabs.get(key).is_none_or(Vec::is_empty)
+        };
+        if empty {
+            if key == self.panel_key(cx) && self.right_pane_open(cx) {
+                self.toggle_right_pane(cx);
+            } else {
+                self.panels.update(key, |p| p.changes_open = false);
+            }
+        }
     }
 
     fn activate_session_link(
@@ -3670,15 +3658,6 @@ impl Shell {
             .find(|chat| chat.id == chat_id)
             .and_then(|chat| chat.config.as_ref().map(|config| config.harness))
             .or_else(|| {
-                self.side_chats.values().find_map(|tab| {
-                    tab.state
-                        .read(cx)
-                        .selected_chat_row()
-                        .filter(|chat| chat.id == chat_id)
-                        .and_then(|chat| chat.config.as_ref().map(|config| config.harness))
-                })
-            })
-            .or_else(|| {
                 // Nested spawn chips identify their parent subagent doc.
                 self.subagent_tabs
                     .values()
@@ -3837,16 +3816,6 @@ impl Shell {
             RightSurface::Terminal(tab) => {
                 let panel = self.right_terminal_panel(cx);
                 panel.update(cx, |panel, cx| panel.close_tab_by_key(tab, window, cx));
-            }
-            RightSurface::SideChat(id) => {
-                // An unsent draft outlives the tab: the side chat stays
-                // loaded, detached, and reopening it restores the draft. An
-                // unsaved side chat has no row to reopen it from.
-                if self.side_chats.get(&id).is_none_or(|side| {
-                    side.state.read(cx).side_chat_unsaved() || !side.composer.read(cx).has_draft(cx)
-                }) {
-                    self.side_chats.remove(&id);
-                }
             }
             RightSurface::Subagent(id) => {
                 // Unwatch drops the watch task — that cancels the engine-side
@@ -4981,11 +4950,8 @@ impl Shell {
         // A pending composer refocus (the first click of the double-click
         // opened the chat, or a side chat's tab) must not steal the field
         // before it is typed in.
-        for composer in
-            std::iter::once(&self.composer).chain(self.side_chats.values().map(|tab| &tab.composer))
-        {
-            composer.update(cx, |composer, _| composer.focus_pending = false);
-        }
+        self.composer
+            .update(cx, |composer, _| composer.focus_pending = false);
         self.chat_rename = Some(ChatRename {
             chat_id,
             surface,
@@ -5249,15 +5215,6 @@ impl Shell {
         self.command_palette.is_some()
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
-            || self.open_side_chat_pickers(cx).is_some()
-    }
-
-    /// The pickers of a side chat whose picker popover is open.
-    fn open_side_chat_pickers(&self, cx: &App) -> Option<Entity<crate::pickers::Pickers>> {
-        self.side_chats
-            .values()
-            .map(|side| side.composer.read(cx).pickers().clone())
-            .find(|pickers| pickers.read(cx).is_open())
     }
 
     /// Track held modifiers for sidebar jump hints and the queue's submit hint.
@@ -7767,19 +7724,8 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
-        // Escape targets the conversation that owns the focused composer: a
-        // side chat's when its composer has focus, the main one otherwise.
-        let (state, composer) = self
-            .side_chats
-            .values()
-            .find(|tab| {
-                tab.composer
-                    .read(cx)
-                    .focus_handle(cx)
-                    .contains_focused(window, cx)
-            })
-            .map(|tab| (tab.state.clone(), tab.composer.clone()))
-            .unwrap_or_else(|| (self.state.clone(), self.composer.clone()));
+        // Escape targets the desk's conversation.
+        let (state, composer) = (self.state.clone(), self.composer.clone());
         let selected_chat = state.read(cx).selected_chat.clone();
         let indicator = selected_chat
             .as_deref()
@@ -7821,8 +7767,7 @@ impl Shell {
             let chat_id = menu_state.chat_id;
             let position = menu_state.position;
             let chat_menu_closing = self.chat_menu.closing_since();
-            let is_side_chat = matches!(menu_state.tab, Some((_, RightSurface::SideChat(_))))
-                || self
+            let is_side_chat = self
                     .state
                     .read(cx)
                     .chats
@@ -8969,7 +8914,6 @@ impl Shell {
                     });
                     panel.into_any_element()
                 }
-                RightSurface::SideChat(id) => self.render_side_chat(id, cx),
                 RightSurface::Subagent(id) if self.subagent_tabs.contains_key(&id) => {
                     let transcript = self
                         .subagent_tabs
@@ -9049,10 +8993,7 @@ impl Shell {
             .overflow_hidden()
             // The titlebar is a glass overlay over the full-height content
             // row; the panel's own chrome starts below it.
-            .when(
-                !matches!(self.resolved_right_active(cx), RightSurface::SideChat(_)),
-                |el| el.pt(px(Theme::TITLEBAR_HEIGHT)),
-            )
+            .pt(px(Theme::TITLEBAR_HEIGHT))
             .child(content);
         let target = self.right_target(cx);
         let edge_offset = self.eval_resize_edge_bounce(
@@ -9296,12 +9237,6 @@ impl Shell {
             let is_active = surface == active;
             let _file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
             let harness_icon = match surface {
-                RightSurface::SideChat(id) => self.side_chats.get(&id).and_then(|tab| {
-                    tab.state
-                        .read(cx)
-                        .selected_chat_row()
-                        .and_then(|chat| chat.config.as_ref().map(|config| config.harness))
-                }),
                 RightSurface::Subagent(id) => {
                     self.subagent_tabs.get(&id).and_then(|tab| tab.harness)
                 }
@@ -9309,7 +9244,6 @@ impl Shell {
             }
             .map(crate::pickers::harness_brand_icon);
             let icon_path = match surface {
-                RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Subagent(_) => icons::BOT,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
@@ -9325,13 +9259,6 @@ impl Shell {
                 _ => None,
             };
             let subagent_running = match surface {
-                RightSurface::SideChat(id) => self.side_chats.get(&id).is_some_and(|tab| {
-                    let state = tab.state.read(cx);
-                    state
-                        .selected_chat
-                        .as_deref()
-                        .is_some_and(|id| state.indicator_for(id, Utc::now()) == Indicator::Working)
-                }),
                 RightSurface::Browser(id) => self
                     .browsers
                     .get(&id)
@@ -9404,16 +9331,8 @@ impl Shell {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                    let chat_id = match surface {
-                        // A pending fork has no chat to act on yet.
-                        RightSurface::SideChat(id) => this
-                            .side_chats
-                            .get(&id)
-                            .filter(|tab| tab.fork.is_none())
-                            .and_then(|tab| tab.state.read(cx).selected_chat.clone())
-                            .unwrap_or_default(),
-                        _ => String::new(),
-                    };
+                    // Right pane tabs carry no chat of their own.
+                    let chat_id = String::new();
                     this.chat_menu.open(ChatMenuState {
                         chat_id,
                         tab: Some((this.panel_key(cx), surface)),

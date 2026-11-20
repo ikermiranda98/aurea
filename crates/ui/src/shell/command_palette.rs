@@ -849,32 +849,6 @@ mod tests {
     use crate::appearance::AppearanceMode;
     use gpui::{AppContext, TestAppContext};
 
-    fn palette_window(cx: &mut TestAppContext) -> (gpui::WindowHandle<Shell>, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: zeron_proto::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        (window, dir)
-    }
-
     fn chat(id: &str, parent: Option<&str>, archived: bool, age: i64) -> zeron_proto::Chat {
         serde_json::from_value(serde_json::json!({
             "id": id, "title": id, "deviceId": "local", "archived": archived,
@@ -892,52 +866,6 @@ mod tests {
             commands_for("archive", true, true),
             vec![Command::ArchiveThread]
         );
-    }
-
-    /// A shell with the real app keymap and two sidebar sessions.
-    fn keyed_palette_window(
-        cx: &mut TestAppContext,
-    ) -> (gpui::WindowHandle<Shell>, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            crate::composer::init(cx, ComposerSendBehavior::default());
-            apply_keymap(
-                cx,
-                &KeymapConfig::default(),
-                ComposerSendBehavior::default(),
-            );
-        });
-        let (window, _) = palette_window(cx);
-        window
-            .update(cx, |shell, _, cx| {
-                shell.settings.sidebar_organization = crate::settings::SidebarOrganization::InOneList;
-                shell.state.update(cx, |state, _| {
-                    state.connection = zeron_proto::view::ConnectionStatus::Ready;
-                    state.workspace_scope = Some(WorkspaceScope::Local);
-                    state.local_device_id = Some("local".into());
-                    state.apply_chats(vec![
-                        chat("first", None, false, 0),
-                        chat("second", None, false, 1),
-                    ]);
-                    state.selected_chat = Some("first".into());
-                });
-            })
-            .unwrap();
-        (window, dir)
-    }
-
-    fn palette_tab(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> Option<Tab> {
-        window
-            .read_with(cx, |shell, _| shell.command_palette.as_ref().map(|p| p.tab))
-            .unwrap()
     }
 
     fn selected_chat(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> Option<String> {
