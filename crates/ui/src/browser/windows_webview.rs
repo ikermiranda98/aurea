@@ -33,6 +33,51 @@ use windows::{
 
 type Sender = tokio::sync::mpsc::Sender<NativeEvent>;
 
+/// zui's message loop asks the window a key-down is for whether it is GPUI's
+/// (its `WM_GPUI_KEYDOWN`, `WM_USER + 8`) and drops the key unless the answer
+/// is non-zero — but any other window answers 0. WebView2's input windows are
+/// children of ours on this thread, so every key typed into a page was
+/// dropped before it was translated or dispatched (the address bar, GPUI's
+/// own, kept working). They answer "not mine" instead.
+const GPUI_KEYDOWN: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 8;
+const PASS_KEYS_SUBCLASS: usize = 0x6175_7265; // "aure"
+
+unsafe extern "system" fn pass_keys_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+    _id: usize,
+    _data: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    if msg == GPUI_KEYDOWN {
+        return windows::Win32::Foundation::LRESULT(1);
+    }
+    unsafe { windows::Win32::UI::Shell::DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// Let keys reach the page: subclass WebView2's windows under `parent` (its
+/// Chromium input windows; idempotent, so safe on every focus change).
+fn pass_keys_to_page(parent: HWND) {
+    use windows::Win32::{
+        Foundation::{LPARAM, TRUE},
+        UI::{Shell::SetWindowSubclass, WindowsAndMessaging::{EnumChildWindows, GetClassNameW}},
+    };
+    unsafe extern "system" fn each(child: HWND, _: LPARAM) -> windows::core::BOOL {
+        let mut class = [0u16; 64];
+        let len = unsafe { GetClassNameW(child, &mut class) }.max(0) as usize;
+        if String::from_utf16_lossy(&class[..len]).starts_with("Chrome_") {
+            unsafe {
+                let _ = SetWindowSubclass(child, Some(pass_keys_proc), PASS_KEYS_SUBCLASS, 0);
+            }
+        }
+        TRUE
+    }
+    unsafe {
+        let _ = EnumChildWindows(Some(parent), Some(each), LPARAM(0));
+    }
+}
+
 pub(super) enum NativeEvent {
     Changed,
     Finished,
@@ -520,6 +565,7 @@ impl NativePage {
                     .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
             }
         }
+        pass_keys_to_page(self.0.hwnd);
     }
 
     /// A press, release or move at `position` (window coordinates).
@@ -868,6 +914,16 @@ impl Host {
                 })),
                 &mut token,
             )?;
+            // Focus that arrives without a click (Tab, the page's autofocus)
+            // must let keys through too.
+            let parent = host.hwnd;
+            controller.add_GotFocus(
+                &webview2_com::FocusChangedEventHandler::create(Box::new(move |_, _| {
+                    pass_keys_to_page(parent);
+                    Ok(())
+                })),
+                &mut token,
+            )?;
             let weak = Rc::downgrade(host);
             controller.add_AcceleratorKeyPressed(
                 &AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
@@ -1191,6 +1247,9 @@ impl Host {
                     .controller
                     .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
             }
+        }
+        if kind == PointerKind::Down {
+            pass_keys_to_page(self.hwnd);
         }
     }
 
