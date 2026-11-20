@@ -445,45 +445,6 @@ mod tests {
         ))))
     }
 
-    #[tokio::test]
-    async fn list_changed_goes_out_when_the_plugin_tool_names_change() {
-        let (out_tx, mut out) = mpsc::channel(8);
-        let watch = spawn_tool_list_watch(watching_tools(), out_tx);
-        let frame = tokio::time::timeout(Duration::from_secs(5), out.recv())
-            .await
-            .expect("a notification in time")
-            .expect("writer open");
-        let frame: Value = serde_json::from_str(&frame).unwrap();
-        assert_eq!(frame, list_changed_notification());
-        assert!(frame.get("id").is_none(), "a notification has no id");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), out.recv())
-                .await
-                .is_err(),
-            "one change, one notification"
-        );
-        watch.abort();
-    }
-
-    #[tokio::test]
-    async fn initialize_advertises_list_changed_and_the_listing_names_plugin_tools() {
-        let tools = watching_tools();
-        let init = handle_request(&tools, json!(1), "initialize", json!({})).await;
-        assert_eq!(init["result"]["capabilities"]["tools"]["listChanged"], true);
-        let listed = handle_request(&tools, json!(2), "tools/list", json!({})).await;
-        let names: Vec<&str> = listed["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
-        assert!(names.contains(&"whoami"));
-        assert!(names.contains(&"p__one"));
-        for tool in listed["result"]["tools"].as_array().unwrap() {
-            assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
-        }
-    }
-
     #[test]
     fn side_chats_only_instructions_add_the_delegation_rule() {
         assert_eq!(instructions(false, false), INSTRUCTIONS);

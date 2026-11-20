@@ -63,8 +63,7 @@ pub mod heap;
 pub mod managed;
 mod hosted_models;
 mod model_catalogs;
-mod plugin_agents;
-pub mod plugins;
+pub mod themes;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;
@@ -207,8 +206,6 @@ pub struct EngineCore {
     pub viewport_focus: desktop_notify::ViewportFocus,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
-    /// Plugins under `{data}/plugins/` (the plugins contract).
-    pub plugins: plugins::Plugins,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -327,45 +324,7 @@ impl EngineCore {
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
         sessions.follow_chat_deletions(workspace.watch_chats());
-        let plugins = plugins::Plugins::new(data_dir, &device_id);
-        plugins.set_workspace(workspace.clone());
-        // A service's `zeron.folders()`: where this device's chats and
-        // projects are (the built-in Git service works in these alone).
-        {
-            let (workspace, device_id) = (workspace.clone(), device_id.clone());
-            plugins.set_folders(move || {
-                let chats = workspace.read_chats().unwrap_or_default();
-                let spaces = workspace.read_spaces().unwrap_or_default();
-                let mut folders: Vec<String> = chats
-                    .into_iter()
-                    .filter(|c| c.device_id == device_id)
-                    .filter_map(|c| c.cwd)
-                    .chain(spaces.into_iter().filter(|s| s.device_id == device_id).map(|s| s.path))
-                    .filter(|f| !f.is_empty())
-                    .collect();
-                folders.sort();
-                folders.dedup();
-                folders
-            });
-        }
-        // A plugin service's `zeron.notify`: as `PostNotification` posts.
         let viewport_focus = desktop_notify::ViewportFocus::default();
-        {
-            let (data_dir, focus) = (data_dir.to_path_buf(), viewport_focus.clone());
-            plugins.set_notifier(move |source, title, body, session| {
-                let title: String = title.lines().next().unwrap_or_default().trim().chars().take(120).collect();
-                desktop_notify::post_for(&data_dir, &focus, source, &title, body, session).to_owned()
-            });
-        }
-        // A Cloud machine's token isn't admitted there (edge/src/runner-policy.ts):
-        // it would ask, get a 403, and ask again every 30 s for as long as it's up.
-        if let Some(edge) = edge.as_ref().filter(|_| !runner::is_cloud_platform()) {
-            plugins.set_directory(Arc::new(plugins::keys::EdgeDirectory::new(
-                &edge.url,
-                edge.token.clone(),
-            )));
-        }
-        sessions.set_plugins(plugins.clone());
         sessions.set_doc_host(doc_host.clone());
         // A new version on trial may yet be undone, and recovering clears the
         // journals' marks of what to resume, which a rollback doesn't restore.
@@ -452,30 +411,6 @@ impl EngineCore {
         registry.set_account_environment(Arc::new(agent_accounts::PinRunEnvironment(
             agent_accounts.clone(),
         )));
-        // A chat's first run asks the plugins that pin (`run.preparing`).
-        {
-            let agents = plugins.agents().clone();
-            agent_accounts.set_pin_hook(Arc::new(move |harness, chat| {
-                let agents = agents.clone();
-                Box::pin(async move { agents.preparing(harness, &chat).await })
-            }));
-        }
-        // Plugins' agent ops (usage, accounts, models: plugins/agents) reach
-        // the engine as Settings and the composer do, and hear what changes.
-        plugins.agents().set_host(Arc::new(plugin_agents::EngineAgentHost {
-            accounts: agent_accounts.clone(),
-            registry: registry.clone(),
-            data_dir: repos.data_dir().to_path_buf(),
-            workspace: workspace.clone(),
-            sessions: sessions.clone(),
-            doc_host: doc_host.clone(),
-            default_harness,
-        }));
-        plugins.follow_agents(
-            agent_accounts.watch_snapshots(),
-            sessions.watch_sessions(),
-            workspace.watch_chats(),
-        );
         // Agents added from the ACP registry (this engine's own, under its
         // data dir): harnesses before the update coordinator lists them.
         // Aurea offers opencode only: no ACP registry agents.
@@ -501,7 +436,6 @@ impl EngineCore {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
-        plugins.start();
         Ok(Self {
             sessions,
             doc_host,
@@ -521,7 +455,6 @@ impl EngineCore {
             harness_updates,
             device_id,
             local_import,
-            plugins,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -563,7 +496,6 @@ impl EngineCore {
 
     /// Attach the auth service (before building the RPC service / relays).
     pub fn set_auth(&self, auth: Auth) {
-        self.plugins.attach_auth(auth.clone());
         *self
             .auth
             .lock()
@@ -593,7 +525,6 @@ impl EngineCore {
     /// [`Self::dial_device`], and the doc host's queued-attachment transfers.
     pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
         self.doc_host.set_links(links.clone());
-        self.plugins.set_links(links.clone());
         *self
             .links
             .lock()
@@ -700,7 +631,6 @@ impl EngineCore {
         .with_remote_terminals(self.remote_terminals.clone())
         .with_harness_updates(self.harness_updates.clone())
         .with_viewport_focus(self.viewport_focus.clone())
-        .with_plugins(self.plugins.clone())
         .with_warp(warp_egress::ghost());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
@@ -765,7 +695,6 @@ impl EngineCore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        self.plugins.shutdown();
         self.previews.shutdown().await;
         self.harness_updates.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
@@ -1351,15 +1280,8 @@ impl Engine {
             link_config.liveness = Some(Arc::new(move |device_id: &str| {
                 workspace_for_liveness.peer_liveness(device_id)
             }));
-            // Prove which device dials (its registered plugin key), so the
-            // peer's edge stamps it and the peer knows who's asking
-            // (`Caller::Peer{device}`); without a key, dials go unstamped.
-            let (proof_dir, proof_device) = (config.data_dir.clone(), core.device_id.clone());
-            link_config.caller_proof = Some(Arc::new(move |target: &str, conn_id: &str, ts: i64| {
-                let (key, signature) =
-                    plugins::signing::device_link_proof(&proof_dir, target, conn_id, ts)?;
-                Some(zeron_rpc::CallerProof { device: proof_device.clone(), key, signature })
-            }));
+            // Dials go unstamped: the device keys that proved who dials were
+            // the plugins', gone from Aurea.
             let links = zeron_rpc::LinkCache::new(link_config);
             let links_for_presence = links.clone();
             core.workspace

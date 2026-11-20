@@ -13195,7 +13195,6 @@ dependencies = [
  "image",
  "libc",
  "loro",
- "mlua",
  "notify 7.0.0",
  "portable-pty",
  "reqwest",
@@ -13223,7 +13222,6 @@ dependencies = [
  "zeron-launch",
  "zeron-mcp",
  "zeron-notify",
- "zeron-plugin-guard",
  "zeron-preview",
  "zeron-proto",
  "zeron-rpc",
@@ -13319,14 +13317,6 @@ dependencies = [
  "objc",
  "sha2",
  "tracing",
-]
-
-[[package]]
-name = "zeron-plugin-guard"
-version = "0.3.7"
-dependencies = [
- "serde_json",
- "tempfile",
 ]
 
 [[package]]

@@ -22,9 +22,6 @@ zeron-update.workspace = true
 zeron-notify.workspace = true
 zeron-visual.workspace = true
 zeron-warp.workspace = true
-# Plugin services (plugins/service): a headless Luau VM per plugin, the
-# same mlua and Luau zeron-visual already links (no new crate).
-mlua = { version = "0.12", features = ["luau"] }
 loro.workspace = true
 tokio.workspace = true
 futures.workspace = true
@@ -53,8 +50,6 @@ sha2.workspace = true
 reqwest.workspace = true
 # A large chat2 checkpoint sent in parts, sliced from one buffer.
 bytes = "1"
-# The rules plugins are held to (paths, programs, network), shared with apps/zgx.
-zeron-plugin-guard.workspace = true
 ignore.workspace = true
 fff-search.workspace = true
 

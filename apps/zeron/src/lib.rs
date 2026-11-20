@@ -10,7 +10,6 @@ pub mod auth_cli;
 pub mod background;
 pub mod engine_commands;
 pub mod ipc_cli;
-pub mod plugin_cli;
 
 pub use engine_commands::run_engine_command;
 pub use zeron_cli::{

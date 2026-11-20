@@ -169,12 +169,6 @@ pub(super) fn upstream_vendor(store_key: &str) -> &'static str {
     }
 }
 
-/// The logins `hermes auth add` can run unattended (device codes): its
-/// ChatGPT, Nous Portal and xAI flows print a page and a code, then poll.
-/// (Its Claude flow wants a pasted code; Qwen imports Qwen CLI's login;
-/// OpenRouter mints an API key; MiniMax wasn't verified.)
-pub(super) const HERMES_LOGINS: &[&str] = &["openai-codex", "nous", "xai-oauth"];
-
 pub(super) fn unsupported_login(harness: HarnessId, provider: &str) -> EngineError {
     let reason = match (harness, provider) {
         (HarnessId::Opencode, "anthropic") => {

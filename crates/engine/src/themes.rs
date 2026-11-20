@@ -7,7 +7,8 @@
 //! (`WatchThemes`), which reads the files again and restyles.
 //!
 //! These are local-only (`zeron_rpc::local_only`): a peer device never reads
-//! or writes another's themes, as a device's templates are its own.
+//! or writes another's themes. (Aurea moved them out of the Luau plugins
+//! service, which is gone.)
 
 use std::path::Path;
 
@@ -15,9 +16,23 @@ use serde_json::{Value as Json, json};
 use zeron_rpc::methods;
 use zeron_theme::catalog;
 
-use super::guides;
 
-/// The methods this answers (the watch is the module's).
+/// How to write a theme (the agents' guide), kept in the engine.
+const GUIDE: &str = include_str!("themes_guide.md");
+
+/// The themes guide in `<data_dir>/docs/`, written where missing or
+/// changed: its path.
+fn guide(data_dir: &Path) -> std::path::PathBuf {
+    let dir = data_dir.join("docs");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("themes.md");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(GUIDE) {
+        let _ = std::fs::write(&path, GUIDE);
+    }
+    path
+}
+
+/// The methods this answers.
 pub fn handles(method: &str) -> bool {
     matches!(
         method,
@@ -49,7 +64,7 @@ pub fn answer(data_dir: &Path, method: &str, params: &Json) -> Result<Json, Stri
     match method {
         methods::LIST_THEMES => {
             let mut out = catalog::list(data_dir);
-            out["guide"] = json!(guides::themes(data_dir).display().to_string());
+            out["guide"] = json!(guide(data_dir).display().to_string());
             Ok(out)
         }
         methods::GET_THEME => catalog::get(data_dir, id(params)?).map_err(said),

@@ -83,71 +83,6 @@ enum DaemonCommand {
     Status,
 }
 
-#[derive(Subcommand)]
-pub enum PluginCommand {
-    /// Make a new plugin in Zeron's plugins folder, signed as you.
-    New {
-        /// Its id: lowercase letters, digits and dashes.
-        id: String,
-        /// Its name (defaults to the id).
-        #[arg(long)]
-        name: Option<String>,
-        /// A permission it asks for (repeat for more).
-        #[arg(long = "permission", value_name = "P")]
-        permissions: Vec<String>,
-    },
-    /// Sign a plugin as you: an id in the plugins folder, or a folder's path.
-    Sign { target: String },
-    /// Check a plugin folder's signature and who made it.
-    Verify { path: String },
-    /// List the plugins Zeron knows.
-    List,
-    /// Save a plugin as one signed .zeron-plugin file to share (attach it
-    /// to a GitHub release, or send it): anyone installs it from that file
-    /// or its link. Your own plugin is signed again first.
-    Export {
-        /// The plugin's id (`zeron plugin list` names them).
-        id: String,
-        /// Where to save it: a folder, or a file ending .zeron-plugin
-        /// (defaults to Zeron's plugin-exports folder).
-        #[arg(long, value_name = "PATH", value_parser = absolute_path)]
-        to: Option<std::path::PathBuf>,
-    },
-}
-
-/// A path as given, made absolute against the current folder (the engine
-/// takes full paths only).
-fn absolute_path(text: &str) -> Result<std::path::PathBuf, String> {
-    if text.trim().is_empty() {
-        return Err("give a path".into());
-    }
-    std::path::absolute(text).map_err(|e| e.to_string())
-}
-
-#[derive(Subcommand)]
-pub enum TemplateCommand {
-    /// List the templates on this device, Zeron's own first.
-    List,
-    /// Run Zeron's window with a template. `zeron template use zeron` puts
-    /// Zeron's own back, even with Zeron closed.
-    Use { id: String },
-    /// Make a new template: a full copy of Zeron's interface to rewrite.
-    Create {
-        /// Its id: lowercase letters, digits and dashes.
-        id: String,
-        /// Its name (defaults to the id).
-        #[arg(long)]
-        name: Option<String>,
-        /// A template to start from (defaults to Zeron's own).
-        #[arg(long)]
-        from: Option<String>,
-    },
-    /// Show a template's errors, out-of-date files and what it inherits.
-    Status { id: String },
-    /// Delete a template (it's set aside in the templates folder's .removed).
-    Delete { id: String },
-}
-
 /// A subcommand that runs the engine's own code in this process: what the
 /// engine helper (or a binary linking the engine) does with it.
 pub enum EngineCommand {
@@ -159,8 +94,6 @@ pub enum EngineCommand {
     Sync,
     Quiesce,
     Mcp,
-    Plugin(PluginCommand),
-    Template(TemplateCommand),
 }
 
 /// Where this binary runs [`EngineCommand`]s.

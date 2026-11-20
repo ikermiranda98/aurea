@@ -1941,62 +1941,6 @@ impl AgentAccounts {
         }
     }
 
-    /// Spawn a CLI login child, register it as a [`LoginFlow::Spawned`], and
-    /// wait briefly for the sign-in page it prints. `home` is the flow's
-    /// throwaway dir — reclaimed on any failure here, and on cancel/finish.
-    #[allow(clippy::too_many_arguments)]
-    async fn spawn_login_child(
-        &self,
-        login_id: String,
-        harness: HarnessId,
-        mut command: zeron_harness::process::Command,
-        home: PathBuf,
-        completion: SpawnedCompletion,
-        scan_url: fn(&str) -> Option<String>,
-        requester: Option<&str>,
-    ) -> Result<AgentLoginStart, EngineError> {
-        command
-            .stdin(zeron_harness::process::Stdio::null())
-            .stdout(zeron_harness::process::Stdio::piped())
-            .stderr(zeron_harness::process::Stdio::piped());
-        let child = match zeron_harness::process::spawn_agent(&mut command) {
-            Ok(child) => child,
-            Err(err) => {
-                let _ = std::fs::remove_dir_all(&home);
-                let cli = stores::cli_name(harness);
-                return Err(EngineError::Other(
-                    if err.kind() == std::io::ErrorKind::NotFound {
-                        format!("The `{cli}` CLI was not found on this device — install it first.")
-                    } else {
-                        format!("Could not start the {cli} sign-in: {err}")
-                    },
-                ));
-            }
-        };
-        let (child, output, exit) = wire_login_child(child);
-        lock(&self.inner.flows).insert(
-            login_id.clone(),
-            LoginFlow::Spawned {
-                harness,
-                child,
-                home,
-                completion,
-                started_at: Instant::now(),
-                output: output.clone(),
-                exit: exit.clone(),
-                scan_url,
-                requester: requester.map(str::to_string),
-            },
-        );
-        let url = await_login_url(&output, &exit, scan_url).await;
-        Ok(AgentLoginStart {
-            login_id,
-            url,
-            mode: AgentLoginMode::Browser,
-            callback_port: None,
-        })
-    }
-
     /// Sign in to `harness` for a credential that LEAVES this device — the
     /// Cloud credential vault (docs/design/cloud-device.md, "Sign-in stays on
     /// the device"). The provider's own flow runs exactly as for "Add
@@ -4314,10 +4258,6 @@ fn json_ms(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
     DateTime::<Utc>::from_timestamp_millis(ms)
 }
 
-fn scan_openai_url(output: &str) -> Option<String> {
-    scan_https_url(output, &["auth.openai.com"])
-}
-
 /// Terminal escape sequences (colours, cursor moves) removed — the CLIs
 /// colour their sign-in urls and codes.
 fn strip_ansi(text: &str) -> String {
@@ -4357,26 +4297,6 @@ fn strip_ansi(text: &str) -> String {
         }
     }
     out
-}
-
-/// The first `https://` url in `output` (escapes stripped) whose host is
-/// one of `hosts` or a subdomain of one (on a label boundary), with no
-/// userinfo or explicit port — see [`stores::trusted_page`].
-fn scan_https_url(output: &str, hosts: &[&str]) -> Option<String> {
-    let text = strip_ansi(output);
-    let mut rest = text.as_str();
-    while let Some(start) = rest.find("https://") {
-        let candidate = &rest[start..];
-        let end = candidate
-            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>'))
-            .unwrap_or(candidate.len());
-        let url = candidate[..end].trim_end_matches(['.', ',', ';', ')', ']']);
-        if stores::trusted_page(url, hosts) {
-            return Some(url.to_string());
-        }
-        rest = &candidate[end.max(1)..];
-    }
-    None
 }
 
 /// A device-flow user code a CLI printed for the user to type in: `Code:
@@ -4462,158 +4382,6 @@ fn scan_shim_event(output: &str, ev: &str) -> Option<serde_json::Value> {
 
 fn scan_shim_fatal(output: &str) -> Option<String> {
     str_field(&scan_shim_event(output, "fatal")?, "message")
-}
-
-type LoginChildHandles = (
-    Arc<Mutex<Option<zeron_harness::process::Child>>>,
-    Arc<Mutex<String>>,
-    Arc<Mutex<Option<Option<i32>>>>,
-);
-
-/// Wire a spawned login child: both pipes accumulate into one output buffer
-/// (the URL can land on either stream), and a monitor polls `try_wait` so the
-/// child is reaped without owning it — the cancel path needs concurrent kill
-/// access.
-fn wire_login_child(mut child: zeron_harness::process::Child) -> LoginChildHandles {
-    let output = Arc::new(Mutex::new(String::new()));
-    for pipe in [
-        child
-            .stdout
-            .take()
-            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
-        child
-            .stderr
-            .take()
-            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let sink = output.clone();
-        tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut pipe = pipe;
-            let mut buf = [0u8; 4096];
-            while let Ok(n) = pipe.read(&mut buf).await {
-                if n == 0 {
-                    break;
-                }
-                lock(&sink).push_str(&String::from_utf8_lossy(&buf[..n]));
-            }
-        });
-    }
-    let child = Arc::new(Mutex::new(Some(child)));
-    let exit: Arc<Mutex<Option<Option<i32>>>> = Arc::new(Mutex::new(None));
-    {
-        let child = child.clone();
-        let exit = exit.clone();
-        tokio::spawn(async move {
-            loop {
-                {
-                    let mut slot = lock(&child);
-                    match slot.as_mut().map(|c| c.try_wait()) {
-                        None => break,
-                        Some(Ok(Some(status))) => {
-                            *lock(&exit) = Some(status.code());
-                            *slot = None;
-                            break;
-                        }
-                        Some(Ok(None)) => {}
-                        Some(Err(_)) => {
-                            *lock(&exit) = Some(None);
-                            *slot = None;
-                            break;
-                        }
-                    }
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        });
-    }
-    (child, output, exit)
-}
-
-/// Kills a captured sign-in's CLI when its task ends or is aborted (cancel,
-/// a superseding sign-in, engine shutdown).
-struct KillOnDrop(Arc<Mutex<Option<zeron_harness::process::Child>>>);
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        if let Some(child) = lock(&self.0).as_mut() {
-            let _ = child.start_kill();
-        }
-    }
-}
-
-/// Securely deletes a captured sign-in's throwaway home when dropped: every
-/// regular file is overwritten with zeros and synced before the tree is
-/// removed. Best effort by nature — copy-on-write filesystems and SSD wear
-/// levelling may keep old blocks — but nothing readable stays behind under
-/// the path, and a crash leaves only `.login-*` dirs the startup sweep
-/// reclaims.
-struct ShredOnDrop(PathBuf);
-
-impl Drop for ShredOnDrop {
-    fn drop(&mut self) {
-        shred_dir(&self.0);
-    }
-}
-
-fn shred_dir(dir: &Path) {
-    fn overwrite(dir: &Path) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if kind.is_dir() {
-                overwrite(&entry.path());
-            } else if kind.is_file()
-                && let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(entry.path())
-                && let Ok(meta) = file.metadata()
-            {
-                use std::io::Write;
-                let zeros = [0u8; 4096];
-                let mut left = meta.len();
-                while left > 0 {
-                    let n = left.min(zeros.len() as u64) as usize;
-                    if file.write_all(&zeros[..n]).is_err() {
-                        break;
-                    }
-                    left -= n as u64;
-                }
-                let _ = file.sync_all();
-            }
-        }
-    }
-    overwrite(dir);
-    if let Err(error) = std::fs::remove_dir_all(dir)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(dir = %dir.display(), %error, "could not remove a sign-in home");
-    }
-}
-
-/// Wait briefly for the login child to print its authorize URL (empty when it
-/// exits or stays silent past the deadline — the flow still completes via
-/// poll; the UI just can't offer an open-browser button).
-async fn await_login_url(
-    output: &Arc<Mutex<String>>,
-    exit: &Arc<Mutex<Option<Option<i32>>>>,
-    scan: fn(&str) -> Option<String>,
-) -> String {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(url) = scan(&lock(output)) {
-            break url;
-        }
-        if lock(exit).is_some() || Instant::now() > deadline {
-            break String::new();
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
 }
 
 /// 32 random bytes (two v4 uuids — OS randomness), base64url without
@@ -5160,24 +4928,6 @@ mod tests {
         // No expiry field = never expires.
         assert!(cursor_key_usable(&serde_json::json!({"apiKey": "k"})));
         assert!(parse_cursor_auth(serde_json::json!({"version": 1})).is_none());
-    }
-
-    #[test]
-    fn openai_url_scan() {
-        assert_eq!(
-            scan_openai_url("open https://auth.openai.com/authorize?x=1 in your browser\n")
-                .as_deref(),
-            Some("https://auth.openai.com/authorize?x=1")
-        );
-        assert_eq!(scan_openai_url("nothing here"), None);
-        for output in [
-            "open https://auth.openai.com.evil.example/authorize?x=1",
-            "open https://auth.openai.com@evil.example/authorize?x=1",
-            "open https://auth.openai.com:8443/authorize?x=1",
-            "open http://auth.openai.com/authorize?x=1",
-        ] {
-            assert_eq!(scan_openai_url(output), None, "{output}");
-        }
     }
 
     #[cfg(unix)]

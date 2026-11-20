@@ -61,7 +61,6 @@
 
 mod agent_gate;
 mod device_stats;
-mod remote_plugins;
 use async_trait::async_trait;
 use base64::Engine as _;
 use futures::StreamExt;
@@ -903,8 +902,6 @@ pub struct EngineRpc {
     credentials: Option<crate::credentials::CredentialBroker>,
     /// Viewports' window focus, for desktop banners.
     viewport_focus: crate::desktop_notify::ViewportFocus,
-    /// The plugins service (absent in bare test assemblies).
-    plugins: Option<crate::plugins::Plugins>,
     /// The trading surface's source (demo fixture or a live TWS paper link).
     trading: zeron_trading::TradingService,
     /// The real trading engine (pool + store + state + tasks), when assembled.
@@ -974,7 +971,6 @@ impl EngineRpc {
             local_import: None,
             credentials: None,
             viewport_focus: Default::default(),
-            plugins: None,
             engine_info,
             trading,
             trading_engine,
@@ -986,12 +982,6 @@ impl EngineRpc {
     /// `Unavailable`, which is what a scheme-only assembly has always said.
     pub fn with_warp(mut self, ghost: std::sync::Arc<zeron_warp::Ghost>) -> Self {
         self.warp = Some(ghost);
-        self
-    }
-
-    /// Attach the plugins service (the Plugin* methods).
-    pub fn with_plugins(mut self, plugins: crate::plugins::Plugins) -> Self {
-        self.plugins = Some(plugins);
         self
     }
 
@@ -3406,16 +3396,6 @@ impl RpcService for EngineRpc {
                     "{method}: only that device's own window can do that. It's waiting for you there."
                 )));
             }
-            // A review, an allow and a file sent there are Zeron's consent
-            // window's and Settings → Plugins': this device's app, never an
-            // agent's token (which can't call them here either).
-            if zeron_rpc::app_forward_only(method, &params) {
-                if !zeron_rpc::caller().is_local() {
-                    return Err(crate::plugins::reviews::needed("Allowing a plugin on another device"));
-                }
-                let reply = self.forward(&target, method, params).await;
-                return reply.map_err(|error| remote_plugins::older_engine(&target, method, error));
-            }
             // Settings → Providers' Cloud: its logins live in the vault.
             if crate::cloud_accounts::is_cloud_accounts_target(&target)
                 && crate::cloud_accounts::handles(method)
@@ -3477,14 +3457,6 @@ impl RpcService for EngineRpc {
         ) {
             self.voice.retire();
         }
-        // Signing out retires this device's plugin signing key first, while
-        // the session can still revoke it on the edge.
-        if method == methods::SIGN_OUT
-            && self.auth().is_ok_and(|auth| !auth.is_runner())
-            && let Some(plugins) = self.plugins.clone()
-        {
-            Box::pin(plugins.retire_signing_key()).await;
-        }
         if AuthRpc::handles(method) {
             return AuthRpc::new(self.auth()?.clone())
                 .handle(method, params)
@@ -3493,11 +3465,17 @@ impl RpcService for EngineRpc {
         // Cloud device + credential vault: IPC-only (never in `forwardable`),
         // acting for this runtime's signed-in user against the edge. Boxed so
         // its state stays out of this dispatcher's already-large frame.
-        if crate::plugins::handles(method) {
-            let Some(plugins) = self.plugins.clone() else {
-                return Err(RpcError::Failed("Plugins aren't available here".into()));
-            };
-            return Box::pin(async move { plugins.dispatch(method, params).await }).await;
+        // The theme tools agents use (Aurea's only remnant of the plugins
+        // service): data on this device, nothing to ask the person.
+        if crate::themes::handles(method) {
+            let (data_dir, asked) = (self.repos.data_dir().to_path_buf(), method.to_owned());
+            let reply = tokio::task::spawn_blocking(move || {
+                crate::themes::answer(&data_dir, &asked, &params)
+            })
+            .await
+            .map_err(|_| RpcError::Failed("Couldn't reach the themes".into()))?
+            .map_err(RpcError::Failed)?;
+            return RpcReply::value(&reply);
         }
         if crate::acp_registry::handles(method) {
             return Box::pin(crate::acp_registry::dispatch(
@@ -3613,10 +3591,6 @@ impl RpcService for EngineRpc {
                 )
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
-                // A catalog that changed is told to plugins (models.updated).
-                if let Some(plugins) = &self.plugins {
-                    plugins.agents().observe_models(p.harness, &models);
-                }
                 RpcReply::value(&models)
             }
             methods::LIST_SKILLS => {

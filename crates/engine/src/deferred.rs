@@ -68,7 +68,7 @@ impl RpcService for DeferredEngineRpc {
         loop {
             let current = { state.borrow().clone() };
             match current {
-                DeferredState::Onboarding if crate::plugins::handles(method) => {
+                DeferredState::Onboarding if crate::themes::handles(method) => {
                     return Err(RpcError::Capability(SETUP_INCOMPLETE.into()));
                 }
                 DeferredState::Onboarding | DeferredState::Waiting => {}
@@ -291,13 +291,9 @@ mod tests {
         let (state_tx, state) = watch::channel(DeferredState::Onboarding);
         let (_dir, rpc) = engine(state);
         for method in [
-            methods::LIST_PLUGINS,
-            methods::WATCH_PLUGINS,
-            methods::INSTALL_PLUGIN,
-            methods::LIST_TEMPLATES,
-            methods::USE_TEMPLATE,
-            methods::DESCRIBE_APP,
-            methods::CHECK_PLUGIN_UPDATES,
+            methods::LIST_THEMES,
+            methods::GET_THEME,
+            methods::USE_THEME,
         ] {
             let answered = tokio::time::timeout(Duration::from_secs(1), rpc.handle(method, serde_json::json!({})))
                 .await
@@ -317,11 +313,11 @@ mod tests {
 
         // Set up and assembling: calls wait (briefly) for it, as before.
         state_tx.send_replace(DeferredState::Waiting);
-        let waiting = tokio::time::timeout(Duration::from_millis(100), rpc.handle(methods::LIST_PLUGINS, serde_json::json!({}))).await;
+        let waiting = tokio::time::timeout(Duration::from_millis(100), rpc.handle(methods::LIST_THEMES, serde_json::json!({}))).await;
         assert!(waiting.is_err(), "assembling: waits rather than refusing");
         // And a failed assembly still answers its reason.
         state_tx.send_replace(DeferredState::Failed("boom".into()));
-        let failed = rpc.handle(methods::LIST_PLUGINS, serde_json::json!({})).await;
+        let failed = rpc.handle(methods::LIST_THEMES, serde_json::json!({})).await;
         assert!(matches!(failed, Err(RpcError::Failed(m)) if m == "boom"));
     }
 }

@@ -5,9 +5,6 @@ use zeron_proto::{AgentLoginStart, RegistryAgent};
 
 use super::{AgentAccounts, EngineError};
 
-/// What a terminal sign-in's failure says before its command.
-pub(crate) const TERMINAL_PREFIX: &str = "This sign-in asks for something only a terminal can answer. Run it there: ";
-
 impl AgentAccounts {
     pub(super) fn start_registry_login(
         &self,

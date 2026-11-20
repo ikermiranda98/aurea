@@ -13,8 +13,7 @@
 #   zeron-sync, zeron-update   lib only (session-sync-regressions)
 #   zeron-cli, zeron-launch, zeron-notify   `zeron`'s command line, the engine
 #                  helper's start-up and the zeron:// links, shared by the apps
-#   zeron-engine   lib + the integration tests named below (plugin_services: the
-#                  plugin host's services, end to end; also on macOS in zgx-tests.yml). Engine has many other
+#   zeron-engine   lib + the integration tests named below. Engine has many other
 #                  integration binaries (live agents etc.) that no workflow ran, so
 #                  they are listed instead of globbed to avoid compiling them.
 #   zeron-proto lib `voice` tests, zeron-mcp lib, zeron-rpc device_room and
@@ -38,7 +37,7 @@ for f in crates/harness/tests/*.rs crates/preview/tests/*.rs crates/doc/tests/*.
 done
 # `misc` (harness, engine and preview): the small suites, one binary each.
 # `restart_hook` stays a binary of its own: the hook it checks is process-wide.
-for t in misc restart_resume side_chats message_queue device_routing device_room plugin_services restart_hook; do
+for t in misc restart_resume side_chats message_queue device_routing device_room restart_hook; do
   tests+=(--test "$t")
 done
 

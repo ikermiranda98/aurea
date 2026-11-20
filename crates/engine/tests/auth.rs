@@ -350,38 +350,6 @@ async fn a_fresh_ticket_is_used_before_the_sign_in_is_announced() {
     assert!(matches!(auth.state(), AuthState::NeedsOrganization { .. }), "announced after");
 }
 
-/// The app's first sign-in runs on its local engine (no edge of its own),
-/// which the app restarts into synced mode once the sign-in is announced:
-/// the plugin signing key is registered there, with the sign-in's ticket,
-/// before that.
-#[tokio::test]
-async fn a_local_engine_registers_its_signing_key_with_the_sign_ins_ticket() {
-    let edge = StubEdge::start().await;
-    let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("device-id"), "device-local").unwrap();
-    let core = zeron_engine::EngineCore::assemble(
-        dir.path(),
-        Arc::new(zeron_engine::HarnessRegistry::new()),
-        zeron_engine::HarnessId::Mock,
-        None,
-    )
-    .expect("a local engine");
-    let auth = Auth::new(workos_config(&edge.url(), dir.path()));
-    core.set_auth(auth.clone());
-    let url = auth.start_headless_sign_in();
-    let state = query_param(&url, "state").expect("state param");
-    auth.complete_sign_in(&format!("{state}.code123")).await.expect("sign-in");
-    // By the time the sign-in is announced (and the app would restart the
-    // engine), the key is registered with the ticket.
-    let registered = edge.state.plugin_keys.lock().unwrap().clone();
-    assert_eq!(registered.len(), 1, "{registered:?}");
-    assert_eq!(registered[0]["stepUp"], "ticket-1");
-    assert_eq!(registered[0]["deviceId"], "device-local");
-    let registration: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("plugin-signing-key.json")).unwrap()).unwrap();
-    assert_eq!((registration["registered_for"].as_str(), registration["key"].clone()), (Some("user_1"), registered[0]["key"].clone()));
-}
-
 #[tokio::test]
 async fn headless_flow_exchanges_pasted_code_and_gates_on_org() {
     let edge = StubEdge::start().await;

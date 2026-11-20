@@ -5479,10 +5479,10 @@ mod tests {
         .await
         .expect("AuthStatus answers during onboarding");
         assert!(auth.is_ok(), "{:?}", auth.err());
-        let plugins = handle.client().call(methods::LIST_PLUGINS, serde_json::json!({})).await;
+        let themes = handle.client().call(methods::LIST_THEMES, serde_json::json!({})).await;
         assert!(
-            matches!(&plugins, Err(RpcError::Capability(code)) if code == "setup_incomplete"),
-            "{plugins:?}"
+            matches!(&themes, Err(RpcError::Capability(code)) if code == "setup_incomplete"),
+            "{themes:?}"
         );
         assert!(!dir.path().join("orgs").exists());
         handle.shutdown().await;

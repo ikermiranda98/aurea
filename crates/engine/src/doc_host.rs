@@ -926,20 +926,6 @@ impl ChatDocHandle {
         &self.chat_id
     }
 
-    pub(crate) fn commit_voice(
-        &self,
-        transcript: &zeron_proto::voice::VoiceTranscript,
-    ) -> Result<Option<String>, EngineError> {
-        let _owner = lock(&self.transcript_import);
-        zeron_doc::voice::commit_voice_transcript(
-            &self.doc,
-            transcript,
-            &self.device_id,
-            chrono::Utc::now().timestamp_millis(),
-        )
-        .map_err(EngineError::from)
-    }
-
     pub fn doc(&self) -> &SessionDoc {
         &self.doc
     }
@@ -4339,14 +4325,6 @@ impl DocHost {
             zeron_doc::MessagePart::Input { request_id, resolved: false, .. } => Some(request_id.clone()),
             _ => None,
         }))
-    }
-
-    /// Record who sent message (or queued row) `id` of `chat_id`, beside
-    /// its transcript (`SessionDoc::sent_by`; synced with the chat, shown
-    /// nowhere).
-    pub(crate) fn mark_sent_by(&self, chat_id: &str, id: &str, by: serde_json::Value) -> Result<(), EngineError> {
-        self.open(chat_id)?.doc.mark_sent_by(id, by)?;
-        Ok(())
     }
 
     pub fn queue_command_with_transfers(

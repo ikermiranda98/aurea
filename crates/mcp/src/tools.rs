@@ -47,9 +47,6 @@ pub struct Tools {
     // Remember successful sends on this MCP connection so wait_for_turn after
     // wait:false also waits for a newly created chat with no session row yet.
     pending_turns: tokio::sync::Mutex<HashMap<String, Arc<PendingTurn>>>,
-    /// Which plugin tools the client was last shown ([`Self::list_all`],
-    /// [`Self::watch_plugin_tools`]).
-    plugins: plugins::PluginState,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -298,7 +295,6 @@ fn catalog() -> Vec<ToolDef> {
         }),
     });
     tools.extend(trading_catalog());
-    tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
     tools
 }
@@ -926,7 +922,6 @@ impl Tools {
         Self {
             zeron,
             pending_turns: Default::default(),
-            plugins: Default::default(),
         }
     }
 
@@ -986,29 +981,8 @@ impl Tools {
             WAIT_ON_BACKGROUND => self.wait_on_background(parse(args)?).await,
             TRADING_SNAPSHOT_TOOL => self.trading_snapshot(parse(args)?).await,
             TRADING_PROPOSE_TOOL => self.trading_propose(parse(args)?).await,
-            plugins::CREATE_PLUGIN => return self.create_plugin(args).await,
-            plugins::LIST_PLUGINS => return self.list_plugins().await,
-            plugins::DESCRIBE_ELEMENTS => return self.describe_elements().await,
-            plugins::PLUGIN_STATUS => return self.plugin_status(args).await,
-            plugins::INSTALL_PLUGIN => return self.install_plugin(args).await,
-            plugins::UPDATE_PLUGIN => return self.update_plugin(args).await,
-            plugins::EXPORT_PLUGIN => return self.export_plugin(args).await,
-            plugins::LIST_TEMPLATES
-            | plugins::CREATE_TEMPLATE
-            | plugins::USE_TEMPLATE
-            | plugins::TEMPLATE_STATUS
-            | plugins::DELETE_TEMPLATE
-            | plugins::DESCRIBE_APP => {
-                return self.templates(name, args).await;
-            }
-            plugins::EXPORT_TEMPLATE | plugins::IMPORT_TEMPLATE => {
-                return self.template_packages(name, args).await;
-            }
             theme if themes::NAMES.contains(&theme) => {
                 return self.themes(theme, args).await;
-            }
-            plugin if is_plugin_tool_name(plugin) => {
-                return self.call_plugin_tool(plugin, args).await;
             }
             other => return Err(format!("unknown tool: {other}")),
         };

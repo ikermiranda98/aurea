@@ -131,23 +131,7 @@ impl VoiceActivity {
     pub(crate) fn live(&self) -> bool {
         self.calls.load(std::sync::atomic::Ordering::Acquire) > 0
     }
-    /// A live call until the returned guard drops.
-    pub(crate) fn call(self: &Arc<Self>) -> VoiceCall {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        VoiceCall(self.clone())
-    }
 }
-pub(crate) struct VoiceCall(Arc<VoiceActivity>);
-impl Drop for VoiceCall {
-    fn drop(&mut self) {
-        self.0
-            .calls
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-        // A stored permit: the reaper hears it even while busy elsewhere.
-        self.0.ended.notify_one();
-    }
-}
-
 struct RunHandle {
     voice_active: Arc<VoiceActivity>,
     run_id: String,
@@ -335,8 +319,6 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
-    /// Plugins whose native MCP servers local runs get (absent in bare tests).
-    plugins: OnceLock<crate::plugins::Plugins>,
     /// New chats' warm starts, by the id the chat will be created with
     /// ([`warm_start`]).
     warm: Mutex<HashMap<String, warm_start::WarmStart>>,
@@ -506,7 +488,6 @@ impl SessionsEngine {
                 generated_images: OnceLock::new(),
                 scratch_root: OnceLock::new(),
                 turn_listener: OnceLock::new(),
-                plugins: OnceLock::new(),
                 warm: Mutex::new(HashMap::new()),
                 warm_leases: Mutex::new(None),
             }),
@@ -609,11 +590,6 @@ impl SessionsEngine {
             viewers: self.inner.viewers.clone(),
             chat_id: chat_id.to_owned(),
         }
-    }
-
-    /// Wire the plugins service: local runs get its native MCP servers.
-    pub fn set_plugins(&self, plugins: crate::plugins::Plugins) {
-        let _ = self.inner.plugins.set(plugins);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -2679,20 +2655,6 @@ impl Inner {
         if matches!(event, AgentEvent::Done { .. }) {
             self.journal.clear_user_stop(chat_id);
         }
-        // A turn's error, for plugins' events: a usage limit hit, a login
-        // expired (`plugins::agents`; told only if it's one of those).
-        let problem = match event {
-            AgentEvent::Error { message } => Some(message.as_str()),
-            AgentEvent::Done { error: Some(error), .. } => Some(error.as_str()),
-            _ => None,
-        };
-        if let (Some(message), Some(plugins)) = (problem, self.plugins.get()) {
-            plugins.agents().observe_problem(chat_id, message);
-        }
-        // Its final reply, told with its `turn.finished` (`messages.read`).
-        if let (AgentEvent::Done { result: Some(reply), .. }, Some(plugins)) = (event, self.plugins.get()) {
-            plugins.agents().observe_reply(chat_id, reply);
-        }
         if let Some(hub) = lock(&self.hubs).get(chat_id) {
             let _ = hub.send(JournaledEvent {
                 seq,
@@ -4479,13 +4441,8 @@ async fn drive_run(
         request.mcp = Some(server);
         _mcp_grant = grant;
     }
-    // Plugins' native MCP servers come from this host's own allowed plugins,
-    // run from their verified snapshots — never from what a sender put here.
-    request.extra_mcp = inner
-        .plugins
-        .get()
-        .map(crate::plugins::Plugins::native_mcp_servers)
-        .unwrap_or_default();
+    // No plugins' MCP servers in Aurea: never what a sender put here.
+    request.extra_mcp = Vec::new();
     // The MCP servers the agent starts from this run's config: the only
     // children it may hold when stopped idle (see the reaper).
     let mut known_servers: Vec<zeron_harness::process::KnownServer> = request
@@ -7021,81 +6978,6 @@ mod tests {
             worktree: None,
             env: Default::default(),
             extra_mcp: Vec::new(),
-        }
-    }
-
-    struct IdleStartupFixture {
-        idle_calls: Arc<std::sync::atomic::AtomicUsize>,
-        inference_calls: Arc<std::sync::atomic::AtomicUsize>,
-        fail: bool,
-    }
-    #[async_trait::async_trait]
-    impl zeron_harness::Harness for IdleStartupFixture {
-        fn id(&self) -> HarnessId {
-            HarnessId::Codex
-        }
-        fn display_name(&self) -> &str {
-            "Offline idle fixture"
-        }
-        fn supports_steering(&self) -> bool {
-            false
-        }
-        fn steering_mode(&self) -> zeron_proto::SteeringMode {
-            zeron_proto::SteeringMode::TurnBoundary
-        }
-        fn reasoning_levels(&self) -> &[zeron_proto::ReasoningLevel] {
-            &[]
-        }
-        async fn models(&self) -> Result<Vec<zeron_proto::Model>, zeron_harness::HarnessError> {
-            Ok(vec![])
-        }
-        async fn start_idle(
-            &self,
-            request: RunRequest,
-            _controls: zeron_harness::RunControls,
-        ) -> Result<
-            futures::stream::BoxStream<'static, Result<AgentEvent, zeron_harness::HarnessError>>,
-            zeron_harness::HarnessError,
-        > {
-            use futures::StreamExt;
-            self.idle_calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            assert!(request.prompt.is_empty());
-            assert_eq!(request.resume.as_deref(), Some("old-native-thread"));
-            let event = if self.fail {
-                AgentEvent::Done {
-                    status: zeron_proto::DoneStatus::Errored,
-                    result: None,
-                    error: Some("offline startup failed".into()),
-                    session_id: None,
-                }
-            } else {
-                AgentEvent::SessionStarted {
-                    harness: HarnessId::Codex,
-                    model: "fixture".into(),
-                    tools: vec![],
-                    cwd: request.cwd,
-                    session_id: "new-native-thread".into(),
-                    assistant_message_id: "fixture-empty".into(),
-                }
-            };
-            Ok(futures::stream::iter([Ok(event)])
-                .chain(futures::stream::pending())
-                .boxed())
-        }
-        async fn run(
-            &self,
-            _request: RunRequest,
-            _controls: zeron_harness::RunControls,
-        ) -> Result<
-            futures::stream::BoxStream<'static, Result<AgentEvent, zeron_harness::HarnessError>>,
-            zeron_harness::HarnessError,
-        > {
-            self.inference_calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err(zeron_harness::HarnessError::Protocol(
-                "fixture forbids inference".into(),
-            ))
         }
     }
 
