@@ -1865,8 +1865,6 @@ pub struct Shell {
     right_terminal: Option<Entity<TerminalPanel>>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
-    /// Host-owned project Actions cached per (device, space).
-    project_actions: crate::project_actions::ProjectActionsController,
     pending_exit: Option<PendingExit>,
     /// Subagent transcript surfaces by id — each tab a read-only
     /// [`Transcript`] pinned to its subagent doc.
@@ -2362,7 +2360,6 @@ impl Shell {
             terminal: None,
             right_terminal: None,
             right_plus: popover::Popup::default(),
-            project_actions: crate::project_actions::ProjectActionsController::default(),
             pending_exit: None,
             subagent_tabs: std::collections::HashMap::new(),
             subagent_seq: 0,
