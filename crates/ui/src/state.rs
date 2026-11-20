@@ -841,10 +841,6 @@ const CLOUD_NO_CREDITS_STEP: &str = "Out of Cloud credits";
 /// and how stale it may be when a window comes forward.
 const CLOUD_STATUS_POLL: std::time::Duration = std::time::Duration::from_secs(120);
 const CLOUD_STATUS_FOCUS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
-/// A Cloud read that failed is tried again this soon (unknown credits let
-/// sends through).
-const CLOUD_STATUS_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
-
 /// The one-shot timer behind [`AppState::watch_clock_transitions`].
 #[derive(Default)]
 struct ClockTransitions {
@@ -2962,31 +2958,8 @@ impl AppState {
         !blocked.is_empty()
     }
 
-    /// Re-read Cloud's status (credits above all), nothing else. A failed
-    /// read is retried soon: unknown credits let a Cloud send through.
-    pub fn refresh_cloud_status(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.engine.clone() else {
-            return;
-        };
-        if !self.signed_in() {
-            return;
-        }
-        self.cloud_status_task = Some(cx.spawn(async move |this, cx| {
-            let status = crate::cloud::fetch_status(engine).await;
-            this.update(cx, |state, cx| match status {
-                Ok(status) => state.set_cloud_status(status, cx),
-                Err(error) => {
-                    tracing::debug!(%error, "Cloud status read failed; retrying");
-                    state.cloud_status_task = Some(cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(CLOUD_STATUS_RETRY).await;
-                        this.update(cx, |state, cx| state.refresh_cloud_status(cx))
-                            .ok();
-                    }));
-                }
-            })
-            .ok();
-        }));
-    }
+    /// No Zeron Cloud account in Aurea: nothing to read.
+    pub fn refresh_cloud_status(&mut self, _cx: &mut Context<Self>) {}
 
     /// Re-read Cloud's status when the last read is older than `max_age`.
     pub fn refresh_cloud_status_if_stale(
@@ -3021,28 +2994,19 @@ impl AppState {
         }));
     }
 
-    /// Whether Cloud is on for this account (its logical device exists).
-    /// Cloud is on for this account — never while signed out, whatever a
-    /// stale status says.
-    /// Signed in, and the edge offers this account Cloud (`CLOUD_ACCESS`):
-    /// Cloud and Billing in Settings, the Cloud checkout, Cloud projects.
-    /// False until the status arrives.
+    /// Aurea is local-only: Cloud is never offered.
     pub fn cloud_offered(&self) -> bool {
-        self.signed_in() && self.cloud_status.as_ref().is_some_and(|s| s.available)
+        false
     }
 
-    /// [`Self::cloud_offered`], but true while the status is still unknown
-    /// (setup keeps its GitHub step until the edge says otherwise).
+    /// Aurea is local-only: Cloud is never offered.
     pub fn cloud_maybe_offered(&self) -> bool {
-        self.signed_in() && self.cloud_status.as_ref().is_none_or(|s| s.available)
+        false
     }
 
+    /// Aurea is local-only: no Cloud machines.
     pub fn cloud_enabled(&self) -> bool {
-        self.cloud_offered()
-            && (self.cloud_status
-            .as_ref()
-            .is_some_and(crate::cloud::account_enabled)
-                || self.cloud_account_device().is_some())
+        false
     }
 
     /// The Cloud session `chat_id` runs in — its own, or for a side chat its
@@ -3088,39 +3052,6 @@ impl AppState {
     pub fn cloud_machine_slow(&self, chat_id: &str) -> bool {
         self.chat_cloud_session(chat_id)
             .is_some_and(crate::cloud::session_slow)
-    }
-
-    /// Whether a send is waiting on a Cloud machine: keeps the session poll
-    /// running while the machine comes up or updates, and for
-    /// [`crate::cloud::STAGE_WATCH`] after it last did. A waking machine
-    /// reads ready as soon as its old engine first talks, and only then
-    /// looks for a release, so stopping at ready missed the update. Notes
-    /// what it sees first ([`Self::note_cloud_waits`]); a send that was
-    /// taken (or failed) is no longer pending, which ends it.
-    fn send_waits_on_cloud(&mut self, now: DateTime<Utc>) -> bool {
-        self.note_cloud_waits(now);
-        self.pending_sends.iter().any(|(chat_id, send)| {
-            self.chat_cloud_session(chat_id).is_some()
-                && now
-                    .signed_duration_since(send.machine_waited)
-                    .num_milliseconds()
-                    <= crate::cloud::STAGE_WATCH.as_millis() as i64
-        })
-    }
-
-    /// Stamp each pending send whose Cloud machine is still getting to it.
-    fn note_cloud_waits(&mut self, now: DateTime<Utc>) {
-        let waiting: Vec<String> = self
-            .pending_sends
-            .keys()
-            .filter(|chat_id| self.cloud_machine_holds_send(chat_id))
-            .cloned()
-            .collect();
-        for chat_id in waiting {
-            if let Some(send) = self.pending_sends.get_mut(&chat_id) {
-                send.machine_waited = now;
-            }
-        }
     }
 
     /// When `chat_id`'s Cloud machine isn't running: the session to wake
@@ -3335,42 +3266,8 @@ impl AppState {
         self.refresh_cloud_sessions(cx);
     }
 
-    /// Read every Cloud session once — then again every
-    /// [`crate::cloud::SESSION_POLL`] only while one is being set up, woken
-    /// or deleted. Never runs for an account without Cloud.
-    pub fn refresh_cloud_sessions(&mut self, cx: &mut Context<Self>) {
-        if !self.cloud_enabled() {
-            return;
-        }
-        let Some(engine) = self.engine.clone() else {
-            return;
-        };
-        self.cloud_sessions_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let result = crate::cloud::fetch_sessions(engine.clone()).await;
-                let settling = this
-                    .update(cx, |state, cx| {
-                        if let Ok(sessions) = result {
-                            state.set_cloud_sessions(sessions, cx);
-                        }
-                        // First: it notes which sends still wait, every read.
-                        let waits = state.send_waits_on_cloud(Utc::now());
-                        waits
-                            || state
-                                .cloud_sessions
-                                .as_ref()
-                                .is_some_and(crate::cloud::any_session_settling)
-                    })
-                    .unwrap_or(false);
-                if !settling {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(crate::cloud::SESSION_POLL)
-                    .await;
-            }
-        }));
-    }
+    /// No Zeron Cloud machines in Aurea: nothing to read.
+    pub fn refresh_cloud_sessions(&mut self, _cx: &mut Context<Self>) {}
 
     /// The "@ device" tag for a space — shared by the space pickers' rows,
     /// the sidebar filter trigger, and the composer's space chip. Returns
@@ -6739,111 +6636,6 @@ mod tests {
         });
         assert_eq!(s.cloud_machine_booting("c"), None);
         assert!(s.send_undelivered("c", later));
-    }
-
-    /// A Cloud chat on a machine with a fresh heartbeat, and its session.
-    fn cloud_chat_on_a_machine(now: DateTime<Utc>) -> AppState {
-        let mut s = AppState::new();
-        let mut c = chat("c", 0, Some(10));
-        c.device_id = "cloud-s1".into();
-        s.chats = vec![c];
-        let mut machine = device("cloud-s1", "Cloud");
-        machine.capabilities = vec![zeron_proto::CLOUD_SESSION_CAPABILITY.into()];
-        machine.last_seen_at = Some(now);
-        s.devices = vec![machine];
-        s
-    }
-
-    fn set_cloud_session(s: &mut AppState, state: zeron_proto::CloudState, stage: Option<&str>) {
-        s.cloud_sessions = Some(zeron_proto::CloudSessions {
-            sessions: vec![zeron_proto::CloudSession {
-                chat_id: "c".into(),
-                device_id: "cloud-s1".into(),
-                space_id: "sp".into(),
-                state,
-                stage: stage.map(String::from),
-                ..Default::default()
-            }],
-            available: true,
-        });
-    }
-
-    #[test]
-    fn a_send_keeps_following_its_woken_machine_until_it_says_whether_it_updates() {
-        use zeron_proto::{CLOUD_STAGE_UPDATING, CloudState};
-        let sent = Utc::now();
-        let at = |secs: i64| sent + TimeDelta::seconds(secs);
-        let watch = crate::cloud::STAGE_WATCH.as_secs() as i64;
-        let mut s = cloud_chat_on_a_machine(sent);
-        s.begin_pending_send("c", "m1", sent);
-        // Waking: followed, however long it takes.
-        set_cloud_session(&mut s, CloudState::Starting, None);
-        assert!(s.send_waits_on_cloud(at(5)));
-        assert!(s.send_waits_on_cloud(at(150)));
-        // Its old engine talked: ready, heartbeat fresh, nothing booting any
-        // more. The update check comes after this, so the poll goes on.
-        set_cloud_session(&mut s, CloudState::Ready, None);
-        s.devices[0].last_seen_at = Some(Utc::now());
-        assert_eq!(s.cloud_machine_booting("c"), None);
-        assert!(s.send_waits_on_cloud(at(155)), "the wake ended just now");
-        // It installs a release: followed for as long as that takes, and the
-        // send reads as waiting on it, not late.
-        set_cloud_session(&mut s, CloudState::Ready, Some(CLOUD_STAGE_UPDATING));
-        assert!(s.send_waits_on_cloud(at(160)));
-        assert!(s.send_waits_on_cloud(at(160 + 2 * watch)));
-        let later = at(160 + 2 * watch);
-        assert!(s.send_pending("c", later));
-        assert!(!s.send_undelivered("c", later));
-        assert!(s.send_waits_on_update("c", later));
-        // Done: a little longer, then nothing more to learn.
-        set_cloud_session(&mut s, CloudState::Ready, None);
-        assert!(!s.send_waits_on_update("c", later));
-        assert!(s.send_waits_on_cloud(at(165 + 2 * watch)));
-        assert!(!s.send_waits_on_cloud(at(161 + 3 * watch)));
-    }
-
-    #[test]
-    fn a_wake_taking_longer_than_usual_holds_the_send_and_says_so() {
-        use zeron_proto::{CLOUD_STAGE_SLOW, CloudState};
-        let sent = Utc::now();
-        let later = sent + TimeDelta::seconds(600);
-        let mut s = cloud_chat_on_a_machine(sent);
-        s.begin_pending_send("c", "m1", sent);
-        set_cloud_session(&mut s, CloudState::Starting, Some(CLOUD_STAGE_SLOW));
-        assert!(s.cloud_machine_slow("c"));
-        assert!(s.send_waits_on_update("c", later), "the line says so");
-        assert!(!s.send_undelivered("c", later), "not late, however long");
-        assert!(s.send_waits_on_cloud(later));
-        set_cloud_session(&mut s, CloudState::Ready, None);
-        assert!(!s.cloud_machine_slow("c"));
-    }
-
-    #[test]
-    fn a_send_to_a_machine_already_up_stops_the_poll_soon_and_when_taken() {
-        use zeron_proto::CloudState;
-        let sent = Utc::now();
-        let at = |secs: i64| sent + TimeDelta::seconds(secs);
-        let watch = crate::cloud::STAGE_WATCH.as_secs() as i64;
-        let mut s = cloud_chat_on_a_machine(sent);
-        set_cloud_session(&mut s, CloudState::Ready, None);
-        // Nothing waiting: no poll.
-        assert!(!s.send_waits_on_cloud(at(0)));
-        // A send that never gets taken stops it once the watch is over:
-        // not forever.
-        s.begin_pending_send("c", "m1", sent);
-        assert!(s.send_waits_on_cloud(at(1)));
-        assert!(!s.send_waits_on_cloud(at(watch + 1)));
-        // A send that was taken ends it at once.
-        s.begin_pending_send("c", "m2", at(100));
-        assert!(s.send_waits_on_cloud(at(101)));
-        s.end_pending_send("c", "m2");
-        assert!(!s.send_waits_on_cloud(at(102)));
-        // A chat that isn't on Cloud never polls.
-        let mut local = chat("l", 0, Some(10));
-        local.device_id = "mac".into();
-        s.chats.push(local);
-        s.begin_pending_send("l", "m3", at(200));
-        assert!(!s.send_waits_on_cloud(at(201)));
     }
 
     #[test]
