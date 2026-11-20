@@ -1,10 +1,12 @@
-; Zeron for Windows — per-user installer (Inno Setup 6).
+; Aurea for Windows — per-user installer (Inno Setup 6). Internal names
+; (zeron.exe, %LOCALAPPDATA%\Zeron, the AppId) stay Zeron's; what a person
+; sees says Aurea.
 ;
 ; Built by scripts/package-windows.ps1, which passes the version, the package
 ; architecture, and the staged portable directory:
 ;   ISCC.exe /DAppVersion=0.2.97 /DArch=x86_64 /DPackageDir=<stage> /DOutputDir=<out> zeron.iss
 ;
-; Installs into %LOCALAPPDATA%\Programs\Zeron without elevation, like VS
+; Installs into %LOCALAPPDATA%\Programs\Aurea without elevation, like VS
 ; Code's user setup: the directory stays writable by its user, so the in-app
 ; updater (crates/update/src/windows.rs) can replace zeron.exe in place. The
 ; staged directory already carries zeron-update.json, which marks the install
@@ -41,16 +43,16 @@
 ; crates/update/src/windows.rs refreshes DisplayVersion under this key after
 ; in-app updates.
 AppId={{AD5DEC34-E254-467B-8F24-8127EBAF4DA6}
-AppName=Zeron
+AppName=Aurea
 AppVersion={#AppVersion}
-AppVerName=Zeron {#AppVersion}
-AppPublisher=Zeron
-AppPublisherURL=https://zeron.sh
-AppSupportURL=https://github.com/zeronsh/zeron/issues
-AppUpdatesURL=https://github.com/zeronsh/zeron/releases
+AppVerName=Aurea {#AppVersion}
+AppPublisher=Aurea
+AppPublisherURL=https://github.com/ikermiranda98/aurea
+AppSupportURL=https://github.com/ikermiranda98/aurea/issues
+AppUpdatesURL=https://github.com/ikermiranda98/aurea/releases
 VersionInfoVersion={#FileVersion}
 PrivilegesRequired=lowest
-DefaultDirName={autopf}\Zeron
+DefaultDirName={autopf}\Aurea
 DisableProgramGroupPage=yes
 DisableDirPage=auto
 DisableReadyPage=yes
@@ -58,14 +60,14 @@ ArchitecturesAllowed={#ArchAllowed}
 ArchitecturesInstallIn64BitMode={#ArchAllowed}
 MinVersion=10.0
 OutputDir={#OutputDir}
-OutputBaseFilename=zeron-{#AppVersion}-windows-{#Arch}-setup
+OutputBaseFilename=aurea-{#AppVersion}-windows-{#Arch}-setup
 SetupIconFile=zeron.ico
 UninstallDisplayIcon={app}\zeron.exe
-UninstallDisplayName=Zeron
+UninstallDisplayName=Aurea
 WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
-; A running Zeron is closed through the Restart Manager before its files are
+; A running Aurea is closed through the Restart Manager before its files are
 ; replaced; the updated app starts again from the finish page.
 CloseApplications=yes
 RestartApplications=no
@@ -85,19 +87,11 @@ Source: "{#PackageDir}\beta\*"; DestDir: "{app}\beta"; Flags: ignoreversion recu
 #endif
 
 [Icons]
-Name: "{autoprograms}\Zeron"; Filename: "{app}\zeron.exe"
-Name: "{autodesktop}\Zeron"; Filename: "{app}\zeron.exe"; Tasks: desktopicon
-
-[Registry]
-; zeron:// conversation links — the scheme macOS registers in Info.plist and
-; Linux in zeron.desktop.
-Root: HKCU; Subkey: "Software\Classes\zeron"; ValueType: string; ValueName: ""; ValueData: "URL:Zeron"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\zeron"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\zeron\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\zeron.exe"",0"
-Root: HKCU; Subkey: "Software\Classes\zeron\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\zeron.exe"" ""%1"""
+Name: "{autoprograms}\Aurea"; Filename: "{app}\zeron.exe"
+Name: "{autodesktop}\Aurea"; Filename: "{app}\zeron.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\zeron.exe"; Description: "{cm:LaunchProgram,Zeron}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\zeron.exe"; Description: "{cm:LaunchProgram,Aurea}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 ; Leftovers of in-app updates (crates/update/src/windows.rs).

@@ -183,7 +183,7 @@ try {
         "/DOutputDir=$([IO.Path]::GetFullPath($out))" `
         ([IO.Path]::GetFullPath((Join-Path $root 'dist/windows/zeron.iss')))
     if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
-    $setup = Join-Path $out "zeron-$version-windows-$arch-setup.exe"
+    $setup = Join-Path $out "aurea-$version-windows-$arch-setup.exe"
     if (-not (Test-Path -LiteralPath $setup)) { throw "Installer not produced: $setup" }
     if (-not $beta) {
         $file = Split-Path "$stage.exe" -Leaf
