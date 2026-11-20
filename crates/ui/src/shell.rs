@@ -55,7 +55,6 @@ use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_heigh
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
 
-mod actions_ui;
 mod chat_dropzone;
 mod command_palette;
 mod files_panel;
@@ -68,8 +67,6 @@ use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_
 #[cfg(test)]
 mod panel_interaction_tests;
 pub(crate) mod project_icon;
-mod session_info;
-mod session_lanes;
 mod settings_search;
 mod sidebar_pins;
 pub(crate) mod spaces;
@@ -2081,12 +2078,6 @@ pub struct Shell {
     /// The room the transcript last held free for the docked card, eased
     /// back from as the card hides because the column stopped fitting it.
     session_info_last_reserve: f32,
-    /// The lanes card's folds and pages.
-    session_lanes: session_lanes::LaneState,
-    /// The branch diff behind the card's branch-row totals.
-    session_diffs: session_info::SessionDiffs,
-    /// The servers behind the card's Ports section.
-    session_previews: session_info::SessionPreviews,
     files_content_tween: Option<WidthTween>,
     /// The last tracked frame: its chat, the window fit, and for each of
     /// `[sidebar, surface host, Files]` the width painted and the width its
@@ -2256,18 +2247,8 @@ impl Shell {
                         t.on_own_send(chat_id.clone(), message_id.clone(), cx)
                     });
                 }
-                ComposerEvent::WorktreeSetup {
-                    chat_id,
-                    setup_action,
-                    setup_error,
-                    target_device_id,
-                } => this.attach_worktree_setup(
-                    chat_id.clone(),
-                    setup_action.clone(),
-                    setup_error.clone(),
-                    target_device_id.clone(),
-                    cx,
-                ),
+                // Aurea has no projects or worktrees: nothing to set up.
+                ComposerEvent::WorktreeSetup { .. } => {}
                 ComposerEvent::Queued {
                     chat_id,
                     message_id,
@@ -2507,9 +2488,6 @@ impl Shell {
             session_info_pressed_open: None,
             session_info_docked: false,
             session_info_last_reserve: 0.0,
-            session_lanes: session_lanes::LaneState::default(),
-            session_diffs: session_info::SessionDiffs::default(),
-            session_previews: session_info::SessionPreviews::default(),
             files_content_tween: None,
             painted_columns: None,
             fit_exits: [None; 3],
@@ -4916,12 +4894,10 @@ impl Shell {
         };
         let revealed = match surface {
             ChatRenameSurface::Sidebar => self.reveal_sidebar_chat(&chat_id, cx),
-            // The lanes list the open chat's live side chats: show the card
-            // and page its lane to the branch.
+            // No session card or side chats in Aurea.
             ChatRenameSurface::SessionCard => {
-                !archived
-                    && parent.as_deref() == Some(self.active_chat.as_str())
-                    && self.reveal_session_lane_chat(&chat_id, cx)
+                let _ = (archived, parent);
+                false
             }
         };
         if !revealed {
@@ -7902,9 +7878,6 @@ impl Shell {
             overlays.push(overlay);
         }
         if let Some(overlay) = self.render_add_space_overlay(viewport, window, cx) {
-            overlays.push(overlay);
-        }
-        if let Some(overlay) = self.render_project_action_overlay(viewport, window, cx) {
             overlays.push(overlay);
         }
 
