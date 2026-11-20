@@ -390,6 +390,59 @@ impl TradingEngine {
         }
     }
 
+    /// Where the systems come from (a repository folder, Settings → Sistemas)
+    /// and what its last download brought.
+    pub fn repo_state(&self) -> zeron_proto::trading::RepoState {
+        let read = |key: &str| self.store.meta_get(key).ok().flatten();
+        zeron_proto::trading::RepoState {
+            source: read("repo-sistemas").and_then(|text| serde_json::from_str(&text).ok()),
+            last: read("repo-sistemas-ultima").and_then(|text| serde_json::from_str(&text).ok()),
+        }
+    }
+
+    /// Use a repository download as the systems folder and remember its source.
+    pub fn adopt_repo(
+        &mut self,
+        source: &zeron_proto::trading::RepoSource,
+        report: &zeron_proto::trading::RepoSyncReport,
+    ) -> Result<(), TradingError> {
+        self.pool_select(&report.dir)?;
+        if let Ok(text) = serde_json::to_string(source) {
+            let _ = self.store.meta_set("repo-sistemas", &text);
+        }
+        if let Ok(text) = serde_json::to_string(report) {
+            let _ = self.store.meta_set("repo-sistemas-ultima", &text);
+        }
+        let message = if report.changed.is_empty() {
+            format!("Sistemas del repositorio al día ({})", report.commit)
+        } else {
+            format!(
+                "Sistemas actualizados desde el repositorio ({}): {} ficheros cambiados",
+                report.commit,
+                report.changed.len()
+            )
+        };
+        self.note(zeron_proto::trading::LogLevel::Info, message);
+        Ok(())
+    }
+
+    /// A local folder replaces the repository: forget its source.
+    pub fn forget_repo(&mut self) {
+        let _ = self.store.meta_set("repo-sistemas", "");
+        let _ = self.store.meta_set("repo-sistemas-ultima", "");
+    }
+
+    /// Whether any bot runs now (its code must not change under it).
+    pub fn any_system_running(&self) -> bool {
+        self.snapshot().systems.iter().any(|system| system.running)
+    }
+
+    /// One engine-log row from the desk itself.
+    pub fn note(&self, level: zeron_proto::trading::LogLevel, message: String) {
+        self.state.lock().unwrap().push_log(level, "motor", message, now_ms(), true);
+        self.publish();
+    }
+
     /// The systems folder in use and how many systems it holds (`None` when
     /// none is chosen: the desk shows the demo pool).
     pub fn pool_current(&self) -> Option<PoolSelectResult> {

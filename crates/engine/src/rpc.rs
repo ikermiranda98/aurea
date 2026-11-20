@@ -2428,6 +2428,60 @@ fn is_stream_method(method: &str) -> bool {
     )
 }
 
+impl EngineRpc {
+    /// Settings → Sistemas from a repository: download (a new `source`) or
+    /// update the remembered one, then use it as the systems folder. A bot's
+    /// code never changes under it unless the person insists (`force`).
+    async fn sync_systems_repo(
+        &self,
+        source: Option<zeron_proto::trading::RepoSource>,
+        force: bool,
+    ) -> Result<zeron_proto::trading::RepoSyncReport, RpcError> {
+        let Some(engine) = self.trading_engine.clone() else {
+            return Err(RpcError::Failed("La mesa de trading no está disponible".into()));
+        };
+        let (source, running) = {
+            let guard = engine.lock().unwrap();
+            let source = match source {
+                Some(source) => zeron_trading::repo::validate(&source).map_err(RpcError::Failed)?,
+                None => guard.repo_state().source.ok_or_else(|| {
+                    RpcError::Failed("No hay ningún repositorio configurado".into())
+                })?,
+            };
+            (source, guard.any_system_running())
+        };
+        if running && !force {
+            return Err(RpcError::Failed(SYSTEMS_RUNNING.into()));
+        }
+        let trading_dir = self.repos.data_dir().join("trading");
+        let synced = {
+            let source = source.clone();
+            tokio::task::spawn_blocking(move || zeron_trading::repo::sync(&trading_dir, &source))
+                .await
+                .map_err(|_| RpcError::Failed("La descarga del repositorio se interrumpió".into()))?
+        };
+        let mut guard = engine.lock().unwrap();
+        match synced {
+            Ok(report) => {
+                guard
+                    .adopt_repo(&source, &report)
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                Ok(report)
+            }
+            Err(error) => {
+                guard.note(
+                    zeron_proto::trading::LogLevel::Warning,
+                    format!("No se pudo actualizar el repositorio de sistemas: {error}"),
+                );
+                Err(RpcError::Failed(error))
+            }
+        }
+    }
+}
+
+/// `TradingRepoUpdate`'s refusal while bots run (the app offers to insist).
+pub const SYSTEMS_RUNNING: &str = "Hay sistemas en marcha: actualizar cambiaría su código mientras se ejecutan";
+
 /// A watch receiver as a stream: current value first, then every change.
 /// Trading methods that move money or bots (or answer for the person): only
 /// the local app may call them, never an agent's MCP server or a peer.
@@ -2445,6 +2499,8 @@ fn trading_needs_person(method: &str) -> bool {
             | methods::TRADING_LINK_ADD
             | methods::TRADING_LINK_REMOVE
             | methods::TRADING_POOL_SELECT
+            | methods::TRADING_REPO_SET
+            | methods::TRADING_REPO_UPDATE
             | methods::TRADING_CONNECT
             | methods::TRADING_DISCONNECT
             | methods::TRADING_ACCOUNT_SELECT
@@ -4357,6 +4413,25 @@ impl RpcService for EngineRpc {
                     &zeron_trading::TradingService::detect(p.host.as_deref(), p.port).await,
                 )
             }
+            methods::TRADING_REPO_STATE => RpcReply::value(
+                &self
+                    .trading_engine
+                    .as_ref()
+                    .map(|engine| engine.lock().unwrap().repo_state())
+                    .unwrap_or_default(),
+            ),
+            methods::TRADING_REPO_SET => {
+                let source: zeron_proto::trading::RepoSource = parse_params(params)?;
+                RpcReply::value(&Box::pin(self.sync_systems_repo(Some(source), false)).await?)
+            }
+            methods::TRADING_REPO_UPDATE => {
+                let p: zeron_proto::trading::RepoUpdateParams = if params.is_null() {
+                    Default::default()
+                } else {
+                    parse_params(params)?
+                };
+                RpcReply::value(&Box::pin(self.sync_systems_repo(None, p.force)).await?)
+            }
             methods::TRADING_POOL_CURRENT => RpcReply::value(
                 &self
                     .trading_engine
@@ -4368,7 +4443,11 @@ impl RpcService for EngineRpc {
                 if let Some(engine) = &self.trading_engine {
                     let mut guard = engine.lock().unwrap();
                     match guard.pool_select(&p.dir) {
-                        Ok(result) => RpcReply::value(&result),
+                        Ok(result) => {
+                            // A local folder replaces a repository source.
+                            guard.forget_repo();
+                            RpcReply::value(&result)
+                        }
                         Err(error) => return Err(RpcError::Failed(error.to_string())),
                     }
                 } else {

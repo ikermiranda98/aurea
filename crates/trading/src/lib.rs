@@ -14,6 +14,7 @@ pub mod merge;
 pub mod mock;
 pub mod mt5;
 pub mod pool;
+pub mod repo;
 pub mod service;
 pub mod state;
 pub mod store;

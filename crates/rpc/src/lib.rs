@@ -68,6 +68,12 @@ pub mod methods {
     pub const TRADING_POOL_SELECT: &str = "TradingPoolSelect";
     /// The systems folder in use and its system count (null: none chosen).
     pub const TRADING_POOL_CURRENT: &str = "TradingPoolCurrent";
+    /// Where the systems come from: a repository folder and its last update.
+    pub const TRADING_REPO_STATE: &str = "TradingRepoState";
+    /// Download one folder of a repository and use it as the systems folder.
+    pub const TRADING_REPO_SET: &str = "TradingRepoSet";
+    /// Bring the repository folder up to date (`force`: even with bots running).
+    pub const TRADING_REPO_UPDATE: &str = "TradingRepoUpdate";
     /// An agent asks for a money action; it waits on the desk for approval.
     pub const TRADING_PROPOSE: &str = "TradingPropose";
     /// The person approves (runs) or rejects a proposal. Never an agent's.

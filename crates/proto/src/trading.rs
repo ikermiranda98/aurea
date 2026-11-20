@@ -539,3 +539,53 @@ pub struct IbkrDetectParams {
 pub struct PoolSelectParams {
     pub dir: String,
 }
+
+/// Systems that live in one folder of a git repository (Settings →
+/// Sistemas): Aurea keeps a sparse copy of just that folder and uses it as
+/// the systems folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoSource {
+    /// `https://…` or `git@…` clone URL.
+    pub url: String,
+    /// Branch to follow; the repository's default when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The folder inside the repository holding the `NN_name` systems
+    /// (`/`-separated, relative); empty for the repository's root.
+    #[serde(default)]
+    pub subdir: String,
+}
+
+/// What the last download or update of the repository brought.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoSyncReport {
+    /// The local systems folder the copy provides.
+    pub dir: String,
+    pub systems: u32,
+    /// The commit now checked out (short hash).
+    pub commit: String,
+    /// Files under the folder that changed in this update (empty on a first download).
+    pub changed: Vec<String>,
+    /// Epoch ms of the update.
+    pub at: i64,
+}
+
+/// Settings → Sistemas: where the systems come from.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<RepoSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<RepoSyncReport>,
+}
+
+/// `TradingRepoUpdate`: `force` updates even with systems running.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoUpdateParams {
+    #[serde(default)]
+    pub force: bool,
+}

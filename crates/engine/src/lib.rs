@@ -385,6 +385,38 @@ impl EngineCore {
                 .ok()
                 .map(|e| std::sync::Arc::new(std::sync::Mutex::new(e)))
         };
+        // Systems from a repository folder: brought up to date at every start,
+        // in the background (it's the network), and never under a running bot.
+        if let Some(engine) = trading_engine.clone()
+            && std::env::var_os("TRADING_SYSTEMS_DIR").is_none()
+        {
+            let trading_dir = data_dir.join("trading");
+            let _ = std::thread::Builder::new()
+                .name("systems-repo".into())
+                .spawn(move || {
+                    let (source, running) = {
+                        let guard = engine.lock().unwrap();
+                        (guard.repo_state().source, guard.any_system_running())
+                    };
+                    let Some(source) = source else { return };
+                    if running {
+                        engine.lock().unwrap().note(
+                            zeron_proto::trading::LogLevel::Info,
+                            "Hay sistemas en marcha: el repositorio de sistemas no se actualiza al arrancar".into(),
+                        );
+                        return;
+                    }
+                    match zeron_trading::repo::sync(&trading_dir, &source) {
+                        Ok(report) => {
+                            let _ = engine.lock().unwrap().adopt_repo(&source, &report);
+                        }
+                        Err(error) => engine.lock().unwrap().note(
+                            zeron_proto::trading::LogLevel::Warning,
+                            format!("No se pudo actualizar el repositorio de sistemas: {error}"),
+                        ),
+                    }
+                });
+        }
         // Turn starts snapshot the checkout tree — the "Latest turn" diff base.
         let turn_diff = diff_sync.clone();
         sessions.set_turn_listener(Arc::new(move |chat_id, cwd| {
