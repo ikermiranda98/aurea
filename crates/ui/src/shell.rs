@@ -2634,11 +2634,6 @@ impl Shell {
         if signed_out_synced && self.runtime_change_task.is_none() {
             self.start_local_runtime_transition(false, cx);
         }
-        // Capture knob: the add-space palette needs only the device registry.
-        if self.debug_dialog.as_deref() == Some("add-space") && !state.read(cx).devices.is_empty() {
-            self.debug_dialog = None;
-            self.open_add_space(cx);
-        }
         // Capture knob: pop the requested dialog once chats have landed.
         if let Some(which) = self.debug_dialog.clone()
             && let Some(first) = state.read(cx).chats.first().map(|c| c.id.clone())
@@ -5181,7 +5176,6 @@ impl Shell {
     /// the keys it records before they can dispatch.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
         self.command_palette.is_some()
-            || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
     }
 
@@ -5783,9 +5777,7 @@ impl Shell {
         settings::update(settings::SavePolicy::Immediate, cx, |s| {
             s.onboarding_completed = true;
         });
-        if add_project {
-            self.open_add_space(cx);
-        }
+        let _ = add_project;
         cx.notify();
     }
 
@@ -7617,19 +7609,6 @@ impl Shell {
             update.update(cx, |update, cx| update.dismiss_prompt(cx));
             return true;
         }
-        // The folded-breadcrumbs menu floats over the palette; it closes first.
-        if self.add_space.is_some() && self.project_crumb_menu.is_open() {
-            self.close_project_crumb_menu(cx);
-            return true;
-        }
-        // A typed path gives the crumbs back before the palette closes.
-        if self.add_space_cancel_path_edit(cx) {
-            return true;
-        }
-        if self.add_space.is_some() {
-            self.close_add_space(cx);
-            return true;
-        }
         if self.spaces_menu.is_open() {
             self.close_spaces_menu(cx);
             return true;
@@ -7865,11 +7844,7 @@ impl Shell {
             ));
         }
 
-        overlays.extend(self.render_space_overlays(viewport, window, cx));
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
-            overlays.push(overlay);
-        }
-        if let Some(overlay) = self.render_add_space_overlay(viewport, window, cx) {
             overlays.push(overlay);
         }
 
@@ -8160,7 +8135,7 @@ impl Shell {
     ) -> AnyElement {
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
-        let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
+        let (border, text, _faint) = (theme.border, theme.text, theme.text_faint);
         let _ = (text, border);
         let has_selection = self.state.read(cx).selected_chat.is_some();
         let has_spaces = !self.state.read(cx).spaces.is_empty();
@@ -8302,53 +8277,6 @@ impl Shell {
                 .when(departing_transcript, |el| {
                     el.child(div().absolute().inset_0().occlude())
                 })
-                .into_any_element()
-        } else if !has_spaces && !no_project {
-            // Onboarding (first boot / after the destructive wipe): no folders
-            // to work in yet — one clear affordance.
-            let _ = faint;
-            div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .child(motion::fade_in(
-                    "no-spaces-canvas",
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .child(
-                            icon(icons::ZERON_LOGO)
-                                .w(px(41.9))
-                                .h(px(48.0))
-                                .text_color(theme.text.opacity(0.09)),
-                        )
-                        .child(
-                            div()
-                                .mt(px(24.0))
-                                .text_size(crate::typography::ui_rems(16.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(SharedString::from("Add a project to get started")),
-                        )
-                        .child(
-                            div()
-                                .mt(px(6.0))
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .text_color(theme.text_muted.opacity(0.7))
-                                .child(SharedString::from(
-                                    "A project is a folder on one of your devices.",
-                                )),
-                        )
-                        .child(
-                            popover::btn_primary(&theme_owned, "Add a project")
-                                .id("onboarding-add-space")
-                                .mt(px(20.0))
-                                .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
-                        ),
-                ))
                 .into_any_element()
         } else {
             Empty.into_any_element()
