@@ -1,56 +1,35 @@
-# Zeron
+# Aurea
 
-Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity) locally by default, with optional multi-device sync.
+A desktop trading desk for Windows: watch your account, positions and trading systems on one page, and ask an AI agent about them from a chat beside the desk.
 
 *English | [Español](README.es.md)*
 
-![Zeron desktop app](docs/media/readme/app-screenshot.jpg)
+## What it does
 
-## Desktop app
+- **Trading desk** — equity, daily P&L, exposure, an equity curve, open positions, your systems (bots) with start/stop, the engine log and scheduled tasks. **Close all** and **Panic** are always one click away.
+- **Connections** — Interactive Brokers TWS (paper trading only, port 7497) and MetaTrader 5. Without a connection the desk runs in demo mode with sample data.
+- **Desk chat** — an agent (OpenCode) in the left drawer that knows the desk. Its system prompt is editable in Settings → Chat.
+- **Browser and terminal** — a side pane, always available, to keep a chart, a broker's site or a shell next to the desk.
+- **Dictation** — talk to the chat; speech is transcribed on your computer.
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/zeronsh/zeron/releases/latest):
+Everything stays on your computer: no account, no cloud. Actions that touch real money always ask you first.
 
-- **macOS** — `zeron-<version>-macos-arm64.dmg`
-- **Windows** — `zeron-<version>-windows-x86_64-setup.exe`
-- **Linux** — `zeron-<version>-linux-<arch>.tar.gz`, then run its `install.sh`
+## Install
 
-No account or network connection is needed; sessions stay on your device. The app updates itself.
+There are no published releases yet. Build the installer from source (Windows, Rust and [Inno Setup 6](https://jrsoftware.org/isinfo.php)):
 
-## Headless (CLI)
-
-For servers and other machines without a display, such as a VPS that keeps agents running after you close your laptop. Linux only:
-
-```bash
-curl -fsSL https://zeron.sh/install.sh | sh
-zeron status
+```powershell
+.\scripts\package-windows.ps1 -ReleasesUrl https://github.com/ikermiranda98/aurea/releases
 ```
 
-The installer starts the engine as a background service that survives reboots.
+The installer is written to `target\package\aurea-<version>-windows-x86_64-setup.exe`. To just run it while developing:
 
-```bash
-zeron status      # local/synced mode and engine status
-zeron update      # update to the latest release
-zeron daemon start|stop|restart|status
+```powershell
+cargo run -p zeron
 ```
 
-## Multi-device sync (optional)
+## Credits
 
-Sign in to start an agent on one device and follow or drive it from another:
-
-```bash
-zeron daemon stop
-zeron login        # or: zeron logout to return to local-only
-zeron daemon start
-```
-
-Devices signed in to the same account can read and write each other's workspace files, so only sign in devices you trust. Existing local sessions are never uploaded.
-
-## Sponsors
-
-Thank you to [The Context Company](https://www.thecontextcompany.com/) for sponsoring Zeron. You can help fund Zeron's development too by [becoming a sponsor on GitHub](https://github.com/sponsors/zeronsh).
-
----
-
-Developing or curious how it works? [Ask DeepWiki](https://deepwiki.com/zeronsh/zeron) or check out [ARCHITECTURE.md](ARCHITECTURE.md).
+Aurea is a fork of [Zeron](https://github.com/zeronsh/zeron) (MIT). Internal names (`zeron.exe`, `zeron-*` crates, `ZERON_*` variables) are kept from it. See [ARCHITECTURE.md](ARCHITECTURE.md) for how it is put together.
 
 Licensed under the [MIT License](LICENSE).
