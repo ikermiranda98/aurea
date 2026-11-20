@@ -182,9 +182,6 @@ pub enum Launch {
     /// No subcommand: open the window, on a conversation URL if one was
     /// given; `safe_mode` with Zeron's own interface (`--safe-mode`).
     Window { open_url: Option<String>, safe_mode: bool },
-    /// Ask the running headed instance for an Appshot (the interface's own).
-    #[cfg(target_os = "linux")]
-    Appshot,
 }
 
 /// The parser, as `binary`'s `--version` names it: `version` is the build's

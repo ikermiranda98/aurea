@@ -39,8 +39,6 @@ fn main() -> anyhow::Result<()> {
             Launch::Window { .. } => {
                 anyhow::bail!("zeron-engine has no window: open the Zeron app")
             }
-            #[cfg(target_os = "linux")]
-            Launch::Appshot => anyhow::bail!("zeron-engine has no window: open the Zeron app"),
         },
     }
 }

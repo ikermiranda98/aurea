@@ -20,11 +20,6 @@ fn main() -> anyhow::Result<()> {
     match zeron_cli::run(zeron_update::current_version(), Engines::InProcess) {
         Launch::Done(result) => result,
         Launch::Engine(command) => zeron_app::run_engine_command(command),
-        #[cfg(target_os = "linux")]
-        Launch::Appshot => {
-            zeron_ui::appshots::request_running_appshot(&zeron_app::engine_config_from_env().data_dir)
-                .map_err(anyhow::Error::msg)
-        }
         Launch::Window { open_url, .. } => {
             let edge_token = std::env::var("ZERON_EDGE_TOKEN").ok();
             // Headed: the UI probes ZERON_IPC_PORT and connects to a running

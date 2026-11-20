@@ -8,11 +8,9 @@ use gpui::{
     px,
 };
 
-use crate::appshots::{AppshotCapabilities, AppshotDestination};
+use crate::appshots::AppshotDestination;
 use crate::popover::{self, ScrollRailHost};
 
-#[path = "appshots.rs"]
-mod appshots_page;
 use crate::settings::search::{SearchAnchor, SettingId};
 use crate::settings::widgets;
 use crate::settings::{
@@ -92,10 +90,8 @@ pub struct ShortcutsPage {
     appshots_enabled: bool,
     appshot_sound_enabled: bool,
     appshot_destination: AppshotDestination,
-    appshot_capabilities: AppshotCapabilities,
     send_select: widgets::SelectState,
     destination_select: widgets::SelectState,
-    capture_access_prompted: bool,
     semantic_access_prompted: bool,
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
@@ -115,8 +111,6 @@ impl ShortcutsPage {
         appshot_destination: AppshotDestination,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.on_release(|_, _| crate::appshots::set_recording(false))
-            .detach();
         Self {
             appshots_page: false,
             general_page: false,
@@ -133,10 +127,8 @@ impl ShortcutsPage {
             appshots_enabled,
             appshot_sound_enabled,
             appshot_destination,
-            appshot_capabilities: crate::appshots::capabilities(),
             send_select: widgets::SelectState::default(),
             destination_select: widgets::SelectState::default(),
-            capture_access_prompted: false,
             semantic_access_prompted: false,
             thread_naming: {
                 let state = state.clone();
@@ -160,9 +152,6 @@ impl ShortcutsPage {
             // One scroll state serves these pages — rewind it so each opens
             // at the top instead of where the other was left.
             self.scroll.reset();
-            if appshots {
-                self.appshot_capabilities = crate::appshots::capabilities();
-            }
         }
     }
 
@@ -174,7 +163,6 @@ impl ShortcutsPage {
 
     fn start_recording(&mut self, id: ShortcutId, window: &mut Window, cx: &mut Context<Self>) {
         self.recording = Some(id);
-        crate::appshots::set_recording(true);
         let page = cx.entity().downgrade();
         // Bound actions run before Div key listeners. Intercept first so a
         // conflicting chord is recorded/refused instead of running its action.
@@ -198,7 +186,6 @@ impl ShortcutsPage {
         self.recording = None;
         self.recording_blur = None;
         self.recording_interceptor = None;
-        crate::appshots::set_recording(false);
     }
 
     fn commit(&mut self, cx: &mut Context<Self>) {
@@ -225,14 +212,6 @@ impl ShortcutsPage {
             cx.emit(ShortcutsEvent::ComposerSendBehaviorChanged(behavior));
             cx.notify();
         }
-    }
-
-    fn commit_appshots(&self, cx: &mut Context<Self>) {
-        cx.emit(ShortcutsEvent::AppshotsChanged {
-            enabled: self.appshots_enabled,
-            sound_enabled: self.appshot_sound_enabled,
-            destination: self.appshot_destination,
-        });
     }
 
     fn record_keystroke(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
@@ -398,12 +377,6 @@ pub struct ShortcutField {
 
 impl ShortcutField {
     pub fn new(id: ShortcutId, cx: &mut Context<Self>) -> Self {
-        cx.on_release(|field, _| {
-            if field.recording {
-                crate::appshots::set_recording(false);
-            }
-        })
-        .detach();
         Self {
             id,
             focus: cx.focus_handle(),
@@ -415,7 +388,6 @@ impl ShortcutField {
 
     fn start_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.recording = true;
-        crate::appshots::set_recording(true);
         let field = cx.entity().downgrade();
         // Bound actions run before Div key listeners; intercept first so the
         // chord being recorded (⌘D itself) never starts dictation.
@@ -449,9 +421,6 @@ impl ShortcutField {
     }
 
     fn stop_recording(&mut self) {
-        if self.recording {
-            crate::appshots::set_recording(false);
-        }
         self.recording = false;
         self.recording_subscriptions = None;
     }
@@ -652,19 +621,6 @@ fn refusal(
     id: ShortcutId,
     combo: &str,
 ) -> Option<SharedString> {
-    if id == ShortcutId::CaptureAppshot && crate::appshots::validate_shortcut(combo).is_err() {
-        return Some(
-            format!(
-                "Use {} with a letter, number, function key or navigation key.",
-                if cfg!(target_os = "macos") {
-                    "Control, Option or Command"
-                } else {
-                    "Control or Alt"
-                }
-            )
-            .into(),
-        );
-    }
     if send_combo_is_reserved(behavior, combo) {
         return Some(format!("{} is reserved for the composer.", display_combo(combo)).into());
     }
@@ -738,19 +694,13 @@ pub(super) fn group(id: ShortcutId) -> &'static str {
 }
 
 impl Render for ShortcutsPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Feature pages (Voice) rebind their shortcut through the store. Read
         // it back so a later commit here never republishes an older keymap.
         if self.recording.is_none()
             && let Some(store) = cx.try_global::<crate::settings::SettingsStore>()
         {
             self.keymap.clone_from(&store.current.keymap);
-        }
-        if self.appshots_page {
-            if std::mem::take(&mut self.appshots_focus_pending) {
-                window.focus(&self.focus, cx);
-            }
-            return self.render_appshots(window, cx);
         }
         let theme = Theme::of(cx).for_settings_surface();
         let recording = self.recording;
@@ -1215,102 +1165,6 @@ mod tests {
             cx.debug_bounds("escape-stops-active-agent-toggle")
                 .is_none()
         );
-    }
-
-    #[gpui::test]
-    fn appshots_setup_can_be_enabled_and_configured_by_keyboard(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            let mut page = ShortcutsPage::new(
-                state,
-                KeymapConfig::default(),
-                false,
-                ComposerSendBehavior::default(),
-                false,
-                false,
-                AppshotDestination::Automatic,
-                cx,
-            );
-            page.show_appshots(true);
-            page
-        });
-        window
-            .update(cx, |page, w, cx| w.focus(&page.focus, cx))
-            .unwrap();
-        cx.update_window(window.into(), |_, w, cx| {
-            w.draw(cx).clear();
-        })
-        .unwrap();
-        let press = |cx: &mut gpui::TestAppContext, key: &str| {
-            cx.update_window(window.into(), |_, w, cx| {
-                w.draw(cx).clear();
-                let keystroke = gpui::Keystroke::parse(key).unwrap();
-                w.dispatch_event(
-                    gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
-                        keystroke: keystroke.clone(),
-                        is_held: false,
-                        prefer_character_input: false,
-                    }),
-                    cx,
-                );
-                w.dispatch_event(
-                    gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }),
-                    cx,
-                );
-            })
-            .unwrap();
-        };
-        press(cx, "tab");
-        press(cx, "space");
-        window
-            .update(cx, |page, _, _| assert!(page.appshots_enabled))
-            .unwrap();
-        press(cx, "tab");
-        press(cx, "enter");
-        window
-            .update(cx, |page, _, _| assert!(page.appshot_sound_enabled))
-            .unwrap();
-        // Skip the shortcut trigger; arrows open the destination dropdown on
-        // the current choice and Enter commits the highlighted one.
-        for key in ["tab", "tab", "down", "down", "enter"] {
-            press(cx, key);
-        }
-        window
-            .update(cx, |page, _, _| {
-                assert_eq!(page.appshot_destination, AppshotDestination::LastSession);
-                assert!(!page.destination_select.is_open());
-            })
-            .unwrap();
-        for key in ["space", "down", "enter"] {
-            press(cx, key);
-        }
-        window
-            .update(cx, |page, _, _| {
-                assert_eq!(page.appshot_destination, AppshotDestination::NewSession)
-            })
-            .unwrap();
-        // Escape closes without choosing.
-        for key in ["up", "up", "escape"] {
-            press(cx, key);
-        }
-        window
-            .update(cx, |page, _, _| {
-                assert_eq!(page.appshot_destination, AppshotDestination::NewSession);
-                assert!(!page.destination_select.is_open());
-            })
-            .unwrap();
-        for key in ["up", "up", "enter"] {
-            press(cx, key);
-        }
-        window
-            .update(cx, |page, _, _| {
-                assert_eq!(page.appshot_destination, AppshotDestination::LastSession)
-            })
-            .unwrap();
     }
 
     #[gpui::test]

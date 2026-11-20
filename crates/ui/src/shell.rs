@@ -374,7 +374,6 @@ pub fn apply_keymap(
         }
     }
     let equivalents = crate::settings::key_equivalents(cx);
-    crate::appshots::set_shortcut(&keymap.capture_appshot, &equivalents);
     cx.clear_key_bindings();
     // `clear_key_bindings` also removes the contextual editing actions that
     // gpui-base installed at startup. Reinitialize the component layer before
@@ -2270,8 +2269,6 @@ impl Shell {
         state.update(cx, |state, cx| {
             state.watch_clock_transitions(cx);
         });
-        crate::appshots::set_enabled(settings.appshots_enabled);
-        crate::appshots::set_capture_sound_enabled(settings.appshot_sound_enabled);
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap, settings.composer_send_behavior);
         // Dev/testing knob: `ZERON_OPEN_ROUTE=settings[/<section>]` boots
@@ -4792,9 +4789,7 @@ impl Shell {
                                 } => {
                                     this.settings.appshots_enabled = *enabled;
                                     this.settings.appshot_sound_enabled = *sound_enabled;
-                                    crate::appshots::set_capture_sound_enabled(*sound_enabled);
                                     this.settings.appshot_destination = *destination;
-                                    crate::appshots::set_enabled(*enabled);
                                 }
                             }
                             apply_keymap(
