@@ -41,8 +41,6 @@ pub mod change_requests;
 mod chat2_checkpoint;
 pub mod chat2_host;
 mod chat_persistence;
-mod cloud_accounts;
-pub mod cloud_client;
 pub mod cloud_disk;
 pub mod commit_credit;
 pub mod credentials;
@@ -57,7 +55,6 @@ pub mod harness_updates;
 pub(crate) mod home_index;
 mod http_error;
 pub mod instance_lock;
-pub mod local_import;
 pub mod keep_running;
 pub mod heap;
 pub mod managed;
@@ -204,8 +201,6 @@ pub struct EngineCore {
     pub trading_engine: Option<std::sync::Arc<std::sync::Mutex<zeron_trading::TradingEngine>>>,
     /// Which app windows are focused (desktop banners hold back while one is).
     pub viewport_focus: desktop_notify::ViewportFocus,
-    /// Local→synced profile import (account-scoped runtimes only).
-    pub local_import: Option<local_import::LocalImporter>,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -372,15 +367,6 @@ impl EngineCore {
             profile.uploads_root(),
             legacy_uploads_root.as_deref(),
         );
-        // A recorded local→synced import grants this account the local
-        // profile's uploads root read-only — transcripts imported earlier
-        // embed absolute paths under it (same shape as the legacy adoption).
-        if profile.scope() != WorkspaceScope::Local
-            && let Some(root) =
-                local_import::marker_grants_read_root(data_dir, profile.org_id(), profile.user_id())
-        {
-            uploads.add_read_only_root(&root);
-        }
         // Queued-attachment support: the doc host resolves `pending://` refs
         // against this store and pushes staged bytes to remote hosts.
         doc_host.set_uploads(uploads.clone());
@@ -392,18 +378,6 @@ impl EngineCore {
             agent_accounts_config.codex_home.clone()
         };
         sessions.set_generated_images(uploads.clone(), codex_home.join("generated_images"));
-        let local_import = (profile.scope() == WorkspaceScope::Synced).then(|| {
-            local_import::LocalImporter::new(
-                data_dir,
-                &device_id,
-                profile.org_id(),
-                profile.user_id(),
-                store_for_import.clone(),
-                profile.store_root().join("journals"),
-                workspace.clone(),
-                uploads.clone(),
-            )
-        });
         // Logins started from another device publish their callback port to
         // the P2P service, which serves it to that device alone.
         let agent_accounts =
@@ -454,7 +428,6 @@ impl EngineCore {
             agent_accounts,
             harness_updates,
             device_id,
-            local_import,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -637,9 +610,6 @@ impl EngineCore {
         }
         if let Some(updater) = self.updater() {
             rpc = rpc.with_updater(updater);
-        }
-        if let Some(importer) = self.local_import.clone() {
-            rpc = rpc.with_local_import(importer);
         }
         if let Some(broker) = self.credentials() {
             rpc = rpc.with_credentials(broker);
