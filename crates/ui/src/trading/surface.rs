@@ -1561,20 +1561,23 @@ fn systems_title(verb: &str, system_ids: &[String]) -> String {
     }
 }
 
-/// The affected systems as the desk names them, for a group's card.
-fn system_names(system_ids: &[String], snapshot: &Snapshot) -> String {
+/// The affected systems as the desk names them, each with the number that
+/// explains why it is in the group (its P&L %, or its state without capital).
+fn system_lines(system_ids: &[String], snapshot: &Snapshot) -> Vec<String> {
     system_ids
         .iter()
-        .map(|id| {
-            snapshot
-                .systems
-                .iter()
-                .find(|system| &system.id == id)
-                .map(|system| system.name.clone())
-                .unwrap_or_else(|| id.clone())
+        .map(|id| match snapshot.systems.iter().find(|system| &system.id == id) {
+            Some(system) => match system.pnl_pct {
+                Some(pct) => format!("{} · {}", system.name, model::signed_pct(Some(pct))),
+                None => format!(
+                    "{} · {}",
+                    system.name,
+                    if system.running { "en marcha" } else { "parado" }
+                ),
+            },
+            None => id.clone(),
         })
-        .collect::<Vec<_>>()
-        .join(" · ")
+        .collect()
 }
 
 /// One proposal's text column in the chat's narrow inbox; the caller appends
@@ -1588,7 +1591,7 @@ fn chat_proposal_row(proposal: &TradingProposal, snapshot: &Snapshot, theme: &Th
         ProposalAction::StartSystems { system_ids } | ProposalAction::StopSystems { system_ids }
             if system_ids.len() > 1 =>
         {
-            Some(system_names(system_ids, snapshot))
+            Some(system_lines(system_ids, snapshot))
         }
         _ => None,
     };
@@ -1612,17 +1615,27 @@ fn chat_proposal_row(proposal: &TradingProposal, snapshot: &Snapshot, theme: &Th
                 .truncate()
                 .child(SharedString::from(detail)),
         );
-    if let Some(names) = affected {
-        row = row.child(
-            div()
-                .font_family(theme.font_mono.clone())
-                .text_size(px(9.5))
-                .text_color(theme.text_faint)
-                .truncate()
-                .child(SharedString::from(names)),
-        );
+    if let Some(lines) = affected {
+        // Enough to see why each one is in; the rest is a count, not a wall.
+        const SHOWN: usize = 6;
+        for line in lines.iter().take(SHOWN) {
+            row = row.child(mono_line(line, theme));
+        }
+        if lines.len() > SHOWN {
+            row = row.child(mono_line(&format!("y {} más", lines.len() - SHOWN), theme));
+        }
     }
     row
+}
+
+/// A small mono line inside a proposal card (system names and numbers).
+fn mono_line(text: &str, theme: &Theme) -> Div {
+    div()
+        .font_family(theme.font_mono.clone())
+        .text_size(px(9.5))
+        .text_color(theme.text_faint)
+        .truncate()
+        .child(SharedString::from(text.to_owned()))
 }
 
 fn card(theme: &Theme) -> Div {

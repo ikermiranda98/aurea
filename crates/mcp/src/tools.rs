@@ -301,17 +301,34 @@ fn catalog() -> Vec<ToolDef> {
 
 const TRADING_SNAPSHOT_TOOL: &str = "trading_snapshot";
 const TRADING_PROPOSE_TOOL: &str = "trading_propose";
+const TRADING_SELECT_TOOL: &str = "trading_select";
 
 /// Aurea's trading desk: read freely, ask for money actions.
 fn trading_catalog() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: TRADING_SNAPSHOT_TOOL,
-            description: "Aurea's trading desk right now: whether it is the DEMO fixture or a live TWS paper link, the shown account (equity, cash, P&L of the day), open positions (symbol, side, size, entry, current price, P&L) plus how many are open across every account, the bot systems (running or not, symbol, P&L, the capital the person assigned to each one and that P&L as a percent of it, and their own idea and rules when the folder has them), scheduled tasks, connections, the newest engine log rows, the proposals still waiting (`pendingProposals`) and the last answered ones (`recentProposals`). Read-only; call it before answering about positions, before proposing anything, and when the person asks how a proposal ended.",
+            description: "Aurea's trading desk right now: whether it is the DEMO fixture or a live TWS paper link, the shown account (equity, cash, P&L of the day), open positions (symbol, side, size, entry, current price, P&L) plus how many are open across every account, the bot systems (running or not, symbol, P&L, the capital the person assigned to each one and that P&L as a percent of it, when each one last wrote to its log, and their own idea and rules when the folder has them), scheduled tasks, connections, the newest engine log rows, the proposals still waiting (`pendingProposals`) and the last answered ones (`recentProposals`). Read-only; call it before answering about positions, before proposing anything, and when the person asks how a proposal ended.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "logs": { "type": "integer", "minimum": 0, "maximum": 100, "description": "How many recent log rows to include (default 20)." }
+                }
+            }),
+        },
+        ToolDef {
+            name: TRADING_SELECT_TOOL,
+            description: "Pick, from the live desk, the bot systems that match what the person said: by symbol, running or stopped, P&L of the day in percent of their capital or in dollars, and minutes without activity. Read-only and deterministic: use it instead of eyeballing numbers, and never invent system ids. It answers `matched` (each system's `id`, `name`, symbol, running, P&L and a `why` line) and `count`; pass those `id`s together as `system_ids` to one `trading_propose` (start_systems / stop_systems) so a single card covers them all. Call it for groups like \"los que pierden más de 1 %\", \"los de EURUSD\", \"los parados\", \"los que llevan una hora sin hacer nada\". With no filters it lists every system. Systems without capital are left out of the percent filters; a never-seen activity counts as idle.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "symbol": { "type": "string", "description": "Only systems whose symbol contains this, case-insensitive (EURUSD)." },
+                    "running": { "type": "boolean", "description": "true: only bots running; false: only stopped." },
+                    "pnl_pct_min": { "type": "number", "description": "Only systems whose P&L of the day is at least this percent of their capital (1 means +1 %)." },
+                    "pnl_pct_max": { "type": "number", "description": "Only systems whose P&L of the day is at most this percent of their capital (-1 means -1 %)." },
+                    "pnl_usd_min": { "type": "number", "description": "Only systems whose P&L of the day in dollars is at least this (negative values are losses)." },
+                    "pnl_usd_max": { "type": "number", "description": "Only systems whose P&L of the day in dollars is at most this." },
+                    "idle_minutes": { "type": "integer", "minimum": 0, "description": "Only systems with no activity for at least this many minutes." }
                 }
             }),
         },
@@ -363,6 +380,141 @@ fn proposal_system_ids(args: &TradingProposeArgs) -> anyhow::Result<Vec<String>>
     }
     anyhow::ensure!(!ids.is_empty(), "{} needs system_ids", args.action);
     Ok(ids)
+}
+
+/// `trading_select`: the filters the person's words become. Every one is
+/// optional; with none, every system matches.
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct TradingSelectArgs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    symbol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    running: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pnl_pct_min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pnl_pct_max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pnl_usd_min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pnl_usd_max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    idle_minutes: Option<u64>,
+}
+
+/// `10,25` (Spanish decimal comma), the way the desk writes numbers.
+fn es_number(value: f64) -> String {
+    format!("{value:.2}").replace('.', ",")
+}
+
+/// `2 h 5 min` / `18 min`, for how long a system has been quiet.
+fn es_idle(ms: i64) -> String {
+    let minutes = ms.max(0) / 60_000;
+    if minutes < 60 {
+        format!("{minutes} min")
+    } else {
+        let hours = minutes / 60;
+        let rest = minutes % 60;
+        if rest == 0 {
+            format!("{hours} h")
+        } else {
+            format!("{hours} h {rest} min")
+        }
+    }
+}
+
+/// Why a system is in the answer: its state, its day and how long it has been
+/// quiet, in the person's language.
+fn system_why(system: &Value, now: i64) -> String {
+    let running = system.get("running").and_then(Value::as_bool).unwrap_or(false);
+    let mut parts = vec![if running { "en marcha" } else { "parado" }.to_string()];
+    match system.get("pnlPct").and_then(Value::as_f64) {
+        Some(pct) if pct < 0.0 => parts.push(format!("pierde {} % hoy", es_number(-pct))),
+        Some(pct) if pct > 0.0 => parts.push(format!("gana {} % hoy", es_number(pct))),
+        Some(_) => parts.push("0,00 % hoy".into()),
+        None => {
+            if let Some(day) = system.get("pnlDay").and_then(Value::as_f64) {
+                if day < 0.0 {
+                    parts.push(format!("pierde {} $ hoy", es_number(-day)));
+                } else if day > 0.0 {
+                    parts.push(format!("gana {} $ hoy", es_number(day)));
+                }
+            }
+        }
+    }
+    match system.get("lastActivityAt").and_then(Value::as_i64) {
+        Some(at) => parts.push(format!("activo hace {}", es_idle(now.saturating_sub(at)))),
+        None => parts.push("sin actividad registrada".into()),
+    }
+    parts.join(" · ")
+}
+
+/// The systems of `systems` that pass every filter in `args`, each with the
+/// line that explains why it is there. Pure, so the rules are testable without
+/// a desk: `now` decides what "idle" means.
+fn select_systems(systems: &[Value], args: &TradingSelectArgs, now: i64) -> Vec<Value> {
+    let symbol = args
+        .symbol
+        .as_deref()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty());
+    let mut matched = Vec::new();
+    for system in systems {
+        let Some(id) = system.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let system_symbol = system.get("symbol").and_then(Value::as_str).unwrap_or("");
+        if let Some(needle) = &symbol {
+            if !system_symbol.to_lowercase().contains(needle.as_str()) {
+                continue;
+            }
+        }
+        let running = system.get("running").and_then(Value::as_bool).unwrap_or(false);
+        if args.running.is_some_and(|want| want != running) {
+            continue;
+        }
+        // A percent bound needs a percent: a system without capital has no
+        // place in "los que pierden más de 1 %".
+        let pnl_pct = system.get("pnlPct").and_then(Value::as_f64);
+        if args.pnl_pct_min.is_some() || args.pnl_pct_max.is_some() {
+            let Some(pct) = pnl_pct else { continue };
+            if args.pnl_pct_min.is_some_and(|min| pct < min) {
+                continue;
+            }
+            if args.pnl_pct_max.is_some_and(|max| pct > max) {
+                continue;
+            }
+        }
+        let pnl_day = system.get("pnlDay").and_then(Value::as_f64);
+        if args.pnl_usd_min.is_some() || args.pnl_usd_max.is_some() {
+            let Some(day) = pnl_day else { continue };
+            if args.pnl_usd_min.is_some_and(|min| day < min) {
+                continue;
+            }
+            if args.pnl_usd_max.is_some_and(|max| day > max) {
+                continue;
+            }
+        }
+        let last_activity = system.get("lastActivityAt").and_then(Value::as_i64);
+        if let Some(minutes) = args.idle_minutes {
+            let idle_ms = (minutes.min(i64::MAX as u64 / 60_000) * 60_000) as i64;
+            // Never having logged counts as idle: the bot has shown no life.
+            if last_activity.is_some_and(|at| now.saturating_sub(at) < idle_ms) {
+                continue;
+            }
+        }
+        matched.push(json!({
+            "id": id,
+            "name": system.get("name").cloned().unwrap_or(Value::Null),
+            "symbol": system_symbol,
+            "running": running,
+            "pnlDay": pnl_day,
+            "pnlPct": pnl_pct,
+            "lastActivityAt": last_activity,
+            "why": system_why(system, now),
+        }));
+    }
+    matched
 }
 
 /// The desk's state, trimmed to what an agent reasons about.
@@ -436,7 +588,7 @@ fn summarize_trading(snapshot: &Value, logs: usize) -> Value {
             "systems",
             &[
                 "id", "name", "running", "symbol", "timeframe", "pnlDay", "capital", "pnlPct",
-                "description", "rules",
+                "lastActivityAt", "description", "rules",
             ]
         ),
         "tasks": list("tasks", &["id", "kind", "status", "runAt", "systemIds"]),
@@ -1019,6 +1171,7 @@ impl Tools {
             SHOW_IMAGE => self.show_image(parse(args)?).await,
             WAIT_ON_BACKGROUND => self.wait_on_background(parse(args)?).await,
             TRADING_SNAPSHOT_TOOL => self.trading_snapshot(parse(args)?).await,
+            TRADING_SELECT_TOOL => self.trading_select(parse(args)?).await,
             TRADING_PROPOSE_TOOL => self.trading_propose(parse(args)?).await,
             theme if themes::NAMES.contains(&theme) => {
                 return self.themes(theme, args).await;
@@ -1144,6 +1297,47 @@ impl Tools {
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+    }
+
+    async fn trading_select(&self, args: TradingSelectArgs) -> anyhow::Result<Value> {
+        for (min, max, name) in [
+            (args.pnl_pct_min, args.pnl_pct_max, "pnl_pct"),
+            (args.pnl_usd_min, args.pnl_usd_max, "pnl_usd"),
+        ] {
+            if let (Some(min), Some(max)) = (min, max) {
+                anyhow::ensure!(min <= max, "{name}_min is greater than {name}_max");
+            }
+        }
+        let snapshot = self
+            .zeron
+            .call(zeron_rpc::methods::TRADING_SNAPSHOT, json!({}))
+            .await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let systems = snapshot
+            .get("systems")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let matched = select_systems(systems, &args, now);
+        let count = matched.len();
+        let mut answer = json!({
+            "criteria": args,
+            "count": count,
+            "matched": matched,
+        });
+        if count == 0 {
+            answer["note"] = json!(
+                "No system matches those filters: say so and do not propose anything for them."
+            );
+        } else {
+            answer["note"] = json!(
+                "Pass these `id`s together as system_ids to one trading_propose (start_systems / stop_systems); never invent ids."
+            );
+        }
+        Ok(answer)
     }
 
     async fn whoami(&self) -> anyhow::Result<Value> {
@@ -2413,8 +2607,29 @@ mod tests {
                         "pnlDay": 127.4,
                         "capital": 12500,
                         "pnlPct": 1.02,
+                        "lastActivityAt": 900,
                         "description": "cruce de medias",
                         "rules": { "entrada": "cruce" },
+                    }, {
+                        "id": "02_b",
+                        "name": "B",
+                        "running": true,
+                        "active": true,
+                        "symbol": "NQ",
+                        "timeframe": "M5",
+                        "pnlDay": -42.1,
+                        "capital": 8000,
+                        "pnlPct": -0.53,
+                        "lastActivityAt": 950,
+                    }, {
+                        "id": "03_c",
+                        "name": "C",
+                        "running": false,
+                        "active": false,
+                        "symbol": "XAUUSD",
+                        "timeframe": "H1",
+                        "pnlDay": -12.5,
+                        "lastActivityAt": 800,
                     }],
                     "positions": [],
                     "logs": [],
@@ -2542,6 +2757,131 @@ mod tests {
         assert_eq!(answer["systems"][0]["rules"]["entrada"], "cruce");
         assert_eq!(answer["systems"][0]["capital"], 12500);
         assert_eq!(answer["systems"][0]["pnlPct"], 1.02);
+        assert_eq!(answer["systems"][0]["lastActivityAt"], 900);
+    }
+
+    #[tokio::test]
+    async fn trading_select_answers_with_the_ids_and_why_they_match() {
+        let world = Arc::new(World::default());
+        let tools = tools(world, Origin::default());
+        let answer = tools
+            .call(TRADING_SELECT_TOOL, json!({ "running": false }))
+            .await
+            .unwrap();
+        assert_eq!(answer["count"], 2, "{answer}");
+        assert_eq!(answer["criteria"]["running"], false);
+        assert_eq!(answer["matched"][0]["id"], "01_a");
+        assert_eq!(answer["matched"][1]["id"], "03_c");
+        let why = answer["matched"][0]["why"].as_str().unwrap();
+        assert!(why.contains("parado"), "{why}");
+        assert!(why.contains("gana 1,02 % hoy"), "{why}");
+        assert!(
+            answer["note"].as_str().unwrap().contains("system_ids"),
+            "{answer}"
+        );
+
+        let error = tools
+            .call(
+                TRADING_SELECT_TOOL,
+                json!({ "pnl_pct_min": 2, "pnl_pct_max": 1 }),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("pnl_pct_min"), "{error}");
+    }
+
+    #[test]
+    fn trading_select_filters_by_symbol_state_money_and_idle_time() {
+        let now = 1_000_000_000_000i64;
+        let systems = vec![
+            json!({"id":"a","name":"A","symbol":"EURUSD","running":true,
+                   "pnlDay":50.0,"capital":10000.0,"pnlPct":0.5,
+                   "lastActivityAt": now - 60_000}),
+            json!({"id":"b","name":"B","symbol":"NQ","running":true,
+                   "pnlDay":-120.0,"capital":8000.0,"pnlPct":-1.5,
+                   "lastActivityAt": now - 45 * 60_000}),
+            json!({"id":"c","name":"C","symbol":"EURUSD","running":false,
+                   "pnlDay":-3.0,"lastActivityAt": now - 5 * 60_000}),
+            json!({"id":"d","name":"D","symbol":"XAUUSD","running":false,
+                   "pnlDay":-30.0,"capital":5000.0,"pnlPct":-0.6}),
+        ];
+        let ids = |args: TradingSelectArgs| {
+            select_systems(&systems, &args, now)
+                .iter()
+                .map(|system| system["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(TradingSelectArgs::default()),
+            ["a", "b", "c", "d"],
+            "no filters: every system"
+        );
+        assert_eq!(
+            ids(TradingSelectArgs {
+                symbol: Some("eurusd".into()),
+                ..Default::default()
+            }),
+            ["a", "c"]
+        );
+        assert_eq!(
+            ids(TradingSelectArgs {
+                running: Some(false),
+                ..Default::default()
+            }),
+            ["c", "d"]
+        );
+        assert_eq!(
+            ids(TradingSelectArgs {
+                pnl_pct_max: Some(-1.0),
+                ..Default::default()
+            }),
+            ["b"],
+            "a system without capital has no percent"
+        );
+        assert_eq!(
+            ids(TradingSelectArgs {
+                pnl_usd_min: Some(0.0),
+                ..Default::default()
+            }),
+            ["a"]
+        );
+        assert_eq!(
+            ids(TradingSelectArgs {
+                idle_minutes: Some(30),
+                ..Default::default()
+            }),
+            ["b", "d"],
+            "never having logged counts as idle"
+        );
+        assert_eq!(
+            ids(TradingSelectArgs {
+                pnl_usd_max: Some(-10.0),
+                idle_minutes: Some(5),
+                ..Default::default()
+            }),
+            ["b", "d"]
+        );
+
+        let losers = select_systems(
+            &systems,
+            &TradingSelectArgs {
+                pnl_pct_max: Some(-1.0),
+                ..Default::default()
+            },
+            now,
+        );
+        assert_eq!(
+            losers[0]["why"],
+            "en marcha · pierde 1,50 % hoy · activo hace 45 min"
+        );
+        let never = &select_systems(&systems, &TradingSelectArgs::default(), now)[3];
+        assert!(
+            never["why"]
+                .as_str()
+                .unwrap()
+                .contains("sin actividad registrada"),
+            "{never}"
+        );
     }
 
     #[tokio::test]
