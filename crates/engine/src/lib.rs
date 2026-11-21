@@ -474,6 +474,23 @@ impl EngineCore {
                 );
             }));
         }
+        // A scheduled start/stop that could not run (or whose time passed with
+        // Aurea off) rings: it is the one thing the desk did not do, and the
+        // person may be away. Tasks that simply ran stay in the log.
+        if let Some(engine) = &trading_engine {
+            let data_dir = data_dir.to_path_buf();
+            let focus = viewport_focus.clone();
+            engine
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .set_task_listener(std::sync::Arc::new(move |_task, status, note| {
+                    let title = match status {
+                        zeron_proto::trading::TaskStatus::Missed => "Aurea · tarea perdida",
+                        _ => "Aurea · tarea fallida",
+                    };
+                    desktop_notify::post_for(&data_dir, &focus, "trading-task", title, note, None);
+                }));
+        }
         Ok(Self {
             sessions,
             doc_host,

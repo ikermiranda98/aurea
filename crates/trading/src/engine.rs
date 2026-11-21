@@ -15,6 +15,11 @@ use crate::store::Store;
 use crate::tasks;
 use crate::{SnapshotWatch};
 
+/// Told when a scheduled task ends in `Failed` or `Missed`, with the note the
+/// person would read: the desk says out loud what did not happen. A task that
+/// simply ran does not call it (the desk and the log already show it).
+pub type TaskListener = Arc<dyn Fn(&Task, TaskStatus, &str) + Send + Sync>;
+
 /// The trading engine.
 pub struct TradingEngine {
     store: Store,
@@ -22,6 +27,7 @@ pub struct TradingEngine {
     systems_dir: Option<PathBuf>,
     cancel: Arc<std::sync::atomic::AtomicBool>,
     watch: watch::Sender<Snapshot>,
+    task_listener: Arc<Mutex<Option<TaskListener>>>,
     _scheduler: tokio::task::JoinHandle<()>,
 }
 
@@ -66,6 +72,8 @@ impl TradingEngine {
         let watch_clone = watch.clone();
         let cancel_clone = Arc::clone(&cancel);
         let scheduler_dir = systems_dir.clone();
+        let task_listener: Arc<Mutex<Option<TaskListener>>> = Arc::new(Mutex::new(None));
+        let listener_clone = Arc::clone(&task_listener);
 
         let scheduler = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -94,6 +102,15 @@ impl TradingEngine {
                     );
                     drop(conn);
                     if let Some(note) = note {
+                        if matches!(status, TaskStatus::Failed | TaskStatus::Missed) {
+                            let listener = listener_clone
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .clone();
+                            if let Some(listener) = listener {
+                                listener(task, status, &note);
+                            }
+                        }
                         state_clone.lock().unwrap().push_log(
                             zeron_proto::trading::LogLevel::Info,
                             "motor",
@@ -121,6 +138,7 @@ impl TradingEngine {
             systems_dir,
             cancel,
             watch,
+            task_listener,
             _scheduler: scheduler,
         };
 
@@ -144,6 +162,15 @@ impl TradingEngine {
 
     pub fn watch(&self) -> SnapshotWatch {
         self.watch.subscribe()
+    }
+
+    /// The desk's news hook for scheduled tasks that did not do their job
+    /// (`Failed` or `Missed`); set once by the engine's assembly.
+    pub fn set_task_listener(&self, listener: TaskListener) {
+        *self
+            .task_listener
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(listener);
     }
 
     pub fn start_system(&self, system_id: &str) -> Result<(), TradingError> {
@@ -1148,6 +1175,13 @@ mod tests {
         let mut engine = TradingEngine::new(None, None).unwrap();
         // An empty pool: the task is due, there is nothing to start, so the
         // desk must say failed (before, it marked every due task ran).
+        let fired: Arc<Mutex<Vec<(String, TaskStatus, String)>>> = Arc::default();
+        let sink = fired.clone();
+        engine.set_task_listener(Arc::new(move |task, status, note| {
+            sink.lock()
+                .unwrap()
+                .push((task.id.clone(), status, note.to_owned()));
+        }));
         let task = engine
             .task_add(&TaskAddInput {
                 kind: TaskKind::StartSystems,
@@ -1167,5 +1201,48 @@ mod tests {
             "{:?}",
             snap.logs.last()
         );
+        // The person is told, once, with the same sentence as the log.
+        let fired = fired.lock().unwrap();
+        assert_eq!(fired.len(), 1, "{fired:?}");
+        assert_eq!(fired[0].0, task.id);
+        assert_eq!(fired[0].1, TaskStatus::Failed);
+        assert!(fired[0].2.contains("no hay sistemas"), "{:?}", fired[0]);
+    }
+
+    #[tokio::test]
+    async fn a_task_whose_time_passed_while_aurea_was_off_rings_once() {
+        let mut engine = TradingEngine::new(None, None).unwrap();
+        let fired: Arc<Mutex<Vec<(TaskStatus, String)>>> = Arc::default();
+        let sink = fired.clone();
+        engine.set_task_listener(Arc::new(move |_task, status, note| {
+            sink.lock().unwrap().push((status, note.to_owned()));
+        }));
+        let task = engine
+            .task_add(&TaskAddInput {
+                kind: TaskKind::StopSystems,
+                system_ids: Some(vec![]),
+                delay_minutes: Some(5.0),
+                at_time: None,
+            })
+            .unwrap();
+        // As if its time had passed long before this engine was watching.
+        {
+            let store = engine.store();
+            let conn = store.conn();
+            conn.lock().unwrap().execute(
+                "UPDATE trading_task SET run_at=?1 WHERE id=?2",
+                rusqlite::params![now_ms() - TASK_GRACE_MS - 60_000, task.id],
+            )
+            .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let fired = fired.lock().unwrap();
+        assert_eq!(fired.len(), 1, "{fired:?}");
+        assert_eq!(fired[0].0, TaskStatus::Missed);
+        assert!(fired[0].1.contains("Tarea perdida"), "{:?}", fired[0]);
+        // It is not run late: the stored task stays missed.
+        let snap = engine.snapshot();
+        let stored = snap.tasks.iter().find(|t| t.id == task.id).unwrap();
+        assert_eq!(stored.status, TaskStatus::Missed, "{stored:?}");
     }
 }
