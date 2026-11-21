@@ -307,7 +307,7 @@ fn trading_catalog() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: TRADING_SNAPSHOT_TOOL,
-            description: "Aurea's trading desk right now: whether it is the DEMO fixture or a live TWS paper link, the shown account (equity, cash, P&L of the day), open positions (symbol, side, size, entry, current price, P&L) plus how many are open across every account, the bot systems (running or not, symbol, P&L), scheduled tasks, connections, the newest engine log rows, and any pending proposals. Read-only; call it before answering about positions or proposing anything.",
+            description: "Aurea's trading desk right now: whether it is the DEMO fixture or a live TWS paper link, the shown account (equity, cash, P&L of the day), open positions (symbol, side, size, entry, current price, P&L) plus how many are open across every account, the bot systems (running or not, symbol, P&L, and their own idea and rules when the folder has them), scheduled tasks, connections, the newest engine log rows, the proposals still waiting (`pendingProposals`) and the last answered ones (`recentProposals`). Read-only; call it before answering about positions, before proposing anything, and when the person asks how a proposal ended.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -317,7 +317,7 @@ fn trading_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: TRADING_PROPOSE_TOOL,
-            description: "Ask the person to run a money or bot action on the trading desk. It NEVER runs by itself: it appears on the desk with Approve / Reject, and this call waits (default 120 s) for the answer and returns it (approved and its verdict, rejected, or still pending). Actions: close_position (needs symbol, exactly as trading_snapshot names it), close_all (every closable position of the engine account), panic (stop every bot, cancel pending tasks, close everything), start_system / stop_system (need system_id). Always give a short reason in the person's language; propose one action at a time and only when the person asked for it or clearly agreed.",
+            description: "Ask the person to run a money or bot action on the trading desk. It NEVER runs by itself: it appears at once as a card in this chat, above the composer, with Approve / Reject. It returns immediately (default), so do not wait: tell the person the card is waiting and do not propose the same action again. When they write again, `trading_snapshot` shows in `pendingProposals` / `recentProposals` what they decided. Actions: close_position (needs symbol, exactly as trading_snapshot names it), close_all (every closable position of the engine account), panic (stop every bot, cancel pending tasks, close everything), start_system / stop_system (need system_id, as trading_snapshot lists it). Always give a short reason in the person's language; propose one action at a time and only when the person asked for it or clearly agreed.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -325,7 +325,7 @@ fn trading_catalog() -> Vec<ToolDef> {
                     "symbol": { "type": "string", "description": "close_position: the position's symbol." },
                     "system_id": { "type": "string", "description": "start_system / stop_system: the system id." },
                     "reason": { "type": "string", "description": "One line the person reads beside the buttons." },
-                    "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 600, "description": "How long to wait for the answer (default 120). 0 returns at once." }
+                    "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 600, "description": "0 (default) returns at once with the card waiting. Use a positive value only when you must know the answer in this same turn (the person may not answer within it)." }
                 },
                 "required": ["action", "reason"]
             }),
@@ -391,6 +391,20 @@ fn summarize_trading(snapshot: &Value, logs: usize) -> Value {
                 .collect()
         })
         .unwrap_or_default();
+    let mut answered: Vec<Value> = snapshot
+        .get("proposals")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter(|p| p.get("status").and_then(Value::as_str) != Some("pending"))
+                .map(|p| pick(p, &["id", "action", "reason", "status", "result", "resolvedAt"]))
+                .collect()
+        })
+        .unwrap_or_default();
+    answered.sort_by_key(|row| {
+        std::cmp::Reverse(row.get("resolvedAt").and_then(Value::as_i64).unwrap_or(0))
+    });
+    answered.truncate(5);
     json!({
         "mode": if demo { "demo (invented data, nothing real)" } else { "live (TWS paper)" },
         "connected": snapshot.get("connected").cloned().unwrap_or(Value::Null),
@@ -400,10 +414,14 @@ fn summarize_trading(snapshot: &Value, logs: usize) -> Value {
             .unwrap_or(Value::Null),
         "positions": list("positions", &["symbol", "side", "size", "entry", "current", "pnl", "pnlPct"]),
         "openPositionsAllAccounts": snapshot.get("openPositions").and_then(Value::as_array).map(Vec::len),
-        "systems": list("systems", &["id", "name", "running", "symbol", "timeframe", "pnlDay"]),
+        "systems": list(
+            "systems",
+            &["id", "name", "running", "symbol", "timeframe", "pnlDay", "description", "rules"]
+        ),
         "tasks": list("tasks", &["id", "kind", "status", "runAt", "systemIds"]),
         "links": list("links", &["id", "label", "broker", "connected"]),
         "pendingProposals": pending,
+        "recentProposals": answered,
         "recentLogs": recent_logs,
     })
 }
@@ -1062,7 +1080,14 @@ impl Tools {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("the desk did not return a proposal id"))?
             .to_owned();
-        let wait = Duration::from_secs(args.wait_seconds.unwrap_or(120).min(600));
+        let wait = Duration::from_secs(args.wait_seconds.unwrap_or(0).min(600));
+        if wait.is_zero() {
+            return Ok(json!({
+                "id": id,
+                "status": "pending",
+                "note": "The card is in this chat, waiting for the person to approve or reject. Do not propose it again; when they write again, trading_snapshot shows in pendingProposals / recentProposals what they decided.",
+            }));
+        }
         let deadline = Instant::now() + wait;
         loop {
             let snapshot = self
@@ -2340,6 +2365,46 @@ mod tests {
                     }
                     RpcReply::Value(json!({ "commandId": "cmd-1", "id": "q-1" }))
                 }
+                methods::TRADING_PROPOSE => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params.clone()));
+                    RpcReply::Value(json!({
+                        "id": "p-new",
+                        "action": params["action"],
+                        "reason": params["reason"],
+                        "status": "pending",
+                        "createdAt": 100,
+                    }))
+                }
+                methods::TRADING_SNAPSHOT => RpcReply::Value(json!({
+                    "version": "0.1.0-mock",
+                    "connected": false,
+                    "systems": [{
+                        "id": "01_a",
+                        "name": "A",
+                        "running": false,
+                        "active": false,
+                        "symbol": "EURUSD",
+                        "timeframe": "M15",
+                        "description": "cruce de medias",
+                        "rules": { "entrada": "cruce" },
+                    }],
+                    "positions": [],
+                    "logs": [],
+                    "tasks": [],
+                    "proposals": [
+                        { "id": "p-new", "action": { "kind": "close_all" }, "reason": "ya",
+                          "status": "pending", "createdAt": 100 },
+                        { "id": "p-old", "action": { "kind": "panic" }, "reason": "antes",
+                          "status": "done", "result": "todo cerrado", "createdAt": 1,
+                          "resolvedAt": 50 },
+                        { "id": "p-mid", "action": { "kind": "close_all" }, "reason": "medio",
+                          "status": "failed", "result": "sin contrato", "createdAt": 2,
+                          "resolvedAt": 20 },
+                    ],
+                })),
                 methods::DEVICE_STATS if self.stats.is_some() => {
                     self.reads
                         .lock()
@@ -2368,6 +2433,55 @@ mod tests {
             assert_eq!(def.input_schema["type"], "object", "{}", def.name);
             assert!(!def.description.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn a_proposal_returns_at_once_and_leaves_the_card_in_the_chat() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: Some("dev-local".into()),
+                ..Default::default()
+            },
+        );
+        let answer = tools
+            .call(
+                TRADING_PROPOSE_TOOL,
+                json!({
+                    "action": "stop_system",
+                    "system_id": "01_a",
+                    "reason": "parar por la noche",
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer["status"], "pending", "{answer}");
+        assert!(answer["note"].as_str().unwrap().contains("card"), "{answer}");
+        let writes = world.writes.lock().unwrap().clone();
+        assert_eq!(writes.len(), 1, "a non-blocking proposal never polls");
+        assert_eq!(writes[0].0, methods::TRADING_PROPOSE);
+        assert_eq!(writes[0].1["chatId"], "chat-alpha-1");
+        assert_eq!(writes[0].1["action"]["kind"], "stop_system");
+        assert_eq!(writes[0].1["action"]["system_id"], "01_a");
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_brings_the_queue_the_verdicts_and_the_system_rules() {
+        let world = Arc::new(World::default());
+        let answer = tools(world, Origin::default())
+            .call(TRADING_SNAPSHOT_TOOL, json!({}))
+            .await
+            .unwrap();
+        assert_eq!(answer["mode"], "demo (invented data, nothing real)");
+        assert_eq!(answer["pendingProposals"].as_array().unwrap().len(), 1);
+        let recent = answer["recentProposals"].as_array().unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0]["id"], "p-old", "newest verdict first");
+        assert_eq!(recent[0]["result"], "todo cerrado");
+        assert_eq!(answer["systems"][0]["description"], "cruce de medias");
+        assert_eq!(answer["systems"][0]["rules"]["entrada"], "cruce");
     }
 
     #[tokio::test]

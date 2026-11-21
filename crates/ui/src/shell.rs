@@ -1905,6 +1905,9 @@ pub struct Shell {
     nav: NavHistory,
     /// The trading desk, made on its first render.
     trading_page: Option<Entity<crate::trading::TradingSurface>>,
+    /// Proposal ids the shell has already seen: a NEW pending one opens the
+    /// chat drawer once, and closing it by hand is never undone.
+    seen_proposals: std::collections::HashSet<String>,
     /// B7: the close gate's state for this window (`shell/trading_gate.rs`).
     trading_gate: trading_gate::TradingGate,
     archived_page: Option<Entity<ArchivedPage>>,
@@ -2391,6 +2394,7 @@ impl Shell {
             settings_search: None,
             nav,
             trading_page: None,
+            seen_proposals: Default::default(),
             trading_gate: Default::default(),
             archived_page: None,
             appearance_page: None,
@@ -8087,6 +8091,24 @@ impl Shell {
             )
     }
 
+    /// Opens the chat drawer when the desk has a new request for the person:
+    /// the proposal's Approve / Reject card lives there. Only ids not seen
+    /// before count, so closing the drawer by hand is never undone while the
+    /// same request waits; an answered request leaves the list and a later one
+    /// opens it again.
+    fn note_proposals(
+        &mut self,
+        page: &Entity<crate::trading::TradingSurface>,
+        cx: &mut Context<Self>,
+    ) {
+        let pending = page.read(cx).pending_proposal_ids();
+        let fresh = pending.iter().any(|id| !self.seen_proposals.contains(id));
+        self.seen_proposals = pending.into_iter().collect();
+        if fresh && self.settings.sidebar_collapsed {
+            self.toggle_sidebar(cx);
+        }
+    }
+
     /// Aurea's one page: the trading desk fills the window beside the chat
     /// drawer.
     fn render_trading_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -8095,7 +8117,13 @@ impl Shell {
             // The desk's heading rides the unified titlebar (see
             // `TradingSurface::titlebar_row`), so a snapshot has to redraw the
             // shell too — otherwise the bar would keep the boot-time chips.
-            cx.observe(&page, |_, _, cx| cx.notify()).detach();
+            // A new pending proposal also opens the chat drawer, where its
+            // Approve / Reject card lives.
+            cx.observe(&page, |shell, page, cx| {
+                shell.note_proposals(&page, cx);
+                cx.notify();
+            })
+            .detach();
             self.trading_page = Some(page);
         }
         let outlet = self
@@ -8223,6 +8251,13 @@ impl Shell {
         self.composer.update(cx, |composer, cx| {
             composer.set_available_width(composer_width, cx)
         });
+        // The desk's proposal inbox rides above the composer: the request and
+        // the reply share one column. The page owns the snapshot and the
+        // Approve / Reject calls; the shell only places the card.
+        let chat_inbox = self
+            .trading_page
+            .clone()
+            .and_then(|page| page.update(cx, |page, cx| page.proposal_inbox(cx)));
         let terminal_geometry =
             std::rc::Rc::new(std::cell::Cell::new(crate::terminal::dock::Geometry::new(
                 self.eval_tween(self.terminal_tween, self.terminal_target(cx)),
@@ -8450,6 +8485,15 @@ impl Shell {
                         .inset_0(),
                     )
                     .child(status)
+                    .when_some(chat_inbox, |el, inbox| {
+                        el.child(
+                            div()
+                                .w(px(composer_width))
+                                .mx_auto()
+                                .pb(px(6.0))
+                                .child(inbox),
+                        )
+                    })
                     .when(has_spaces || no_project || has_appshots, |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
                         el.child(

@@ -5,8 +5,8 @@
 //! from a click: they stage a [`Confirm`] bar that names the consequence first.
 
 use gpui::{
-    Context, Div, Entity, Hsla, IntoElement, Render, SharedString, Stateful, Task, Window, div,
-    prelude::*, px,
+    AnyElement, Context, Div, Entity, Hsla, IntoElement, Render, SharedString, Stateful, Task,
+    Window, div, prelude::*, px,
 };
 use serde_json::json;
 use zeron_proto::trading::{
@@ -508,7 +508,6 @@ impl TradingSurface {
             .flex()
             .flex_col()
             .gap(px(14.0))
-            .children(self.proposals_card(&snapshot, theme, cx))
             .child(self.kpi_strip(&snapshot, theme))
             .child(
                 div()
@@ -551,77 +550,107 @@ impl TradingSurface {
             .into_any_element()
     }
 
-    /// The agent's money requests: pending ones with Approve / Reject, then
-    /// the last few answered, so the person sees what ran.
-    fn proposals_card(
-        &self,
-        snapshot: &Snapshot,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<Div> {
-        let proposals = snapshot.proposals.clone().unwrap_or_default();
-        let pending: Vec<&TradingProposal> = proposals
-            .iter()
-            .filter(|p| p.status == ProposalStatus::Pending)
-            .collect();
-        let answered: Vec<&TradingProposal> = proposals
-            .iter()
-            .filter(|p| p.status != ProposalStatus::Pending)
-            .take(3)
-            .collect();
-        if pending.is_empty() && answered.is_empty() {
+    /// The ids of the proposals still waiting on the person. The shell opens
+    /// the chat drawer for a new one, so the card is never hidden behind it.
+    pub fn pending_proposal_ids(&self) -> Vec<String> {
+        self.snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.proposals.as_deref())
+            .map(|rows| {
+                rows.iter()
+                    .filter(|p| p.status == ProposalStatus::Pending)
+                    .map(|p| p.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The chat's inbox: the agent's pending requests with Approve / Reject,
+    /// plus the freshest verdict. It rides the drawer above the composer, so
+    /// the request and the conversation share one column; the desk keeps no
+    /// copy of it.
+    pub fn proposal_inbox(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let snapshot = self.snapshot.as_ref()?;
+        let rows = model::inbox_proposals(snapshot, now_ms());
+        if rows.is_empty() {
             return None;
         }
-        let mut rows: Vec<Div> = Vec::new();
-        for (ix, proposal) in pending.iter().enumerate() {
-            let approve_id = proposal.id.clone();
-            let reject_id = proposal.id.clone();
-            rows.push(
-                proposal_row(proposal, theme)
-                    .child(
-                        button(("trading-proposal-reject", ix), "Rechazar", ButtonTone::Ghost, theme)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.resolve_proposal(reject_id.clone(), false, cx)
-                            })),
-                    )
-                    .child(
-                        button(("trading-proposal-approve", ix), "Aprobar", ButtonTone::Primary, theme)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.resolve_proposal(approve_id.clone(), true, cx)
-                            })),
-                    ),
-            );
+        let theme = Theme::of(cx).clone();
+        let pending = rows
+            .iter()
+            .filter(|p| p.status == ProposalStatus::Pending)
+            .count();
+        let mut children: Vec<Div> = Vec::with_capacity(rows.len());
+        for (ix, proposal) in rows.iter().enumerate() {
+            let mut row = div()
+                .px(px(12.0))
+                .py(px(8.0))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .border_t_1()
+                .border_color(theme.border)
+                .child(chat_proposal_row(proposal, &theme));
+            match proposal.status {
+                ProposalStatus::Pending => {
+                    let approve = proposal.id.clone();
+                    let reject = proposal.id.clone();
+                    row = row.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .gap(px(6.0))
+                            .child(
+                                button(
+                                    ("chat-proposal-reject", ix),
+                                    "Rechazar",
+                                    ButtonTone::Ghost,
+                                    &theme,
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.resolve_proposal(reject.clone(), false, cx)
+                                })),
+                            )
+                            .child(
+                                button(
+                                    ("chat-proposal-approve", ix),
+                                    "Aprobar",
+                                    ButtonTone::Primary,
+                                    &theme,
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.resolve_proposal(approve.clone(), true, cx)
+                                })),
+                            ),
+                    );
+                }
+                status => {
+                    let (label, tone) = match status {
+                        ProposalStatus::Done => ("HECHA", theme.success),
+                        ProposalStatus::Failed => ("FALLÓ", theme.danger),
+                        _ => ("RECHAZADA", theme.text_faint),
+                    };
+                    row = row.child(div().flex().flex_row().justify_end().child(chip(label, tone)));
+                }
+            }
+            children.push(row);
         }
-        for proposal in answered {
-            let (label, tone) = match proposal.status {
-                ProposalStatus::Done => ("HECHA", theme.success),
-                ProposalStatus::Failed => ("FALLÓ", theme.danger),
-                ProposalStatus::Rejected => ("RECHAZADA", theme.text_faint),
-                ProposalStatus::Pending => ("PENDIENTE", theme.warning),
-            };
-            rows.push(
-                proposal_row(proposal, theme)
-                    .opacity(0.7)
-                    .child(chip(label, tone)),
-            );
-        }
+        let meta = if pending == 0 {
+            "respuesta".to_string()
+        } else {
+            format!("{pending} por aprobar")
+        };
         Some(
-            card(theme)
-                .border_color(if pending.is_empty() {
+            card(&theme)
+                .border_color(if pending == 0 {
                     theme.border
                 } else {
                     theme.accent.opacity(0.6)
                 })
-                .child(section_header(
-                    theme,
-                    "Peticiones del agente",
-                    SharedString::from(if pending.is_empty() {
-                        "nada pendiente".to_string()
-                    } else {
-                        format!("{} pendiente(s) de tu aprobación", pending.len())
-                    }),
-                ))
-                .children(rows),
+                .child(section_header(&theme, "Peticiones del agente", meta.into()))
+                .children(children)
+                .into_any_element(),
         )
     }
 
@@ -1504,42 +1533,32 @@ fn proposal_title(action: &ProposalAction) -> String {
     }
 }
 
-/// One proposal's text column; the caller appends its buttons or chip.
-fn proposal_row(proposal: &TradingProposal, theme: &Theme) -> Div {
+/// One proposal's text column in the chat's narrow inbox; the caller appends
+/// its buttons or status chip on their own line, so the reason is not squeezed.
+fn chat_proposal_row(proposal: &TradingProposal, theme: &Theme) -> Div {
     let detail = match &proposal.result {
         Some(result) if proposal.status != ProposalStatus::Pending => result.clone(),
         _ => proposal.reason.clone(),
     };
     div()
-        .px(px(12.0))
-        .py(px(8.0))
+        .w_full()
+        .min_w(px(0.0))
         .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .border_t_1()
-        .border_color(theme.border)
+        .flex_col()
+        .gap(px(1.0))
         .child(
             div()
-                .flex_1()
-                .min_w(px(0.0))
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .truncate()
-                        .child(SharedString::from(proposal_title(&proposal.action))),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(theme.text_muted)
-                        .truncate()
-                        .child(SharedString::from(detail)),
-                ),
+                .text_size(px(11.5))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .truncate()
+                .child(SharedString::from(proposal_title(&proposal.action))),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(theme.text_muted)
+                .truncate()
+                .child(SharedString::from(detail)),
         )
 }
 

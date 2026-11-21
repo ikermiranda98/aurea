@@ -5,7 +5,9 @@
 //! (later) trading fixtures and the MCP tool views.
 
 use chrono::{Local, TimeZone};
-use zeron_proto::trading::{Log, LogLevel, Position, Snapshot, System, Task, TaskStatus};
+use zeron_proto::trading::{
+    Log, LogLevel, Position, ProposalStatus, Snapshot, System, Task, TaskStatus, TradingProposal,
+};
 
 /// What the surface knows about its snapshot stream.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -268,6 +270,31 @@ pub fn spark_bars(snapshot: &Snapshot, max_bars: usize) -> Vec<f32> {
         .collect()
 }
 
+/// How long a answered proposal stays in the chat's inbox. Long enough to
+/// read the verdict, short enough that the strip does not turn into a log.
+pub const INBOX_ANSWERED_MS: i64 = 90_000;
+
+/// The chat's proposal inbox: every pending request (oldest first, the queue
+/// the person answers in order) followed by the freshest verdict, when it
+/// landed within [`INBOX_ANSWERED_MS`].
+pub fn inbox_proposals(snapshot: &Snapshot, now: i64) -> Vec<&TradingProposal> {
+    let rows = snapshot.proposals.as_deref().unwrap_or_default();
+    let mut pending: Vec<&TradingProposal> = rows
+        .iter()
+        .filter(|p| p.status == ProposalStatus::Pending)
+        .collect();
+    pending.sort_by_key(|p| p.created_at);
+    let answered = rows
+        .iter()
+        .filter(|p| p.status != ProposalStatus::Pending)
+        .filter(|p| {
+            p.resolved_at
+                .is_some_and(|at| at <= now && now - at <= INBOX_ANSWERED_MS)
+        })
+        .max_by_key(|p| p.resolved_at.unwrap_or(0));
+    pending.into_iter().chain(answered).collect()
+}
+
 /// Human label for a log level (Spanish).
 pub fn level_label(level: LogLevel) -> &'static str {
     match level {
@@ -441,5 +468,44 @@ mod tests {
         assert_eq!(relative(now - 120_000, now), "hace 2 min");
         assert_eq!(relative(now - 7_200_000, now), "hace 2 h");
         assert_eq!(relative(now - 172_800_000, now), "hace 2 d");
+    }
+
+    fn proposal(id: &str, status: ProposalStatus, created: i64, resolved: Option<i64>) -> TradingProposal {
+        TradingProposal {
+            id: id.into(),
+            action: ProposalAction::CloseAll,
+            reason: "probando".into(),
+            chat_id: None,
+            status,
+            created_at: created,
+            resolved_at: resolved,
+            result: None,
+        }
+    }
+
+    #[test]
+    fn the_inbox_queues_pending_and_keeps_only_a_fresh_verdict() {
+        let now = 10_000_000;
+        let queue = Snapshot {
+            proposals: Some(vec![
+                proposal("b", ProposalStatus::Pending, 20, None),
+                proposal("a", ProposalStatus::Pending, 10, None),
+                proposal("vieja", ProposalStatus::Done, 5, Some(now - INBOX_ANSWERED_MS - 1)),
+                proposal("nueva", ProposalStatus::Rejected, 30, Some(now - 5_000)),
+            ]),
+            ..snapshot()
+        };
+        let rows = inbox_proposals(&queue, now);
+        let ids: Vec<&str> = rows.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "nueva"], "oldest pending first, one verdict");
+
+        // Without a fresh answer (or before the clock catches up) only the queue shows.
+        let waiters = Snapshot {
+            proposals: Some(vec![
+                proposal("a", ProposalStatus::Done, 1, Some(now + 60_000)),
+            ]),
+            ..snapshot()
+        };
+        assert!(inbox_proposals(&waiters, now).is_empty());
     }
 }

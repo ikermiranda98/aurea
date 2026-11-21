@@ -861,6 +861,11 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::PUBLISH_IMAGE
             // Saying what the calling chat's agent waits on.
             | methods::AWAIT_BACKGROUND
+            // The trading desk's tools: the snapshot (read-only) and a
+            // proposal, which only lands as a card the person approves in
+            // the app. `TradingProposalResolve` stays the person's.
+            | methods::TRADING_SNAPSHOT
+            | methods::TRADING_PROPOSE
             // Plugins: authoring, installing (lands waiting for the person),
             // checking for updates, exporting (to Zeron's plugin-exports
             // folder only: the engine refuses an agent's `to`), and their
@@ -1496,6 +1501,9 @@ mod tests {
             // The window's own watch of the theme files.
             methods::WATCH_THEMES,
             methods::READ_TOOL_OUTPUT,
+            // Approving a trading proposal is the person's, in the app: the
+            // agent's tools only read the desk and propose.
+            methods::TRADING_PROPOSAL_RESOLVE,
         ] {
             assert!(!agent_allowed(method), "{method}");
             match agent.call(method, serde_json::json!({})).await {
@@ -1509,6 +1517,13 @@ mod tests {
         // it to Zeron's plugin-exports folder (R29).
         let asked = agent.call(methods::EXPORT_PLUGIN, serde_json::json!({})).await.unwrap();
         assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
+        // The trading tools' methods: the snapshot and a proposal (which the
+        // person still approves).
+        for method in [methods::TRADING_SNAPSHOT, methods::TRADING_PROPOSE] {
+            assert!(agent_allowed(method), "{method}");
+            let asked = agent.call(method, serde_json::json!({})).await.unwrap();
+            assert!(asked.as_str().unwrap().starts_with("Agent"), "{method}: {asked}");
+        }
         // The theme tools' methods, exactly: data only.
         for method in [methods::LIST_THEMES, methods::GET_THEME, methods::CREATE_THEME, methods::UPDATE_THEME, methods::DELETE_THEME, methods::USE_THEME] {
             assert!(agent_allowed(method), "{method}");
