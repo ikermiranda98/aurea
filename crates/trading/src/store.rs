@@ -1,4 +1,4 @@
-//! SQLite store for the trading engine — a 9-table port of Openbot's
+//! SQLite store for the trading engine - a 10-table port of Openbot's
 //! `packages/core/src/trading/sql.ts`. Self-contained: schema migrations run on
 //! open and all CRUD/helpers live here.
 
@@ -104,11 +104,24 @@ CREATE TABLE IF NOT EXISTS trading_rule (
     time_created INTEGER,
     time_updated INTEGER
 );
+CREATE TABLE IF NOT EXISTS trading_proposal (
+    id TEXT PRIMARY KEY,
+    action TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    chat_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    result TEXT,
+    time_created INTEGER,
+    time_updated INTEGER
+);
+CREATE INDEX IF NOT EXISTS trading_proposal_created_idx ON trading_proposal(created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS trading_close_lock_idx ON trading_close(lock);
 "#;
 
 /// A `Store` wraps a single SQLite connection (behind a mutex) and applies the
-/// 8-table trading schema on open.
+/// 10-table trading schema on open.
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
@@ -878,7 +891,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migration_creates_nine_tables_and_unique_index() {
+    fn migration_creates_ten_tables_and_unique_index() {
         let store = Store::open_in_memory().unwrap();
         store
             .with_conn(|conn| {
@@ -888,8 +901,9 @@ mod tests {
                 let names: Vec<String> = stmt
                     .query_map([], |r| r.get(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                assert_eq!(names.len(), 9, "expected 9 tables, got {:?}", names);
+                assert_eq!(names.len(), 10, "expected 10 tables, got {:?}", names);
                 assert!(names.iter().any(|name| name == "trading_rule"), "{names:?}");
+                assert!(names.iter().any(|name| name == "trading_proposal"), "{names:?}");
                 let idx: Option<String> = conn
                     .query_row(
                         "SELECT name FROM sqlite_master WHERE type='index' AND name='trading_close_lock_idx'",

@@ -34,6 +34,7 @@ use zeron_tws::inbound::{self, IbInbound};
 use zeron_tws::requests;
 
 use crate::ibkr::IbkrLedger;
+use crate::proposals;
 use crate::rules;
 use crate::store::Store;
 use crate::{SnapshotWatch, mock};
@@ -65,6 +66,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// Keeps the desk short: the newest 50, pending ones first kept.
+fn trim_proposals(list: &mut Vec<TradingProposal>) {
+    while list.len() > MAX_PROPOSALS {
+        match list.iter().rposition(|p| p.status != ProposalStatus::Pending) {
+            Some(old) => {
+                list.remove(old);
+            }
+            None => {
+                list.pop();
+            }
+        }
+    }
 }
 
 /// Everything one link has taught the service. Guarded as a whole: the pump
@@ -186,9 +201,13 @@ impl TradingService {
     pub fn with_store(store: Store) -> Self {
         let service = Self::new();
         *lock(&service.inner.store) = Some(store.clone());
-        // Rules outlast a restart: they live in the engine's store.
+        // Rules and requests outlast a restart: they live in the engine's store.
         if let Some(loaded) = service.inner.load_rules() {
             *lock(&service.inner.rules) = loaded;
+        }
+        if let Some(mut loaded) = service.inner.load_proposals() {
+            trim_proposals(&mut loaded);
+            *lock(&service.inner.proposals) = loaded;
         }
         service.inner.publish();
         service
@@ -372,13 +391,20 @@ impl TradingService {
 
     /// Records how a proposal ended (rejected, done, failed).
     pub fn finish_proposal(&self, id: &str, status: ProposalStatus, result: Option<String>) {
-        {
+        let updated = {
             let mut list = lock(&self.inner.proposals);
-            if let Some(p) = list.iter_mut().find(|p| p.id == id) {
-                p.status = status;
-                p.resolved_at = Some(now_ms());
-                p.result = result;
+            match list.iter_mut().find(|p| p.id == id) {
+                Some(p) => {
+                    p.status = status;
+                    p.resolved_at = Some(now_ms());
+                    p.result = result;
+                    Some(p.clone())
+                }
+                None => None,
             }
+        };
+        if let Some(proposal) = updated {
+            self.inner.save_proposal(&proposal);
         }
         self.inner.publish();
     }
@@ -659,19 +685,12 @@ impl Inner {
             resolved_at: None,
             result: None,
         };
-        let mut list = lock(&self.proposals);
-        list.insert(0, proposal.clone());
-        // Keep the desk short: the newest 50, pending ones first kept.
-        while list.len() > MAX_PROPOSALS {
-            match list.iter().rposition(|p| p.status != ProposalStatus::Pending) {
-                Some(old) => {
-                    list.remove(old);
-                }
-                None => {
-                    list.pop();
-                }
-            }
+        {
+            let mut list = lock(&self.proposals);
+            list.insert(0, proposal.clone());
+            trim_proposals(&mut list);
         }
+        self.save_proposal(&proposal);
         proposal
     }
 
@@ -689,6 +708,24 @@ impl Inner {
         let conn = store.conn();
         let conn = conn.lock().unwrap_or_else(|poison| poison.into_inner());
         let _ = rules::upsert(&conn, rule);
+    }
+
+    /// The stored requests, newest first, or `None` without a store.
+    fn load_proposals(&self) -> Option<Vec<TradingProposal>> {
+        let store = lock(&self.store).clone()?;
+        let conn = store.conn();
+        let conn = conn.lock().unwrap_or_else(|poison| poison.into_inner());
+        proposals::list(&conn, proposals::KEEP).ok()
+    }
+
+    fn save_proposal(&self, proposal: &TradingProposal) {
+        let Some(store) = lock(&self.store).clone() else {
+            return;
+        };
+        let conn = store.conn();
+        let conn = conn.lock().unwrap_or_else(|poison| poison.into_inner());
+        let _ = proposals::upsert(&conn, proposal);
+        let _ = proposals::prune(&conn, proposals::KEEP);
     }
 
     /// One rule pass. A fired rule files a proposal and publishes again; the
@@ -1181,6 +1218,54 @@ mod tests {
             .unwrap();
         assert_eq!(rung.lock().unwrap().len(), 1);
         assert_eq!(service.proposals().len(), 3);
+    }
+
+    /// The audit outlives the engine: what was asked, what the person decided
+    /// and the verdict all come back with the store.
+    #[tokio::test]
+    async fn requests_outlast_a_restart_with_their_outcome() {
+        use zeron_proto::trading::{ProposalAction, ProposalStatus};
+        let store = Store::open_in_memory().unwrap();
+        let service = TradingService::with_store(store.clone());
+        let pending = service.propose(
+            ProposalAction::CloseAll,
+            "cierra todo".into(),
+            Some("chat-1".into()),
+        );
+        let done = service.propose(
+            ProposalAction::Panic,
+            "pánico".into(),
+            Some("chat-1".into()),
+        );
+        service.finish_proposal(&done.id, ProposalStatus::Done, Some("todo cerrado".into()));
+
+        let restarted = TradingService::with_store(store.clone());
+        let back = restarted.proposals();
+        assert_eq!(back.len(), 2);
+        let restored_done = back.iter().find(|p| p.id == done.id).unwrap();
+        assert_eq!(restored_done.status, ProposalStatus::Done);
+        assert_eq!(restored_done.result.as_deref(), Some("todo cerrado"));
+        assert_eq!(
+            back.iter().find(|p| p.id == pending.id).unwrap().status,
+            ProposalStatus::Pending
+        );
+        // The desk snapshot carries them again: the card and the audit survive.
+        assert_eq!(restarted.snapshot().proposals.unwrap_or_default().len(), 2);
+
+        // Answering a restored request is persisted too.
+        restarted.finish_proposal(
+            &pending.id,
+            ProposalStatus::Rejected,
+            Some("Rechazada en la mesa.".into()),
+        );
+        let third = TradingService::with_store(store);
+        let rejected = third
+            .proposals()
+            .into_iter()
+            .find(|p| p.id == pending.id)
+            .unwrap();
+        assert_eq!(rejected.status, ProposalStatus::Rejected);
+        assert_eq!(rejected.resolved_at.is_some(), true);
     }
 
     /// A TWS that completes the handshake and hands the socket to the test.
