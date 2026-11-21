@@ -55,6 +55,9 @@ pub mod methods {
     pub const TRADING_TASK_LIST: &str = "TradingTaskList";
     pub const TRADING_TASK_ADD: &str = "TradingTaskAdd";
     pub const TRADING_TASK_CANCEL: &str = "TradingTaskCancel";
+    pub const TRADING_RULE_LIST: &str = "TradingRuleList";
+    pub const TRADING_RULE_ADD: &str = "TradingRuleAdd";
+    pub const TRADING_RULE_CANCEL: &str = "TradingRuleCancel";
     pub const TRADING_POSITION_CLOSE: &str = "TradingPositionClose";
     pub const TRADING_POSITIONS_CLOSE_ALL: &str = "TradingPositionsCloseAll";
     pub const TRADING_PANIC: &str = "TradingPanic";
@@ -866,6 +869,12 @@ pub fn agent_allowed(method: &str) -> bool {
             // the app. `TradingProposalResolve` stays the person's.
             | methods::TRADING_SNAPSHOT
             | methods::TRADING_PROPOSE
+            // Watch rules: adding or cancelling one only makes the desk watch
+            // or stop watching; a fired rule lands as a proposal the person
+            // still has to approve.
+            | methods::TRADING_RULE_LIST
+            | methods::TRADING_RULE_ADD
+            | methods::TRADING_RULE_CANCEL
             // Plugins: authoring, installing (lands waiting for the person),
             // checking for updates, exporting (to Zeron's plugin-exports
             // folder only: the engine refuses an agent's `to`), and their
@@ -1517,12 +1526,20 @@ mod tests {
         // it to Zeron's plugin-exports folder (R29).
         let asked = agent.call(methods::EXPORT_PLUGIN, serde_json::json!({})).await.unwrap();
         assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
-        // The trading tools' methods: the snapshot and a proposal (which the
-        // person still approves).
+        // The trading tools' methods: the snapshot, a proposal (which the
+        // person still approves) and the watch rules (they only watch; a fired
+        // rule still lands as a proposal).
         for method in [methods::TRADING_SNAPSHOT, methods::TRADING_PROPOSE] {
             assert!(agent_allowed(method), "{method}");
             let asked = agent.call(method, serde_json::json!({})).await.unwrap();
             assert!(asked.as_str().unwrap().starts_with("Agent"), "{method}: {asked}");
+        }
+        for method in [
+            methods::TRADING_RULE_LIST,
+            methods::TRADING_RULE_ADD,
+            methods::TRADING_RULE_CANCEL,
+        ] {
+            assert!(agent_allowed(method), "{method}");
         }
         // The theme tools' methods, exactly: data only.
         for method in [methods::LIST_THEMES, methods::GET_THEME, methods::CREATE_THEME, methods::UPDATE_THEME, methods::DELETE_THEME, methods::USE_THEME] {

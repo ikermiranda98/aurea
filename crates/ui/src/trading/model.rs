@@ -6,7 +6,8 @@
 
 use chrono::{Local, TimeZone};
 use zeron_proto::trading::{
-    Log, LogLevel, Position, ProposalStatus, Snapshot, System, Task, TaskStatus, TradingProposal,
+    Log, LogLevel, Position, ProposalStatus, Rule, Snapshot, System, Task, TaskStatus,
+    TradingProposal,
 };
 
 /// What the surface knows about its snapshot stream.
@@ -143,6 +144,13 @@ pub fn tasks_sorted(snapshot: &Snapshot) -> Vec<&Task> {
         pending(a).cmp(&pending(b)).then(a.run_at.cmp(&b.run_at))
     });
     tasks
+}
+
+/// The desk's rules, newest first (a fired one stays where it was made).
+pub fn rules_sorted(snapshot: &Snapshot) -> Vec<&Rule> {
+    let mut rules: Vec<&Rule> = snapshot.rules.as_deref().unwrap_or_default().iter().collect();
+    rules.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
+    rules
 }
 
 /// The newest log rows first.
@@ -392,6 +400,7 @@ mod tests {
             closable_positions: None,
             logs: vec![],
             tasks: vec![],
+            rules: None,
             trades: None,
             equity: Some(vec![
                 EquityPoint {
@@ -447,6 +456,31 @@ mod tests {
         let snapshot = snapshot();
         assert_eq!(systems_sorted(&snapshot)[0].id, "01_a");
         assert_eq!(positions_sorted(&snapshot)[0].symbol, "EURUSD");
+    }
+
+    #[test]
+    fn rules_are_newest_first_and_tolerate_a_fixture_without_them() {
+        let rule = |id: &str, created_at: i64| Rule {
+            id: id.into(),
+            name: id.into(),
+            condition: RuleCondition::SystemStopped {
+                system_id: "01_a".into(),
+            },
+            proposal: None,
+            reason: "avisar".into(),
+            status: RuleStatus::Watching,
+            created_at,
+            expires_at: None,
+            fired_at: None,
+            note: None,
+        };
+        let with_rules = Snapshot {
+            rules: Some(vec![rule("old", 10), rule("new", 20)]),
+            ..snapshot()
+        };
+        let ids: Vec<&str> = rules_sorted(&with_rules).iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["new", "old"]);
+        assert!(rules_sorted(&snapshot()).is_empty());
     }
 
     #[test]

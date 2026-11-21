@@ -303,13 +303,15 @@ const TRADING_SNAPSHOT_TOOL: &str = "trading_snapshot";
 const TRADING_PROPOSE_TOOL: &str = "trading_propose";
 const TRADING_SELECT_TOOL: &str = "trading_select";
 const TRADING_SCHEDULE_TOOL: &str = "trading_schedule";
+const TRADING_WATCH_TOOL: &str = "trading_watch";
+const TRADING_UNWATCH_TOOL: &str = "trading_unwatch";
 
 /// Aurea's trading desk: read freely, ask for money actions.
 fn trading_catalog() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: TRADING_SNAPSHOT_TOOL,
-            description: "Aurea's trading desk right now: whether it is the DEMO fixture or a live TWS paper link, the shown account (equity, cash, P&L of the day), open positions (symbol, side, size, entry, current price, P&L) plus how many are open across every account, the bot systems (running or not, symbol, P&L, the capital the person assigned to each one and that P&L as a percent of it, when each one last wrote to its log, and their own idea and rules when the folder has them), scheduled tasks, connections, the newest engine log rows, the proposals still waiting (`pendingProposals`) and the last answered ones (`recentProposals`). Read-only; call it before answering about positions, before proposing anything, and when the person asks how a proposal ended.",
+            description: "Aurea's trading desk right now: whether it is the DEMO fixture or a live TWS paper link, the shown account (equity, cash, P&L of the day), open positions (symbol, side, size, entry, current price, P&L) plus how many are open across every account, the bot systems (running or not, symbol, P&L, the capital the person assigned to each one and that P&L as a percent of it, when each one last wrote to its log, and their own idea and rules when the folder has them), scheduled tasks, watch rules (`rules`: condition, whether it proposes something, status and when it fired or expires), connections, the newest engine log rows, the proposals still waiting (`pendingProposals`) and the last answered ones (`recentProposals`). Read-only; call it before answering about positions, before proposing anything, and when the person asks how a proposal ended or what a rule saw.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -363,6 +365,38 @@ fn trading_catalog() -> Vec<ToolDef> {
                     "reason": { "type": "string", "description": "One line the person reads beside the buttons." }
                 },
                 "required": ["action", "reason"]
+            }),
+        },
+        ToolDef {
+            name: TRADING_WATCH_TOOL,
+            description: "Leave a watch rule on the desk: Aurea checks it on every update (once a second while it runs) and, when it holds, notifies the person and — if the rule carries an action — leaves a proposal card in this chat. A rule NEVER acts by itself: at most it proposes, and the person approves or rejects. Use it when the person says \"avísame si…\", \"vigila…\", \"si pierde más de X %…\". Conditions: system_pnl_pct / system_pnl_usd (need system_id and at_most and/or at_least; percent is of the capital the person assigned), system_stopped (system_id), system_idle (system_id + minutes without activity), account_pnl_pct (at_most/at_least over opening equity), position_pnl_usd (symbol + at_most/at_least). `action` is optional: start_systems / stop_systems (system_ids), close_position (symbol), close_all, panic; omit it to only notify. The rule expires after expires_minutes (default 1440 = 24 h, max 30 days). It shows in the desk's Reglas section and in trading_snapshot's `rules`. Returns the rule at once.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "condition": { "type": "string", "enum": ["system_pnl_pct", "system_pnl_usd", "system_stopped", "system_idle", "account_pnl_pct", "position_pnl_usd"] },
+                    "system_id": { "type": "string", "description": "The system the condition watches, exactly as trading_snapshot lists it." },
+                    "symbol": { "type": "string", "description": "position_pnl_usd: the position's symbol; also close_position when the rule fires." },
+                    "at_most": { "type": "number", "description": "Fire when the value is at most this (a loss threshold is negative)." },
+                    "at_least": { "type": "number", "description": "Fire when the value is at least this (a profit threshold is positive)." },
+                    "minutes": { "type": "integer", "minimum": 1, "description": "system_idle: minutes without activity." },
+                    "action": { "type": "string", "enum": ["start_systems", "stop_systems", "start_system", "stop_system", "close_position", "close_all", "panic"], "description": "What to PROPOSE when the condition holds; omit to only notify." },
+                    "system_ids": { "type": "array", "items": { "type": "string" }, "description": "start/stop_systems: the system ids the proposal covers." },
+                    "name": { "type": "string", "description": "Short name for the rule's row (defaults to the reason)." },
+                    "reason": { "type": "string", "description": "One line the person reads when the rule fires and beside the buttons." },
+                    "expires_minutes": { "type": "number", "exclusiveMinimum": 0, "description": "How long it watches (default 1440 = 24 h, max 43200 = 30 days)." }
+                },
+                "required": ["condition", "reason"]
+            }),
+        },
+        ToolDef {
+            name: TRADING_UNWATCH_TOOL,
+            description: "Stop watching a rule that has not fired yet. Use the `id` trading_snapshot's `rules` lists. A fired, cancelled or expired rule cannot be cancelled again.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "rule_id": { "type": "string", "description": "The rule's id, exactly as trading_snapshot lists it." }
+                },
+                "required": ["rule_id"]
             }),
         },
     ]
@@ -422,6 +456,116 @@ struct TradingScheduleArgs {
     delay_minutes: Option<f64>,
     at_time: Option<String>,
     reason: String,
+}
+
+/// `trading_watch`: one condition over the desk plus, optionally, what to
+/// propose when it holds.
+#[derive(Debug, Deserialize)]
+struct TradingWatchArgs {
+    condition: String,
+    system_id: Option<String>,
+    symbol: Option<String>,
+    at_most: Option<f64>,
+    at_least: Option<f64>,
+    minutes: Option<u64>,
+    action: Option<String>,
+    #[serde(default)]
+    system_ids: Option<Vec<String>>,
+    name: Option<String>,
+    reason: String,
+    expires_minutes: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TradingUnwatchArgs {
+    rule_id: String,
+}
+
+/// The condition the tool's words become, refusing a missing id or threshold
+/// here rather than in the engine.
+fn watch_condition(args: &TradingWatchArgs) -> anyhow::Result<Value> {
+    let system = || -> anyhow::Result<String> {
+        args.system_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("{} needs system_id", args.condition))
+    };
+    let symbol = || -> anyhow::Result<String> {
+        args.symbol
+            .as_deref()
+            .map(str::trim)
+            .filter(|symbol| !symbol.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("{} needs symbol", args.condition))
+    };
+    let bounds = || -> anyhow::Result<(Value, Value)> {
+        anyhow::ensure!(
+            args.at_most.is_some() || args.at_least.is_some(),
+            "{} needs at_most and/or at_least",
+            args.condition
+        );
+        Ok((json!(args.at_most), json!(args.at_least)))
+    };
+    Ok(match args.condition.as_str() {
+        "system_pnl_pct" | "system_pnl_usd" => {
+            let (at_most, at_least) = bounds()?;
+            let mut value = json!({ "system_id": system()?, "at_most": at_most, "at_least": at_least });
+            value["kind"] = json!(args.condition);
+            value
+        }
+        "system_stopped" => json!({ "kind": "system_stopped", "system_id": system()? }),
+        "system_idle" => json!({
+            "kind": "system_idle",
+            "system_id": system()?,
+            "minutes": args.minutes.ok_or_else(|| anyhow::anyhow!("system_idle needs minutes"))?,
+        }),
+        "account_pnl_pct" => {
+            let (at_most, at_least) = bounds()?;
+            json!({ "kind": "account_pnl_pct", "at_most": at_most, "at_least": at_least })
+        }
+        "position_pnl_usd" => {
+            let (at_most, at_least) = bounds()?;
+            json!({ "kind": "position_pnl_usd", "symbol": symbol()?, "at_most": at_most, "at_least": at_least })
+        }
+        other => anyhow::bail!("unknown condition: {other}"),
+    })
+}
+
+/// The proposal a rule files when it fires; `None` means notify only.
+fn watch_proposal(args: &TradingWatchArgs) -> anyhow::Result<Option<Value>> {
+    let Some(action) = args
+        .action
+        .as_deref()
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+    else {
+        return Ok(None);
+    };
+    let action = match action {
+        "start_system" | "start_systems" => {
+            let listed = args.system_ids.iter().flatten();
+            json!({ "kind": "start_systems", "system_ids": collect_system_ids(action, listed)? })
+        }
+        "stop_system" | "stop_systems" => {
+            let listed = args.system_ids.iter().flatten();
+            json!({ "kind": "stop_systems", "system_ids": collect_system_ids(action, listed)? })
+        }
+        "close_position" => {
+            let symbol = args
+                .symbol
+                .as_deref()
+                .map(str::trim)
+                .filter(|symbol| !symbol.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("close_position needs symbol"))?;
+            json!({ "kind": "close_position", "symbol": symbol })
+        }
+        "close_all" => json!({ "kind": "close_all" }),
+        "panic" => json!({ "kind": "panic" }),
+        other => anyhow::bail!("unknown action: {other}"),
+    };
+    Ok(Some(action))
 }
 
 /// `trading_select`: the filters the person's words become. Every one is
@@ -634,6 +778,10 @@ fn summarize_trading(snapshot: &Value, logs: usize) -> Value {
             ]
         ),
         "tasks": list("tasks", &["id", "kind", "status", "runAt", "systemIds"]),
+        "rules": list(
+            "rules",
+            &["id", "name", "condition", "proposal", "reason", "status", "createdAt", "expiresAt", "firedAt", "note"]
+        ),
         "links": list("links", &["id", "label", "broker", "connected"]),
         "pendingProposals": pending,
         "recentProposals": answered,
@@ -1216,6 +1364,8 @@ impl Tools {
             TRADING_SELECT_TOOL => self.trading_select(parse(args)?).await,
             TRADING_PROPOSE_TOOL => self.trading_propose(parse(args)?).await,
             TRADING_SCHEDULE_TOOL => self.trading_schedule(parse(args)?).await,
+            TRADING_WATCH_TOOL => self.trading_watch(parse(args)?).await,
+            TRADING_UNWATCH_TOOL => self.trading_unwatch(parse(args)?).await,
             theme if themes::NAMES.contains(&theme) => {
                 return self.themes(theme, args).await;
             }
@@ -1396,6 +1546,56 @@ impl Tools {
             "id": id,
             "status": "pending",
             "note": "The card is in this chat, waiting for the person to approve or reject. Do not schedule it again; approving it creates the desk task, which then runs on its own at its time. trading_snapshot shows the task in tasks and the card's outcome in pendingProposals / recentProposals.",
+        }))
+    }
+
+    async fn trading_watch(&self, args: TradingWatchArgs) -> anyhow::Result<Value> {
+        anyhow::ensure!(!args.reason.trim().is_empty(), "give the person a reason");
+        let condition = watch_condition(&args)?;
+        let proposal = watch_proposal(&args)?;
+        let name = args
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(args.reason.trim())
+            .chars()
+            .take(80)
+            .collect::<String>();
+        let mut input = json!({
+            "name": name,
+            "condition": condition,
+            "reason": args.reason,
+        });
+        if let Some(proposal) = proposal {
+            input["proposal"] = proposal;
+        }
+        if let Some(minutes) = args.expires_minutes {
+            input["expiresMinutes"] = json!(minutes);
+        }
+        let rule = self
+            .zeron
+            .call(zeron_rpc::methods::TRADING_RULE_ADD, input)
+            .await?;
+        Ok(json!({
+            "rule": rule,
+            "note": "The rule is watching on the desk. When it holds, Aurea notifies the person and, if the rule carries an action, leaves a proposal card in this chat; nothing runs without their approval. Do not add it again.",
+        }))
+    }
+
+    async fn trading_unwatch(&self, args: TradingUnwatchArgs) -> anyhow::Result<Value> {
+        let rule_id = args.rule_id.trim();
+        anyhow::ensure!(!rule_id.is_empty(), "give the rule_id");
+        let rule = self
+            .zeron
+            .call(
+                zeron_rpc::methods::TRADING_RULE_CANCEL,
+                json!({ "ruleId": rule_id }),
+            )
+            .await?;
+        Ok(json!({
+            "rule": rule,
+            "note": "The rule stopped watching. A rule that already fired, expired or was cancelled cannot be cancelled again.",
         }))
     }
 
@@ -2694,6 +2894,33 @@ mod tests {
                         "createdAt": 100,
                     }))
                 }
+                methods::TRADING_RULE_ADD => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params.clone()));
+                    RpcReply::Value(json!({
+                        "id": "rul-1",
+                        "name": params["name"],
+                        "condition": params["condition"],
+                        "proposal": params.get("proposal").cloned().unwrap_or(Value::Null),
+                        "reason": params["reason"],
+                        "status": "watching",
+                        "createdAt": 100,
+                        "expiresAt": 1000,
+                    }))
+                }
+                methods::TRADING_RULE_CANCEL => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params.clone()));
+                    RpcReply::Value(json!({
+                        "id": params["ruleId"],
+                        "status": "cancelled",
+                    }))
+                }
+                methods::TRADING_RULE_LIST => RpcReply::Value(json!([])),
                 methods::TRADING_SNAPSHOT => RpcReply::Value(json!({
                     "version": "0.1.0-mock",
                     "connected": false,
@@ -2734,6 +2961,7 @@ mod tests {
                     "positions": [],
                     "logs": [],
                     "tasks": [],
+                    "rules": [],
                     "proposals": [
                         { "id": "p-new", "action": { "kind": "close_all" }, "reason": "ya",
                           "status": "pending", "createdAt": 100 },
@@ -2905,6 +3133,78 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn trading_watch_leaves_one_rule_and_refuses_a_missing_threshold() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        let answer = tools
+            .call(
+                TRADING_WATCH_TOOL,
+                json!({
+                    "condition": "system_pnl_pct",
+                    "system_id": "01_a",
+                    "at_most": -2,
+                    "action": "stop_systems",
+                    "system_ids": ["01_a"],
+                    "name": "EURUSD en rojo",
+                    "reason": "parar si pierde 2 %",
+                    "expires_minutes": 60,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer["rule"]["id"], "rul-1");
+        let writes = world.writes.lock().unwrap().clone();
+        assert_eq!(writes[0].0, methods::TRADING_RULE_ADD);
+        let input = &writes[0].1;
+        assert_eq!(input["condition"]["kind"], "system_pnl_pct");
+        assert_eq!(input["condition"]["system_id"], "01_a");
+        assert_eq!(input["condition"]["at_most"], -2.0);
+        assert!(input["condition"].get("at_least").is_some_and(Value::is_null), "{input}");
+        assert_eq!(input["proposal"]["kind"], "stop_systems");
+        assert_eq!(input["proposal"]["system_ids"], json!(["01_a"]));
+        assert_eq!(input["name"], "EURUSD en rojo");
+        assert_eq!(input["expiresMinutes"], 60.0);
+
+        // Notify only: no proposal key at all.
+        let answer = tools
+            .call(
+                TRADING_WATCH_TOOL,
+                json!({
+                    "condition": "account_pnl_pct",
+                    "at_least": 3,
+                    "reason": "avisar al +3 %",
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer["rule"]["status"], "watching");
+        let writes = world.writes.lock().unwrap().clone();
+        let input = &writes[1].1;
+        assert!(input.get("proposal").is_none(), "{input}");
+        assert_eq!(input["name"], "avisar al +3 %", "the reason is the name");
+
+        for bad in [
+            json!({ "condition": "system_pnl_pct", "system_id": "01_a", "reason": "x" }),
+            json!({ "condition": "system_pnl_pct", "at_most": -1, "reason": "x" }),
+            json!({ "condition": "system_idle", "system_id": "01_a", "reason": "x" }),
+            json!({ "condition": "position_pnl_usd", "at_most": -10, "reason": "x" }),
+            json!({ "condition": "nope", "reason": "x" }),
+            json!({ "condition": "system_stopped", "system_id": "01_a", "reason": " " }),
+        ] {
+            assert!(tools.call(TRADING_WATCH_TOOL, bad).await.is_err());
+        }
+
+        let cancelled = tools
+            .call(TRADING_UNWATCH_TOOL, json!({ "rule_id": "rul-1" }))
+            .await
+            .unwrap();
+        assert_eq!(cancelled["rule"]["status"], "cancelled");
+        let writes = world.writes.lock().unwrap().clone();
+        assert_eq!(writes.last().unwrap().0, methods::TRADING_RULE_CANCEL);
+        assert_eq!(writes.last().unwrap().1["ruleId"], "rul-1");
     }
 
     #[tokio::test]

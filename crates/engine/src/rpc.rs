@@ -2682,6 +2682,9 @@ mod trading_person_tests {
             methods::WATCH_TRADING_SNAPSHOT,
             methods::TRADING_PROPOSE,
             methods::TRADING_IBKR_DETECT,
+            methods::TRADING_RULE_LIST,
+            methods::TRADING_RULE_ADD,
+            methods::TRADING_RULE_CANCEL,
         ] {
             assert!(!trading_needs_person(method), "{method}");
         }
@@ -4671,6 +4674,23 @@ impl RpcService for EngineRpc {
                 self.require_demo_trading("Cancelar una tarea")?;
                 match zeron_trading::mock::task_cancel(&p.task_id) {
                     Ok(task) => RpcReply::value(&task),
+                    Err(error) => Err(RpcError::Failed(error.to_string())),
+                }
+            }
+            methods::TRADING_RULE_LIST => {
+                RpcReply::value(&self.trading.rules())
+            }
+            methods::TRADING_RULE_ADD => {
+                let p: zeron_proto::trading::RuleAddInput = parse_params(params)?;
+                match self.trading.add_rule(p) {
+                    Ok(rule) => RpcReply::value(&rule),
+                    Err(error) => Err(RpcError::Failed(error.to_string())),
+                }
+            }
+            methods::TRADING_RULE_CANCEL => {
+                let p: zeron_proto::trading::RuleIdParams = parse_params(params)?;
+                match self.trading.cancel_rule(&p.rule_id) {
+                    Ok(rule) => RpcReply::value(&rule),
                     Err(error) => Err(RpcError::Failed(error.to_string())),
                 }
             }

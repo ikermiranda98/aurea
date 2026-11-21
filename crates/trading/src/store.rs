@@ -1,4 +1,4 @@
-//! SQLite store for the trading engine — an 8-table port of Openbot's
+//! SQLite store for the trading engine — a 9-table port of Openbot's
 //! `packages/core/src/trading/sql.ts`. Self-contained: schema migrations run on
 //! open and all CRUD/helpers live here.
 
@@ -20,7 +20,7 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-const MIGRATION_SQL: &str = r#"
+pub(crate) const MIGRATION_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS trading_task (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -87,6 +87,20 @@ CREATE TABLE IF NOT EXISTS trading_close (
     lock TEXT,
     verdict TEXT,
     ts INTEGER NOT NULL,
+    time_created INTEGER,
+    time_updated INTEGER
+);
+CREATE TABLE IF NOT EXISTS trading_rule (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    condition TEXT NOT NULL,
+    proposal TEXT,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'watching',
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    fired_at INTEGER,
+    note TEXT,
     time_created INTEGER,
     time_updated INTEGER
 );
@@ -864,7 +878,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migration_creates_eight_tables_and_unique_index() {
+    fn migration_creates_nine_tables_and_unique_index() {
         let store = Store::open_in_memory().unwrap();
         store
             .with_conn(|conn| {
@@ -874,7 +888,8 @@ mod tests {
                 let names: Vec<String> = stmt
                     .query_map([], |r| r.get(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                assert_eq!(names.len(), 8, "expected 8 tables, got {:?}", names);
+                assert_eq!(names.len(), 9, "expected 9 tables, got {:?}", names);
+                assert!(names.iter().any(|name| name == "trading_rule"), "{names:?}");
                 let idx: Option<String> = conn
                     .query_row(
                         "SELECT name FROM sqlite_master WHERE type='index' AND name='trading_close_lock_idx'",

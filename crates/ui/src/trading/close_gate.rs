@@ -167,6 +167,7 @@ mod tests {
             closable_positions: None,
             logs: Vec::new(),
             tasks: Vec::new(),
+            rules: None,
             trades: None,
             equity: None,
             accounts: None,

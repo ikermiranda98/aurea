@@ -11,8 +11,8 @@ use gpui::{
 use serde_json::json;
 use zeron_proto::trading::{
     Broker, IbkrPort, Link, LogLevel, Mt5Detected, PanicResult, Position, PositionCloseResult,
-    PositionSide, ProposalAction, ProposalStatus, Snapshot, System, Task as TradingTask,
-    TaskKind, TaskStatus, TradingProposal,
+    PositionSide, ProposalAction, ProposalStatus, Rule, RuleStatus, Snapshot, System,
+    Task as TradingTask, TaskKind, TaskStatus, TradingProposal,
 };
 use zeron_rpc::methods;
 
@@ -543,6 +543,7 @@ impl TradingSurface {
                             .flex_col()
                             .gap(px(14.0))
                             .child(self.systems_card(&snapshot, theme, cx))
+                            .child(self.rules_card(&snapshot, theme, cx))
                             .child(self.links_card(&snapshot, theme, cx))
                             .child(self.tasks_card(&snapshot, theme, cx)),
                     ),
@@ -1265,6 +1266,112 @@ impl TradingSurface {
                     cx.notify();
                 })),
             )
+    }
+
+    fn rules_card(&self, snapshot: &Snapshot, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let rules = model::rules_sorted(snapshot);
+        let watching = rules
+            .iter()
+            .filter(|rule| rule.status == RuleStatus::Watching)
+            .count();
+        let meta = match watching {
+            0 => "ninguna vigilando".to_string(),
+            1 => "1 vigilando".to_string(),
+            n => format!("{n} vigilando"),
+        };
+        let mut rows: Vec<Div> = Vec::with_capacity(rules.len());
+        if rules.is_empty() {
+            rows.push(empty_row(theme, "Sin reglas. Pídelas en el chat."));
+        } else {
+            for (ix, rule) in rules.iter().take(6).enumerate() {
+                rows.push(self.rule_row(ix, rule, snapshot, theme, cx));
+            }
+        }
+        card(theme)
+            .child(section_header(theme, "Reglas", meta.into()))
+            .children(rows)
+    }
+
+    fn rule_row(
+        &self,
+        ix: usize,
+        rule: &Rule,
+        snapshot: &Snapshot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let (status_label, status_tone) = match rule.status {
+            RuleStatus::Watching => ("VIGILANDO", theme.accent),
+            RuleStatus::Fired => ("AVISÓ", theme.warning),
+            RuleStatus::Cancelled => ("CANCELADA", theme.text_faint),
+            RuleStatus::Expired => ("CADUCADA", theme.text_faint),
+        };
+        let expires = rule
+            .expires_at
+            .map(|at| format!("caduca {}", model::short_clock(at)))
+            .unwrap_or_else(|| "sin caducidad".to_string());
+        let mut header = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .truncate()
+                    .child(SharedString::from(rule.name.clone())),
+            )
+            .child(chip(status_label, status_tone));
+        if rule.status == RuleStatus::Watching {
+            let rule_id = rule.id.clone();
+            header = header.child(
+                button(
+                    ("trading-rule-cancel", ix),
+                    "Quitar",
+                    ButtonTone::Ghost,
+                    theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.call(
+                        methods::TRADING_RULE_CANCEL,
+                        json!({ "ruleId": rule_id.clone() }),
+                        cx,
+                    );
+                    cx.notify();
+                })),
+            );
+        }
+        let mut row = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .py(px(5.0))
+            .child(header)
+            .child(mono_line(
+                &format!(
+                    "{} · {} · {expires}",
+                    rule.condition.describe(&snapshot.systems),
+                    if rule.proposal.is_some() {
+                        "propone al cumplirse"
+                    } else {
+                        "solo avisa"
+                    }
+                ),
+                theme,
+            ));
+        if let Some(note) = &rule.note {
+            row = row.child(
+                div()
+                    .text_size(px(9.5))
+                    .text_color(theme.text_faint)
+                    .truncate()
+                    .child(SharedString::from(note.clone())),
+            );
+        }
+        row
     }
 
     fn tasks_card(&self, snapshot: &Snapshot, theme: &Theme, cx: &mut Context<Self>) -> Div {

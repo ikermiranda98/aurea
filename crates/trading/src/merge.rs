@@ -31,9 +31,11 @@ pub fn merge(engine: &Snapshot, broker: &Snapshot, broker_live: bool) -> Snapsho
     if !broker_live {
         let has_pool = !engine.systems.is_empty() || engine.systems_dir.is_some();
         return if has_pool {
-            // The desk's proposals live with the broker half, whatever mode.
+            // The desk's proposals and rules live with the broker half,
+            // whatever mode.
             Snapshot {
                 proposals: broker.proposals.clone(),
+                rules: broker.rules.clone(),
                 ..engine.clone()
             }
         } else {
@@ -56,6 +58,7 @@ pub fn merge(engine: &Snapshot, broker: &Snapshot, broker_live: bool) -> Snapsho
         closable_positions: broker.closable_positions.clone(),
         logs,
         tasks: engine.tasks.clone(),
+        rules: broker.rules.clone(),
         trades: engine.trades.clone(),
         equity: broker.equity.clone(),
         accounts: broker.accounts.clone(),

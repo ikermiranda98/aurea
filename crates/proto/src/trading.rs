@@ -256,6 +256,166 @@ pub struct TaskAddInput {
     pub at_time: Option<String>,
 }
 
+/// Where a watch rule stands. Only `Watching` is evaluated; the rest are
+/// terminal and the person sees them in the desk's "Reglas" section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleStatus {
+    Watching,
+    Fired,
+    Cancelled,
+    Expired,
+}
+
+/// What a watch rule looks at on every desk update. Percent conditions read
+/// the day's P&L over the capital the person assigned (systems) or over the
+/// account's opening equity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuleCondition {
+    SystemPnlPct {
+        system_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_most: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_least: Option<f64>,
+    },
+    SystemPnlUsd {
+        system_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_most: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_least: Option<f64>,
+    },
+    SystemStopped {
+        system_id: String,
+    },
+    SystemIdle {
+        system_id: String,
+        minutes: u64,
+    },
+    AccountPnlPct {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_most: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_least: Option<f64>,
+    },
+    PositionPnlUsd {
+        symbol: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_most: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_least: Option<f64>,
+    },
+}
+
+fn es_number(value: f64) -> String {
+    format!("{value:.2}").replace('.', ",")
+}
+
+impl RuleCondition {
+    /// The condition as one short line in the desk's words, naming systems by
+    /// their display name when the snapshot has them.
+    pub fn describe(&self, systems: &[System]) -> String {
+        let name = |id: &str| {
+            systems
+                .iter()
+                .find(|system| system.id == id)
+                .map(|system| system.name.clone())
+                .unwrap_or_else(|| id.to_owned())
+        };
+        let bounds = |unit: &str, at_most: Option<f64>, at_least: Option<f64>| match (
+            at_most, at_least,
+        ) {
+            (Some(most), Some(least)) => {
+                format!("P&L entre {} {unit} y {} {unit}", es_number(least), es_number(most))
+            }
+            (Some(most), None) => format!("P&L ≤ {} {unit}", es_number(most)),
+            (None, Some(least)) => format!("P&L ≥ {} {unit}", es_number(least)),
+            (None, None) => "P&L (sin umbral)".to_string(),
+        };
+        match self {
+            RuleCondition::SystemPnlPct {
+                system_id,
+                at_most,
+                at_least,
+            } => format!(
+                "{} · {}",
+                name(system_id),
+                bounds("%", *at_most, *at_least)
+            ),
+            RuleCondition::SystemPnlUsd {
+                system_id,
+                at_most,
+                at_least,
+            } => format!(
+                "{} · {}",
+                name(system_id),
+                bounds("$", *at_most, *at_least)
+            ),
+            RuleCondition::SystemStopped { system_id } => {
+                format!("{} se para", name(system_id))
+            }
+            RuleCondition::SystemIdle { system_id, minutes } => {
+                format!("{} lleva {minutes} min sin actividad", name(system_id))
+            }
+            RuleCondition::AccountPnlPct { at_most, at_least } => {
+                format!("La cuenta · {}", bounds("%", *at_most, *at_least))
+            }
+            RuleCondition::PositionPnlUsd {
+                symbol,
+                at_most,
+                at_least,
+            } => format!("{symbol} · {}", bounds("$", *at_most, *at_least)),
+        }
+    }
+}
+
+/// One watch rule: a condition over the desk, an optional proposal to put in
+/// front of the person when it holds, and an expiry. A rule never acts by
+/// itself: at most it creates a proposal, which still needs the person's click.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rule {
+    pub id: String,
+    pub name: String,
+    pub condition: RuleCondition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<ProposalAction>,
+    /// One line the person reads beside the buttons (or in the rule's row).
+    pub reason: String,
+    pub status: RuleStatus,
+    pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fired_at: Option<i64>,
+    /// What the desk observed when it fired, or why it expired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleAddInput {
+    pub name: String,
+    pub condition: RuleCondition,
+    /// What to propose when the condition holds; absent means notify only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<ProposalAction>,
+    pub reason: String,
+    /// How long the rule watches, in minutes. Defaults to 24 h; max 30 days.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_minutes: Option<f64>,
+}
+
+/// Used for `TradingRuleCancel`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleIdParams {
+    pub rule_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkAddInput {
@@ -374,6 +534,9 @@ pub struct Snapshot {
     pub logs: Vec<Log>,
     /// Recent scheduled tasks, newest first.
     pub tasks: Vec<Task>,
+    /// The desk's watch rules, newest first. Absent on a fixture that has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<Rule>>,
     /// Closed trades harvested from the bots' logs, newest first, capped to 200.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trades: Option<Vec<Trade>>,
@@ -659,5 +822,89 @@ mod tests {
         assert_eq!(value["system_ids"], serde_json::json!([]));
         let back: ProposalAction = serde_json::from_value(value).unwrap();
         assert_eq!(back, action);
+    }
+
+    #[test]
+    fn a_rule_roundtrips_with_its_condition_and_proposal() {
+        let rule = Rule {
+            id: "rul_1".into(),
+            name: "EURUSD en rojo".into(),
+            condition: RuleCondition::SystemPnlPct {
+                system_id: "01_eurusd_mt5".into(),
+                at_most: Some(-2.0),
+                at_least: None,
+            },
+            proposal: Some(ProposalAction::StopSystems {
+                system_ids: vec!["01_eurusd_mt5".into()],
+            }),
+            reason: "Parar si pierde 2 %".into(),
+            status: RuleStatus::Watching,
+            created_at: 10,
+            expires_at: Some(20),
+            fired_at: None,
+            note: None,
+        };
+        let value = serde_json::to_value(&rule).unwrap();
+        assert_eq!(value["condition"]["kind"], "system_pnl_pct");
+        assert_eq!(value["condition"]["system_id"], "01_eurusd_mt5");
+        assert_eq!(value["proposal"]["kind"], "stop_systems");
+        assert_eq!(value["status"], "watching");
+        let back: Rule = serde_json::from_value(value).unwrap();
+        assert_eq!(back, rule);
+
+        let add = RuleAddInput {
+            name: "Cuenta".into(),
+            condition: RuleCondition::AccountPnlPct {
+                at_most: Some(-1.0),
+                at_least: None,
+            },
+            proposal: None,
+            reason: "Avisar".into(),
+            expires_minutes: Some(60.0),
+        };
+        let value = serde_json::to_value(&add).unwrap();
+        assert_eq!(value["expiresMinutes"], 60.0);
+        assert!(value.get("proposal").is_none(), "{value}");
+        let back: RuleAddInput = serde_json::from_value(value).unwrap();
+        assert_eq!(back, add);
+    }
+
+    #[test]
+    fn a_condition_names_its_system_or_falls_back_to_its_id() {
+        let systems = vec![System {
+            id: "01".into(),
+            name: "EURUSD MT5".into(),
+            running: true,
+            active: true,
+            pid: None,
+            started_at: None,
+            symbol: "EURUSD".into(),
+            timeframe: "M15".into(),
+            pnl_day: Some(-250.0),
+            capital: Some(10_000.0),
+            pnl_pct: Some(-2.5),
+            client_id: None,
+            close_hour: None,
+            last_activity_at: None,
+            description: None,
+            rules: None,
+        }];
+        assert_eq!(
+            RuleCondition::SystemPnlPct {
+                system_id: "01".into(),
+                at_most: Some(-2.0),
+                at_least: None,
+            }
+            .describe(&systems),
+            "EURUSD MT5 · P&L ≤ -2,00 %"
+        );
+        assert_eq!(
+            RuleCondition::SystemIdle {
+                system_id: "99".into(),
+                minutes: 30,
+            }
+            .describe(&systems),
+            "99 lleva 30 min sin actividad"
+        );
     }
 }

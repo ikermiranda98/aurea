@@ -423,6 +423,41 @@ impl EngineCore {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
+        // The service shares the engine's store so the active account
+        // (`trading_meta.cuenta_activa`, lane D4) and the desk's watch rules
+        // survive a restart.
+        let trading = match &trading_engine {
+            Some(engine) => zeron_trading::TradingService::with_store(
+                engine.lock().unwrap_or_else(|p| p.into_inner()).store(),
+            ),
+            None => zeron_trading::TradingService::new(),
+        };
+        // Rules watch every desk update (the engine ticks once a second), and
+        // only ever file a proposal: the person still approves it.
+        if let Some(engine) = &trading_engine {
+            let watch = engine.lock().unwrap_or_else(|p| p.into_inner()).watch();
+            trading.follow_engine(watch);
+        }
+        // A rule that fires rings like the desk's other news, under the same
+        // Settings (notifications on, "only when in the background").
+        {
+            let data_dir = data_dir.to_path_buf();
+            let focus = viewport_focus.clone();
+            trading.set_rule_listener(std::sync::Arc::new(move |rule| {
+                let body = match &rule.note {
+                    Some(note) => format!("{}: {note}", rule.name),
+                    None => rule.reason.clone(),
+                };
+                desktop_notify::post_for(
+                    &data_dir,
+                    &focus,
+                    "trading-rule",
+                    "Aurea · regla cumplida",
+                    &body,
+                    None,
+                );
+            }));
+        }
         Ok(Self {
             sessions,
             doc_host,
@@ -447,14 +482,7 @@ impl EngineCore {
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
             viewport_focus,
-            // The service shares the engine's store so the active account
-            // (`trading_meta.cuenta_activa`, lane D4) survives a restart.
-            trading: match &trading_engine {
-                Some(engine) => zeron_trading::TradingService::with_store(
-                    engine.lock().unwrap_or_else(|p| p.into_inner()).store(),
-                ),
-                None => zeron_trading::TradingService::new(),
-            },
+            trading,
             trading_engine,
             _agent_ledger: agent_ledger,
             _instance_lock: lock,

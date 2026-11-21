@@ -354,6 +354,7 @@ impl TradingState {
             closable_positions: Some(self.positions.clone()),
             logs: self.logs.clone(),
             tasks,
+            rules: None,
             trades: if self.trades.is_empty() {
                 None
             } else {

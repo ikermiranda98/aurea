@@ -232,6 +232,7 @@ pub fn fixture() -> Snapshot {
         closable_positions: Some(positions),
         logs,
         tasks,
+        rules: None,
         trades: Some(trades),
         equity: Some(equity),
         accounts: None,

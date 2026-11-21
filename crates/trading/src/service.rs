@@ -21,18 +21,20 @@
 //! Live port 7496 is refused here, not only in the UI: this module is the last
 //! place before a socket is opened.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::{Mutex as AsyncMutex, broadcast, watch};
 use zeron_proto::trading::{
     Account, Broker, EquityPoint, Link, Log, LogLevel, ProgramState, Programs, ProposalAction,
-    ProposalStatus, Snapshot, TradingError, TradingProposal,
+    ProposalStatus, Rule, RuleAddInput, RuleStatus, Snapshot, TradingError, TradingProposal,
 };
 use zeron_tws::client::{IbClient, IbClientConfig, IbEvent};
 use zeron_tws::inbound::{self, IbInbound};
 use zeron_tws::requests;
 
 use crate::ibkr::IbkrLedger;
+use crate::rules;
 use crate::store::Store;
 use crate::{SnapshotWatch, mock};
 
@@ -122,6 +124,14 @@ struct Inner {
     inbound: broadcast::Sender<IbInbound>,
     /// Agents' money requests, newest first (see [`TradingProposal`]).
     proposals: Mutex<Vec<TradingProposal>>,
+    /// Watch rules, newest first; evaluated on every engine update.
+    rules: Mutex<Vec<Rule>>,
+    /// Told when a rule fires (the engine posts a desktop banner); `None`
+    /// keeps the desk quiet.
+    rule_listener: Mutex<Option<Arc<dyn Fn(&Rule) + Send + Sync>>>,
+    /// One rule pass at a time: a fired rule files a proposal, which publishes
+    /// again, and that second pass must not loop.
+    evaluating: AtomicBool,
 }
 
 impl Default for TradingService {
@@ -142,6 +152,9 @@ impl TradingService {
             store: Mutex::new(None),
             inbound: broadcast::channel(1024).0,
             proposals: Mutex::new(Vec::new()),
+            rules: Mutex::new(Vec::new()),
+            rule_listener: Mutex::new(None),
+            evaluating: AtomicBool::new(false),
         });
         // The demo fixture ticks every 2 s; keep forwarding it while no live
         // link owns the snapshot. Without a runtime (unit tests, a CLI probe)
@@ -168,7 +181,12 @@ impl TradingService {
     /// A service that persists the active account in `store`'s `trading_meta`.
     pub fn with_store(store: Store) -> Self {
         let service = Self::new();
-        *lock(&service.inner.store) = Some(store);
+        *lock(&service.inner.store) = Some(store.clone());
+        // Rules outlast a restart: they live in the engine's store.
+        if let Some(loaded) = service.inner.load_rules() {
+            *lock(&service.inner.rules) = loaded;
+        }
+        service.inner.publish();
         service
     }
 
@@ -195,34 +213,7 @@ impl TradingService {
         reason: String,
         chat_id: Option<String>,
     ) -> TradingProposal {
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let now = now_ms();
-        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let proposal = TradingProposal {
-            id: format!("p-{now}-{seq}"),
-            action,
-            reason: reason.trim().chars().take(280).collect(),
-            chat_id,
-            status: ProposalStatus::Pending,
-            created_at: now,
-            resolved_at: None,
-            result: None,
-        };
-        {
-            let mut list = lock(&self.inner.proposals);
-            list.insert(0, proposal.clone());
-            // Keep the desk short: the newest 50, pending ones first kept.
-            while list.len() > MAX_PROPOSALS {
-                match list.iter().rposition(|p| p.status != ProposalStatus::Pending) {
-                    Some(old) => {
-                        list.remove(old);
-                    }
-                    None => {
-                        list.pop();
-                    }
-                }
-            }
-        }
+        let proposal = self.inner.push_proposal(action, reason, chat_id);
         self.inner.publish();
         proposal
     }
@@ -230,6 +221,118 @@ impl TradingService {
     /// The desk's proposals, newest first.
     pub fn proposals(&self) -> Vec<TradingProposal> {
         lock(&self.inner.proposals).clone()
+    }
+
+    /// The desk's watch rules, newest first.
+    pub fn rules(&self) -> Vec<Rule> {
+        lock(&self.inner.rules).clone()
+    }
+
+    /// Registers what to tell the person when a rule fires (the engine posts
+    /// a desktop banner). Replaces any earlier listener.
+    pub fn set_rule_listener(&self, listener: Arc<dyn Fn(&Rule) + Send + Sync>) {
+        *lock(&self.inner.rule_listener) = Some(listener);
+    }
+
+    /// Adds a rule that watches the desk until it fires, expires or is
+    /// cancelled. It never runs its proposal by itself.
+    pub fn add_rule(&self, input: RuleAddInput) -> Result<Rule, TradingError> {
+        let name = input.name.trim();
+        if name.is_empty() {
+            return Err(TradingError::InvalidRequest {
+                message: "la regla necesita un nombre".into(),
+            });
+        }
+        let reason = input.reason.trim();
+        if reason.is_empty() {
+            return Err(TradingError::InvalidRequest {
+                message: "la regla necesita un motivo".into(),
+            });
+        }
+        rules::validate(&input.condition).map_err(|message| TradingError::InvalidRequest {
+            message,
+        })?;
+        let minutes = input
+            .expires_minutes
+            .unwrap_or(rules::DEFAULT_EXPIRES_MINUTES);
+        if !minutes.is_finite() || minutes <= 0.0 || minutes > rules::MAX_EXPIRES_MINUTES {
+            return Err(TradingError::InvalidRequest {
+                message: "la caducidad debe estar entre 1 minuto y 30 días".into(),
+            });
+        }
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = now_ms();
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let rule = Rule {
+            id: format!("rul-{now}-{seq}"),
+            name: name.chars().take(80).collect(),
+            condition: input.condition,
+            proposal: input.proposal,
+            reason: reason.chars().take(280).collect(),
+            status: RuleStatus::Watching,
+            created_at: now,
+            expires_at: Some(now + (minutes * 60_000.0) as i64),
+            fired_at: None,
+            note: None,
+        };
+        lock(&self.inner.rules).insert(0, rule.clone());
+        self.inner.save_rule(&rule);
+        self.inner.publish();
+        Ok(rule)
+    }
+
+    /// Stops watching a rule that has not fired yet.
+    pub fn cancel_rule(&self, id: &str) -> Result<Rule, TradingError> {
+        let cancelled = {
+            let mut list = lock(&self.inner.rules);
+            let Some(rule) = list.iter_mut().find(|rule| rule.id == id) else {
+                return Err(TradingError::InvalidRequest {
+                    message: format!("No such rule: {id}"),
+                });
+            };
+            if rule.status != RuleStatus::Watching {
+                return Err(TradingError::InvalidRequest {
+                    message: "Esa regla ya terminó: no hay nada que cancelar.".into(),
+                });
+            }
+            rule.status = RuleStatus::Cancelled;
+            rule.note = Some("Cancelada en la mesa.".into());
+            rule.clone()
+        };
+        self.inner.save_rule(&cancelled);
+        self.inner.publish();
+        Ok(cancelled)
+    }
+
+    /// Checks every watching rule against the desk as it stands. A rule that
+    /// holds becomes `Fired`; if it carries a proposal, that proposal lands in
+    /// the desk for the person to approve or reject.
+    pub fn evaluate_rules(&self, snapshot: &Snapshot) {
+        self.inner.evaluate_rules(snapshot);
+    }
+
+    /// Evaluates the rules on every engine update (the engine ticks once a
+    /// second). The broker half is the service's own latest snapshot.
+    pub fn follow_engine(&self, watch: SnapshotWatch) {
+        let service = self.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            let mut watch = watch;
+            loop {
+                if watch.changed().await.is_err() {
+                    break;
+                }
+                let engine = watch.borrow_and_update().clone();
+                let merged = service.merged_with(engine);
+                service.evaluate_rules(&merged);
+            }
+        });
+    }
+
+    fn load_rules(&self) -> Option<Vec<Rule>> {
+        self.inner.load_rules()
     }
 
     /// Takes a pending proposal's action to run it, or says why not.
@@ -513,6 +616,113 @@ impl Inner {
         }
     }
 
+    /// Files a proposal on the desk without publishing; callers publish once.
+    fn push_proposal(
+        &self,
+        action: ProposalAction,
+        reason: String,
+        chat_id: Option<String>,
+    ) -> TradingProposal {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = now_ms();
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let proposal = TradingProposal {
+            id: format!("p-{now}-{seq}"),
+            action,
+            reason: reason.trim().chars().take(280).collect(),
+            chat_id,
+            status: ProposalStatus::Pending,
+            created_at: now,
+            resolved_at: None,
+            result: None,
+        };
+        let mut list = lock(&self.proposals);
+        list.insert(0, proposal.clone());
+        // Keep the desk short: the newest 50, pending ones first kept.
+        while list.len() > MAX_PROPOSALS {
+            match list.iter().rposition(|p| p.status != ProposalStatus::Pending) {
+                Some(old) => {
+                    list.remove(old);
+                }
+                None => {
+                    list.pop();
+                }
+            }
+        }
+        proposal
+    }
+
+    fn load_rules(&self) -> Option<Vec<Rule>> {
+        let store = lock(&self.store).clone()?;
+        let conn = store.conn();
+        let conn = conn.lock().unwrap_or_else(|poison| poison.into_inner());
+        rules::list(&conn).ok()
+    }
+
+    fn save_rule(&self, rule: &Rule) {
+        let Some(store) = lock(&self.store).clone() else {
+            return;
+        };
+        let conn = store.conn();
+        let conn = conn.lock().unwrap_or_else(|poison| poison.into_inner());
+        let _ = rules::upsert(&conn, rule);
+    }
+
+    /// One rule pass. A fired rule files a proposal and publishes again; the
+    /// guard makes that second pass return instead of looping.
+    fn evaluate_rules(&self, snapshot: &Snapshot) {
+        if self.evaluating.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let now = now_ms();
+        let mut changed: Vec<Rule> = Vec::new();
+        {
+            let mut list = lock(&self.rules);
+            for rule in list.iter_mut() {
+                if rule.status != RuleStatus::Watching {
+                    continue;
+                }
+                if rule.expires_at.is_some_and(|at| at <= now) {
+                    rule.status = RuleStatus::Expired;
+                    rule.note = Some("Caducó sin cumplirse.".into());
+                    changed.push(rule.clone());
+                    continue;
+                }
+                if let Some(note) = rules::condition_met(&rule.condition, snapshot, now) {
+                    rule.status = RuleStatus::Fired;
+                    rule.fired_at = Some(now);
+                    rule.note = Some(note);
+                    changed.push(rule.clone());
+                }
+            }
+        }
+        if changed.is_empty() {
+            self.evaluating.store(false, Ordering::SeqCst);
+            return;
+        }
+        for rule in &changed {
+            self.save_rule(rule);
+        }
+        let listener = lock(&self.rule_listener).clone();
+        for rule in changed
+            .iter()
+            .filter(|rule| rule.status == RuleStatus::Fired)
+        {
+            if let Some(listener) = &listener {
+                listener(rule);
+            }
+            if let Some(action) = rule.proposal.clone() {
+                self.push_proposal(
+                    action,
+                    format!("Regla «{}»: {}", rule.name, rule.reason),
+                    None,
+                );
+            }
+        }
+        self.publish();
+        self.evaluating.store(false, Ordering::SeqCst);
+    }
+
     /// Publishes what the state says: the demo fixture while no link is live.
     fn publish(&self) {
         let mut snapshot = {
@@ -526,7 +736,12 @@ impl Inner {
         };
         let proposals = lock(&self.proposals).clone();
         snapshot.proposals = (!proposals.is_empty()).then_some(proposals);
-        self.snapshot.send_replace(snapshot);
+        let rules = lock(&self.rules).clone();
+        snapshot.rules = (!rules.is_empty()).then_some(rules);
+        self.snapshot.send_replace(snapshot.clone());
+        // Rules see the desk as it now stands. A fired one files a proposal
+        // and publishes again; the guard in `evaluate_rules` stops there.
+        self.evaluate_rules(&snapshot);
     }
 
     /// Folds one event in; every path that changes the state republishes.
@@ -715,6 +930,7 @@ impl State {
             closable_positions: Some(self.ledger.closable_positions()),
             logs: self.logs.clone(),
             tasks: Vec::new(),
+            rules: None,
             trades: None,
             equity: Some(self.equity.clone()),
             accounts: Some(self.ledger.accounts().into_iter().map(with_link).collect()),
@@ -794,6 +1010,112 @@ mod tests {
         let list = service.proposals();
         assert_eq!(list.len(), MAX_PROPOSALS);
         assert!(list.iter().any(|p| p.id == first.id), "a pending one is never dropped first");
+    }
+
+    /// A rule watches, fires once, rings once and files its proposal; it never
+    /// runs the action itself.
+    #[tokio::test]
+    async fn a_rule_fires_once_files_a_proposal_and_rings() {
+        use zeron_proto::trading::{ProposalAction, RuleAddInput, RuleCondition, RuleStatus};
+        let service = TradingService::new();
+        let rang = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = rang.clone();
+        service.set_rule_listener(Arc::new(move |rule| {
+            seen.lock().unwrap().push(rule.name.clone());
+        }));
+        let rule = service
+            .add_rule(RuleAddInput {
+                name: "NQ parado".into(),
+                condition: RuleCondition::SystemStopped {
+                    system_id: "02_nq_tws".into(),
+                },
+                proposal: Some(ProposalAction::StopSystems {
+                    system_ids: vec!["02_nq_tws".into()],
+                }),
+                reason: "pararlo si se cae".into(),
+                expires_minutes: None,
+            })
+            .unwrap();
+
+        // The fixture's NQ is stopped, so the rule fires on the publish that
+        // follows its creation: one banner, one proposal, no action run.
+        let fired = service
+            .rules()
+            .into_iter()
+            .find(|r| r.id == rule.id)
+            .unwrap();
+        assert_eq!(fired.status, RuleStatus::Fired);
+        assert!(fired.note.as_deref().unwrap().contains("NQ TWS"));
+        assert_eq!(rang.lock().unwrap().as_slice(), [rule.name.clone()]);
+        let proposals = service.proposals();
+        assert_eq!(proposals.len(), 1);
+        assert!(proposals[0].reason.contains("NQ parado"), "{proposals:?}");
+
+        // Another pass neither rings nor proposes again.
+        service.evaluate_rules(&service.snapshot());
+        assert_eq!(rang.lock().unwrap().len(), 1);
+        assert_eq!(service.proposals().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_expired_rule_stops_watching_without_a_proposal() {
+        use zeron_proto::trading::{RuleAddInput, RuleCondition, RuleStatus};
+        let service = TradingService::new();
+        let rule = service
+            .add_rule(RuleAddInput {
+                name: "EURUSD parado".into(),
+                condition: RuleCondition::SystemStopped {
+                    system_id: "01_eurusd_mt5".into(),
+                },
+                proposal: None,
+                reason: "avisar".into(),
+                // Six milliseconds: enough to outlive the publish that follows.
+                expires_minutes: Some(0.0001),
+            })
+            .unwrap();
+        assert_eq!(
+            service.rules().iter().find(|r| r.id == rule.id).unwrap().status,
+            RuleStatus::Watching
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        service.evaluate_rules(&service.snapshot());
+        let expired = service
+            .rules()
+            .into_iter()
+            .find(|r| r.id == rule.id)
+            .unwrap();
+        assert_eq!(expired.status, RuleStatus::Expired);
+        assert!(expired.note.as_deref().unwrap().contains("Caducó"));
+        assert!(service.proposals().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rules_outlast_a_restart_and_cancelling_stops_the_watch() {
+        use zeron_proto::trading::{RuleAddInput, RuleCondition, RuleStatus};
+        let store = Store::open_in_memory().unwrap();
+        let service = TradingService::with_store(store.clone());
+        let rule = service
+            .add_rule(RuleAddInput {
+                name: "Cuenta".into(),
+                condition: RuleCondition::AccountPnlPct {
+                    at_most: Some(-1.0),
+                    at_least: None,
+                },
+                proposal: None,
+                reason: "avisar si la cuenta pierde 1 %".into(),
+                expires_minutes: Some(60.0),
+            })
+            .unwrap();
+        // A fresh service on the same store loads it back.
+        let restarted = TradingService::with_store(store.clone());
+        assert_eq!(restarted.rules(), vec![rule.clone()]);
+
+        let cancelled = restarted.cancel_rule(&rule.id).unwrap();
+        assert_eq!(cancelled.status, RuleStatus::Cancelled);
+        assert!(restarted.cancel_rule(&rule.id).is_err(), "already resolved");
+        // The cancellation is persisted too.
+        let after = TradingService::with_store(store);
+        assert_eq!(after.rules()[0].status, RuleStatus::Cancelled);
     }
 
     /// A TWS that completes the handshake and hands the socket to the test.
