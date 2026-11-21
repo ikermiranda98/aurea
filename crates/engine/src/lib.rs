@@ -458,6 +458,22 @@ impl EngineCore {
                 );
             }));
         }
+        // A request from the agent rings too: its card waits in the chat, and
+        // the person may not have that window in front.
+        {
+            let data_dir = data_dir.to_path_buf();
+            let focus = viewport_focus.clone();
+            trading.set_proposal_listener(std::sync::Arc::new(move |proposal| {
+                desktop_notify::post_for(
+                    &data_dir,
+                    &focus,
+                    "trading-proposal",
+                    "Aurea · el agente pide permiso",
+                    &proposal.reason,
+                    None,
+                );
+            }));
+        }
         Ok(Self {
             sessions,
             doc_host,

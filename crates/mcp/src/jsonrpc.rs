@@ -40,7 +40,10 @@ MetaTrader 5 demo, plus their own Python trading bots). Speak the person's langu
 Spanish).\n\
 \n\
 Trading: `trading_snapshot` reads the desk (account, positions, bots, tasks, connections, \
-recent log, pending and recent proposals); read it before answering about money. Anything that \
+recent log, pending and recent proposals); read it before answering about money. For a daily \
+summary or \"¿cómo va el día?\", `trading_brief` gives the same desk as a few spoken lines (account, \
+bots, open positions, today's tasks, rules, answered requests and log warnings) without dumping the \
+whole snapshot. Anything that \
 moves money or a bot (closing positions, panic, starting or stopping one or several systems) goes \
 through `trading_propose`: it never runs by itself, a card appears at once in the chat for the person \
 to approve or reject, and you report what they decided. Group the systems the person names into one \

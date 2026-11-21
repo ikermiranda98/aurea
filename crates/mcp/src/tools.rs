@@ -300,6 +300,7 @@ fn catalog() -> Vec<ToolDef> {
 }
 
 const TRADING_SNAPSHOT_TOOL: &str = "trading_snapshot";
+const TRADING_BRIEF_TOOL: &str = "trading_brief";
 const TRADING_PROPOSE_TOOL: &str = "trading_propose";
 const TRADING_SELECT_TOOL: &str = "trading_select";
 const TRADING_SCHEDULE_TOOL: &str = "trading_schedule";
@@ -318,6 +319,11 @@ fn trading_catalog() -> Vec<ToolDef> {
                     "logs": { "type": "integer", "minimum": 0, "maximum": 100, "description": "How many recent log rows to include (default 20)." }
                 }
             }),
+        },
+        ToolDef {
+            name: TRADING_BRIEF_TOOL,
+            description: "A short spoken summary of the desk's day, ready to read to the person: the shown account and its P&L, how many bots are running and the best and worst, the open positions and their P&L, the tasks still pending (and today's run, missed and failed ones), the watch rules (how many are watching and how many fired or expired today), the requests still waiting plus today's answered ones with their outcome, and today's warnings and errors from the engine log. Read-only, no arguments. Use it for \"¿cómo va el día?\", \"resumen\", \"¿qué ha pasado hoy?\", \"¿hay algo pendiente?\" instead of dumping trading_snapshot. For anything that needs exact numbers or ids, use trading_snapshot or trading_select.",
+            input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
             name: TRADING_SELECT_TOOL,
@@ -789,10 +795,324 @@ fn summarize_trading(snapshot: &Value, logs: usize) -> Value {
     })
 }
 
+/// `trading_brief`: the desk's day as a few spoken lines, plus the counts an
+/// agent may quote. Read-only and deterministic; timestamps are local (PC
+/// clock), the same clock the desk shows.
+fn trading_brief_value(snapshot: &Value, now: chrono::DateTime<chrono::Local>) -> Value {
+    let list = |key: &str| -> Vec<Value> {
+        snapshot
+            .get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let number = |row: &Value, key: &str| row.get(key).and_then(Value::as_f64);
+    let millis = |row: &Value, key: &str| row.get(key).and_then(Value::as_i64);
+    let demo = snapshot.get("version").and_then(Value::as_str) == Some("0.1.0-mock");
+    let day_start = start_of_day(now);
+    let is_today = |ms: Option<i64>| ms.is_some_and(|ms| ms >= day_start);
+    let status = row_status;
+    let text = row_text;
+
+    let mut lines = vec![format!(
+        "Resumen de la mesa ({}) — {}",
+        if demo { "demo, datos inventados" } else { "TWS paper" },
+        now.format("%d/%m %H:%M")
+    )];
+
+    // Account.
+    match snapshot.get("account").filter(|account| !account.is_null()) {
+        Some(account) => {
+            let id = text(account, "id").unwrap_or("sin id");
+            let mut parts = Vec::new();
+            if let Some(equity) = number(account, "equity") {
+                parts.push(format!("equity {}", es_money(equity)));
+            }
+            if let Some(pnl) = number(account, "pnlDay") {
+                parts.push(format!("P&L del día {}", es_signed_money(pnl)));
+            }
+            if parts.is_empty() {
+                parts.push("sin datos".into());
+            }
+            lines.push(format!("Cuenta {id}: {}.", parts.join(", ")));
+        }
+        None => lines.push("Cuenta: ninguna conectada.".into()),
+    }
+
+    // Systems, best and worst by P&L percent of the capital the person gave.
+    let systems = list("systems");
+    let running = systems
+        .iter()
+        .filter(|system| system.get("running").and_then(Value::as_bool) == Some(true))
+        .count();
+    let mut line = if systems.is_empty() {
+        "Sistemas: ninguno.".to_string()
+    } else {
+        format!("Sistemas: {running} de {} en marcha.", systems.len())
+    };
+    let mut ranked: Vec<(&Value, f64)> = systems
+        .iter()
+        .filter_map(|system| number(system, "pnlPct").map(|pct| (system, pct)))
+        .collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let describe = |system: &Value, pct: f64| {
+        let name = text(system, "name").unwrap_or("sin nombre");
+        let money = number(system, "pnlDay").map(es_signed_money);
+        match money {
+            Some(money) => format!("{name} {money} ({})", es_signed_pct(pct)),
+            None => format!("{name} {}", es_signed_pct(pct)),
+        }
+    };
+    match ranked.as_slice() {
+        [(best, pct)] => line.push_str(&format!(" Mejor: {}.", describe(best, *pct))),
+        [(best, best_pct), (worst, worst_pct), ..] => line.push_str(&format!(
+            " Mejor: {}; peor: {}.",
+            describe(best, *best_pct),
+            describe(worst, *worst_pct)
+        )),
+        [] => {}
+    }
+    lines.push(line);
+
+    // Open positions.
+    let positions = list("positions");
+    if positions.is_empty() {
+        lines.push("Posiciones: ninguna abierta.".into());
+    } else {
+        let pnls: Vec<f64> = positions.iter().filter_map(|p| number(p, "pnl")).collect();
+        let mut line = format!("Posiciones: {} abiertas", positions.len());
+        if !pnls.is_empty() {
+            line.push_str(&format!(", P&L {}", es_signed_money(pnls.iter().sum())));
+        }
+        line.push('.');
+        lines.push(line);
+    }
+
+    // Tasks: what still waits (and when) and what today came to.
+    let tasks = list("tasks");
+    let pending: Vec<&Value> = tasks.iter().filter(|task| status(task) == "pending").collect();
+    let next = pending.iter().filter_map(|task| millis(task, "runAt")).min();
+    let mut line = format!("Tareas: {}", es_count(pending.len(), "pendiente", "pendientes"));
+    if let Some(next) = next {
+        line.push_str(&format!(" (a las {})", es_clock(next)));
+    }
+    let today_with = |wanted: &str| {
+        tasks
+            .iter()
+            .filter(|task| status(task) == wanted && is_today(millis(task, "resolvedAt")))
+            .count()
+    };
+    let mut today = Vec::new();
+    for (wanted, one, many) in [
+        ("ran", "hecha", "hechas"),
+        ("missed", "perdida", "perdidas"),
+        ("failed", "fallida", "fallidas"),
+        ("cancelled", "cancelada", "canceladas"),
+    ] {
+        let count = today_with(wanted);
+        if count > 0 {
+            today.push(es_count(count, one, many));
+        }
+    }
+    if !today.is_empty() {
+        line.push_str(&format!("; hoy {}", today.join(", ")));
+    }
+    line.push('.');
+    lines.push(line);
+
+    // Rules.
+    let rules = list("rules");
+    let watching = rules.iter().filter(|rule| status(rule) == "watching").count();
+    let fired = rules
+        .iter()
+        .filter(|rule| status(rule) == "fired" && is_today(millis(rule, "firedAt")))
+        .count();
+    let expired = rules
+        .iter()
+        .filter(|rule| status(rule) == "expired" && is_today(millis(rule, "expiresAt")))
+        .count();
+    let mut line = format!("Reglas: {watching} vigilando");
+    if fired + expired > 0 {
+        line.push_str(&format!(
+            "; hoy {} y {}",
+            es_count(fired, "aviso", "avisos"),
+            es_count(expired, "caducada", "caducadas")
+        ));
+    }
+    line.push('.');
+    lines.push(line);
+
+    // Requests: what waits and today's audit trail with the outcome.
+    let proposals = list("proposals");
+    let waiting = proposals.iter().filter(|p| status(p) == "pending").count();
+    let mut answered: Vec<&Value> = proposals
+        .iter()
+        .filter(|p| status(p) != "pending" && is_today(millis(p, "resolvedAt")))
+        .collect();
+    answered.sort_by_key(|p| std::cmp::Reverse(millis(p, "resolvedAt").unwrap_or(0)));
+    let count = |wanted: &str| answered.iter().filter(|p| status(p) == wanted).count();
+    let mut line = format!("Peticiones: {waiting} esperando respuesta");
+    if !answered.is_empty() {
+        line.push_str(&format!(
+            "; hoy {}, {} y {}",
+            es_count(count("done"), "aprobada", "aprobadas"),
+            es_count(count("rejected"), "rechazada", "rechazadas"),
+            es_count(count("failed"), "fallida", "fallidas")
+        ));
+    }
+    line.push('.');
+    lines.push(line);
+    if !answered.is_empty() {
+        let mut parts = Vec::new();
+        for proposal in answered.iter().take(3) {
+            let reason = text(proposal, "reason").unwrap_or("sin motivo");
+            let reason: String = reason.chars().take(80).collect();
+            let word = match status(proposal) {
+                "done" => "aprobada",
+                "rejected" => "rechazada",
+                "failed" => "falló",
+                _ => "resuelta",
+            };
+            let result = text(proposal, "result")
+                .filter(|result| !result.is_empty())
+                .map(|result| result.trim_end_matches('.').to_owned());
+            parts.push(match result {
+                Some(result) => format!("{word} «{reason}» → {result}"),
+                None => format!("{word} «{reason}»"),
+            });
+        }
+        lines.push(format!("Hoy: {}.", parts.join("; ")));
+    }
+
+    // The day's log, with the last error when there is one.
+    let logs = list("logs");
+    let today_logs: Vec<&Value> = logs
+        .iter()
+        .filter(|row| is_today(millis(row, "ts")))
+        .collect();
+    let level = row_level;
+    let warnings = today_logs.iter().filter(|row| level(row) == "warn").count();
+    let errors = today_logs.iter().filter(|row| level(row) == "error").count();
+    let mut line = if warnings + errors == 0 {
+        "Registro hoy: sin avisos ni errores.".to_string()
+    } else {
+        format!(
+            "Registro hoy: {} y {}.",
+            es_count(warnings, "aviso", "avisos"),
+            es_count(errors, "error", "errores")
+        )
+    };
+    if let Some(last) = today_logs.iter().filter(|row| level(row) == "error").max_by_key(|row| millis(row, "ts")) {
+        if let (Some(ts), Some(message)) = (millis(last, "ts"), text(last, "message")) {
+            line.push_str(&format!(" Último error: {message} ({}).", es_clock(ts)));
+        }
+    }
+    lines.push(line);
+
+    json!({
+        "mode": if demo { "demo" } else { "live" },
+        "generatedAt": now.timestamp_millis(),
+        "text": lines.join("\n"),
+        "highlights": {
+            "systemsRunning": running,
+            "systems": systems.len(),
+            "openPositions": positions.len(),
+            "pendingTasks": pending.len(),
+            "rulesWatching": watching,
+            "pendingProposals": waiting,
+        },
+    })
+}
+
+fn row_text<'a>(row: &'a Value, key: &str) -> Option<&'a str> {
+    row.get(key).and_then(Value::as_str)
+}
+
+fn row_status(row: &Value) -> &str {
+    row_text(row, "status").unwrap_or("")
+}
+
+fn row_level(row: &Value) -> &str {
+    row_text(row, "level").unwrap_or("")
+}
+
+fn start_of_day(now: chrono::DateTime<chrono::Local>) -> i64 {    use chrono::TimeZone;
+    now.date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|naive| chrono::Local.from_local_datetime(&naive).earliest())
+        .map(|at| at.timestamp_millis())
+        .unwrap_or(i64::MIN)
+}
+
+fn es_clock(ms: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|at| at.format("%H:%M").to_string())
+        .unwrap_or_else(|| "--:--".into())
+}
+
+fn es_count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// A number the way the desk writes it: thousands with dots, decimals with a
+/// comma.
+fn es_decimal(value: f64, decimals: usize) -> String {
+    let formatted = format!("{value:.decimals$}");
+    let (sign, digits) = match formatted.strip_prefix('-') {
+        Some(rest) => ("-", rest.to_owned()),
+        None => ("", formatted),
+    };
+    let (integer, fraction) = match digits.split_once('.') {
+        Some((integer, fraction)) => (integer.to_owned(), Some(fraction.to_owned())),
+        None => (digits, None),
+    };
+    let mut grouped = String::new();
+    for (ix, ch) in integer.chars().enumerate() {
+        if ix > 0 && (integer.len() - ix) % 3 == 0 {
+            grouped.push('.');
+        }
+        grouped.push(ch);
+    }
+    // A loss that rounds to zero reads "0", never "-0".
+    let sign = if grouped.chars().all(|ch| ch == '0')
+        && fraction.as_deref().is_none_or(|f| f.chars().all(|ch| ch == '0'))
+    {
+        ""
+    } else {
+        sign
+    };
+    match fraction {
+        Some(fraction) => format!("{sign}{grouped},{fraction}"),
+        None => format!("{sign}{grouped}"),
+    }
+}
+
+fn es_money(value: f64) -> String {
+    format!("{} $", es_decimal(value, 2))
+}
+
+fn es_signed_money(value: f64) -> String {
+    if value > 0.0 {
+        format!("+{}", es_money(value))
+    } else {
+        es_money(value)
+    }
+}
+
+fn es_signed_pct(value: f64) -> String {
+    if value > 0.0 {
+        format!("+{} %", es_decimal(value, 2))
+    } else {
+        format!("{} %", es_decimal(value, 2))
+    }
+}
+
 /// Shows a page in the CALLING chat, so it is offered only to an agent that
 /// Zeron launched (`ZERON_CHAT_ID` set).
 const SHOW_VISUAL: &str = "show_visual";
-
 /// Shows an image file in the CALLING chat; offered like `show_visual`.
 const SHOW_IMAGE: &str = "show_image";
 
@@ -1361,6 +1681,7 @@ impl Tools {
             SHOW_IMAGE => self.show_image(parse(args)?).await,
             WAIT_ON_BACKGROUND => self.wait_on_background(parse(args)?).await,
             TRADING_SNAPSHOT_TOOL => self.trading_snapshot(parse(args)?).await,
+            TRADING_BRIEF_TOOL => self.trading_brief().await,
             TRADING_SELECT_TOOL => self.trading_select(parse(args)?).await,
             TRADING_PROPOSE_TOOL => self.trading_propose(parse(args)?).await,
             TRADING_SCHEDULE_TOOL => self.trading_schedule(parse(args)?).await,
@@ -1412,6 +1733,14 @@ impl Tools {
             .call(zeron_rpc::methods::TRADING_SNAPSHOT, json!({}))
             .await?;
         Ok(summarize_trading(&snapshot, args.logs.unwrap_or(20).min(100)))
+    }
+
+    async fn trading_brief(&self) -> anyhow::Result<Value> {
+        let snapshot = self
+            .zeron
+            .call(zeron_rpc::methods::TRADING_SNAPSHOT, json!({}))
+            .await?;
+        Ok(trading_brief_value(&snapshot, chrono::Local::now()))
     }
 
     async fn trading_propose(&self, args: TradingProposeArgs) -> anyhow::Result<Value> {
@@ -3001,6 +3330,122 @@ mod tests {
             assert_eq!(def.input_schema["type"], "object", "{}", def.name);
             assert!(!def.description.is_empty());
         }
+    }
+
+    #[test]
+    fn the_brief_reads_the_day_like_the_desk_does() {
+        use chrono::TimeZone;
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 11, 21, 18, 0, 0)
+            .single()
+            .unwrap();
+        let at = |minutes_ago: i64| (now - chrono::Duration::minutes(minutes_ago)).timestamp_millis();
+        let snapshot = json!({
+            "version": "0.1.0-mock",
+            "account": { "id": "DU123", "equity": 10085.3, "pnlDay": 85.3 },
+            "systems": [
+                {"id":"01_a","name":"EURUSD MT5","running":true,"pnlDay":127.4,"pnlPct":1.02},
+                {"id":"02_b","name":"NQ TWS","running":false,"pnlDay":-42.1,"pnlPct":-0.53}
+            ],
+            "positions": [
+                {"symbol":"EURUSD","pnl":80.5},
+                {"symbol":"XAUD","pnl":-68.0}
+            ],
+            "tasks": [
+                {"id":"t1","kind":"stop_systems","status":"pending","runAt": at(-60)},
+                {"id":"t2","kind":"start_systems","status":"ran","runAt": at(120),"resolvedAt": at(120)},
+                {"id":"t3","kind":"stop_systems","status":"missed","runAt": at(300),"resolvedAt": at(240)}
+            ],
+            "rules": [
+                {"id":"r1","name":"NQ parado","status":"fired","createdAt": at(90),"firedAt": at(30)},
+                {"id":"r2","name":"EURUSD rojo","status":"watching","createdAt": at(10)}
+            ],
+            "proposals": [
+                {"id":"p1","action":{"kind":"close_all"},"reason":"cierra todo","status":"pending","createdAt": at(5)},
+                {"id":"p2","action":{"kind":"stop_systems"},"reason":"para el NQ","status":"done","result":"1 sistema parado.","createdAt": at(100),"resolvedAt": at(60)},
+                {"id":"p3","action":{"kind":"panic"},"reason":"pánico","status":"rejected","createdAt": at(200),"resolvedAt": at(150)},
+                {"id":"p4","action":{"kind":"close_all"},"reason":"ayer","status":"done","result":"viejo","createdAt": at(2000),"resolvedAt": at(1500)}
+            ],
+            "logs": [
+                {"ts": at(2),"level":"error","message":"TWS: reconectando."},
+                {"ts": at(3),"level":"warn","message":"sin datos"},
+                {"ts": at(2000),"level":"error","message":"de ayer"}
+            ]
+        });
+        let brief = trading_brief_value(&snapshot, now);
+        let text = brief["text"].as_str().unwrap();
+        assert!(text.contains("Resumen de la mesa (demo, datos inventados) — 21/11 18:00"), "{text}");
+        assert!(
+            text.contains("Cuenta DU123: equity 10.085,30 $, P&L del día +85,30 $."),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "Sistemas: 1 de 2 en marcha. Mejor: EURUSD MT5 +127,40 $ (+1,02 %); peor: NQ TWS -42,10 $ (-0,53 %)."
+            ),
+            "{text}"
+        );
+        assert!(text.contains("Posiciones: 2 abiertas, P&L +12,50 $."), "{text}");
+        assert!(
+            text.contains("Tareas: 1 pendiente (a las 19:00); hoy 1 hecha, 1 perdida."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Reglas: 1 vigilando; hoy 1 aviso y 0 caducadas."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Peticiones: 1 esperando respuesta; hoy 1 aprobada, 1 rechazada y 0 fallidas."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Hoy: aprobada «para el NQ» → 1 sistema parado; rechazada «pánico»."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Registro hoy: 1 aviso y 1 error. Último error: TWS: reconectando. (17:58)."),
+            "{text}"
+        );
+        assert_eq!(brief["mode"], "demo");
+        assert_eq!(brief["highlights"]["systemsRunning"], 1);
+        assert_eq!(brief["highlights"]["pendingProposals"], 1);
+        assert_eq!(brief["highlights"]["rulesWatching"], 1);
+    }
+
+    #[test]
+    fn the_brief_survives_an_empty_or_missing_desk() {
+        use chrono::TimeZone;
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 11, 21, 9, 5, 0)
+            .single()
+            .unwrap();
+        for snapshot in [
+            json!({"version":"1","systems":[],"positions":[],"tasks":[],"rules":[],"proposals":[],"logs":[]}),
+            json!({}),
+        ] {
+            let brief = trading_brief_value(&snapshot, now);
+            let text = brief["text"].as_str().unwrap();
+            assert!(text.contains("Cuenta: ninguna conectada."), "{text}");
+            assert!(text.contains("Sistemas: ninguno."), "{text}");
+            assert!(text.contains("Posiciones: ninguna abierta."), "{text}");
+            assert!(text.contains("Tareas: 0 pendientes."), "{text}");
+            assert!(text.contains("Reglas: 0 vigilando."), "{text}");
+            assert!(text.contains("Peticiones: 0 esperando respuesta."), "{text}");
+            assert!(text.contains("Registro hoy: sin avisos ni errores."), "{text}");
+        }
+        assert_eq!(trading_brief_value(&json!({"version":"1"}), now)["mode"], "live");
+    }
+
+    #[test]
+    fn spanish_numbers_group_and_sign_the_desk_s_way() {
+        assert_eq!(es_decimal(1_234_567.891, 2), "1.234.567,89");
+        assert_eq!(es_decimal(-42.1, 2), "-42,10");
+        assert_eq!(es_decimal(-0.001, 2), "0,00");
+        assert_eq!(es_money(10085.3), "10.085,30 $");
+        assert_eq!(es_signed_money(85.3), "+85,30 $");
+        assert_eq!(es_signed_money(-68.0), "-68,00 $");
+        assert_eq!(es_signed_pct(1.02), "+1,02 %");
+        assert_eq!(es_signed_pct(-0.53), "-0,53 %");
     }
 
     #[tokio::test]

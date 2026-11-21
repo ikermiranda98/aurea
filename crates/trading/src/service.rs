@@ -129,6 +129,9 @@ struct Inner {
     /// Told when a rule fires (the engine posts a desktop banner); `None`
     /// keeps the desk quiet.
     rule_listener: Mutex<Option<Arc<dyn Fn(&Rule) + Send + Sync>>>,
+    /// Told when an agent files a request (the engine posts a desktop banner
+    /// so the person sees the card without the window in front).
+    proposal_listener: Mutex<Option<Arc<dyn Fn(&TradingProposal) + Send + Sync>>>,
     /// One rule pass at a time: a fired rule files a proposal, which publishes
     /// again, and that second pass must not loop.
     evaluating: AtomicBool,
@@ -154,6 +157,7 @@ impl TradingService {
             proposals: Mutex::new(Vec::new()),
             rules: Mutex::new(Vec::new()),
             rule_listener: Mutex::new(None),
+            proposal_listener: Mutex::new(None),
             evaluating: AtomicBool::new(false),
         });
         // The demo fixture ticks every 2 s; keep forwarding it while no live
@@ -213,8 +217,16 @@ impl TradingService {
         reason: String,
         chat_id: Option<String>,
     ) -> TradingProposal {
+        let from_agent = chat_id.is_some();
         let proposal = self.inner.push_proposal(action, reason, chat_id);
         self.inner.publish();
+        // A request the person did not ask for in this window: ring so the
+        // card waiting in the chat is not missed.
+        if from_agent
+            && let Some(listener) = lock(&self.inner.proposal_listener).clone()
+        {
+            listener(&proposal);
+        }
         proposal
     }
 
@@ -232,6 +244,17 @@ impl TradingService {
     /// a desktop banner). Replaces any earlier listener.
     pub fn set_rule_listener(&self, listener: Arc<dyn Fn(&Rule) + Send + Sync>) {
         *lock(&self.inner.rule_listener) = Some(listener);
+    }
+
+    /// Registers what to tell the person when an agent files a request, so the
+    /// card is not missed while another window is in front. Replaces any
+    /// earlier listener; the listener decides (the engine applies the
+    /// notifications setting and "only in the background").
+    pub fn set_proposal_listener(
+        &self,
+        listener: Arc<dyn Fn(&TradingProposal) + Send + Sync>,
+    ) {
+        *lock(&self.inner.proposal_listener) = Some(listener);
     }
 
     /// Adds a rule that watches the desk until it fires, expires or is
@@ -1118,10 +1141,51 @@ mod tests {
         assert_eq!(after.rules()[0].status, RuleStatus::Cancelled);
     }
 
+    /// A request the agent files rings once (the card waits in a chat the
+    /// person may not have in front); the desk's own proposals stay quiet.
+    #[tokio::test]
+    async fn an_agent_request_rings_once_and_a_rule_s_proposal_stays_quiet() {
+        use zeron_proto::trading::{ProposalAction, RuleAddInput, RuleCondition};
+        let service = TradingService::new();
+        let rung = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = rung.clone();
+        service.set_proposal_listener(Arc::new(move |proposal| {
+            seen.lock().unwrap().push(proposal.reason.clone());
+        }));
+
+        // No chat: the desk itself (a rule's proposal), not the agent.
+        service.propose(ProposalAction::CloseAll, "sin chat".into(), None);
+        assert!(rung.lock().unwrap().is_empty());
+
+        service.propose(
+            ProposalAction::CloseAll,
+            "cierra todo".into(),
+            Some("chat-1".into()),
+        );
+        assert_eq!(rung.lock().unwrap().as_slice(), ["cierra todo"]);
+
+        // A fired rule files its proposal without ringing as an agent request:
+        // the rule has its own banner.
+        service
+            .add_rule(RuleAddInput {
+                name: "NQ parado".into(),
+                condition: RuleCondition::SystemStopped {
+                    system_id: "02_nq_tws".into(),
+                },
+                proposal: Some(ProposalAction::StopSystems {
+                    system_ids: vec!["02_nq_tws".into()],
+                }),
+                reason: "pararlo si se cae".into(),
+                expires_minutes: None,
+            })
+            .unwrap();
+        assert_eq!(rung.lock().unwrap().len(), 1);
+        assert_eq!(service.proposals().len(), 3);
+    }
+
     /// A TWS that completes the handshake and hands the socket to the test.
     struct FakeTws {
-        port: u16,
-        sockets: tokio::sync::mpsc::UnboundedReceiver<TcpStream>,
+        port: u16,        sockets: tokio::sync::mpsc::UnboundedReceiver<TcpStream>,
         _task: tokio::task::JoinHandle<()>,
     }
 
