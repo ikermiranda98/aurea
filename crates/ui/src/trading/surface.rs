@@ -1550,7 +1550,41 @@ fn proposal_title(action: &ProposalAction) -> String {
         ProposalAction::Panic => "Pánico: parar bots, cancelar tareas y cerrar todo".into(),
         ProposalAction::StartSystems { system_ids } => systems_title("Arrancar", system_ids),
         ProposalAction::StopSystems { system_ids } => systems_title("Parar", system_ids),
+        ProposalAction::ScheduleTask {
+            task_kind,
+            system_ids,
+            delay_minutes,
+            at_time,
+        } => schedule_title(*task_kind, system_ids, *delay_minutes, at_time.as_deref()),
     }
+}
+
+/// `Programar: parar 2 sistemas a las 22:05` / `en 15 min`.
+fn schedule_title(
+    task_kind: TaskKind,
+    system_ids: &[String],
+    delay_minutes: Option<f64>,
+    at_time: Option<&str>,
+) -> String {
+    let verb = match task_kind {
+        TaskKind::StartSystems => "arrancar",
+        TaskKind::StopSystems => "parar",
+    };
+    let systems = match system_ids {
+        [] => "todos los sistemas".to_string(),
+        [one] => format!("el sistema {one}"),
+        many => format!("{} sistemas", many.len()),
+    };
+    let when = match (delay_minutes, at_time) {
+        (Some(minutes), _) => {
+            let text = format!("{minutes}");
+            let text = text.strip_suffix(".0").unwrap_or(&text);
+            format!(" en {text} min")
+        }
+        (_, Some(at)) => format!(" a las {at}"),
+        _ => String::new(),
+    };
+    format!("Programar: {verb} {systems}{when}")
 }
 
 /// `Arrancar el sistema 01_a` for one, `Arrancar 3 sistemas` for a group.
@@ -1591,6 +1625,9 @@ fn chat_proposal_row(proposal: &TradingProposal, snapshot: &Snapshot, theme: &Th
         ProposalAction::StartSystems { system_ids } | ProposalAction::StopSystems { system_ids }
             if system_ids.len() > 1 =>
         {
+            Some(system_lines(system_ids, snapshot))
+        }
+        ProposalAction::ScheduleTask { system_ids, .. } if system_ids.len() > 1 => {
             Some(system_lines(system_ids, snapshot))
         }
         _ => None,

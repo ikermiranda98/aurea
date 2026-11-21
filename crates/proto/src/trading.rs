@@ -410,6 +410,18 @@ pub enum ProposalAction {
     StartSystems { system_ids: Vec<String> },
     /// One or more systems to stop in one approval; the card names each.
     StopSystems { system_ids: Vec<String> },
+    /// A start/stop programmed for later; approving it creates the desk task
+    /// that will run on its own. `system_ids` empty means every system.
+    ScheduleTask {
+        task_kind: TaskKind,
+        #[serde(default)]
+        system_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delay_minutes: Option<f64>,
+        /// Next local `HH:MM` on the PC clock.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_time: Option<String>,
+    },
 }
 
 /// Where a proposal stands.
@@ -617,5 +629,35 @@ mod tests {
         );
         let back: ProposalAction = serde_json::from_value(value).unwrap();
         assert_eq!(back, group);
+    }
+
+    #[test]
+    fn a_scheduled_task_keeps_its_kind_and_its_time() {
+        let action = ProposalAction::ScheduleTask {
+            task_kind: TaskKind::StopSystems,
+            system_ids: vec!["01".into()],
+            delay_minutes: Some(15.0),
+            at_time: None,
+        };
+        let value = serde_json::to_value(&action).unwrap();
+        assert_eq!(value["kind"], "schedule_task");
+        assert_eq!(value["task_kind"], "stop-systems");
+        assert_eq!(value["delay_minutes"], 15.0);
+        assert!(value.get("at_time").is_none(), "{value}");
+        let back: ProposalAction = serde_json::from_value(value).unwrap();
+        assert_eq!(back, action);
+
+        // At a wall-clock time instead of a delay.
+        let action = ProposalAction::ScheduleTask {
+            task_kind: TaskKind::StartSystems,
+            system_ids: vec![],
+            delay_minutes: None,
+            at_time: Some("22:05".into()),
+        };
+        let value = serde_json::to_value(&action).unwrap();
+        assert_eq!(value["at_time"], "22:05");
+        assert_eq!(value["system_ids"], serde_json::json!([]));
+        let back: ProposalAction = serde_json::from_value(value).unwrap();
+        assert_eq!(back, action);
     }
 }

@@ -302,6 +302,7 @@ fn catalog() -> Vec<ToolDef> {
 const TRADING_SNAPSHOT_TOOL: &str = "trading_snapshot";
 const TRADING_PROPOSE_TOOL: &str = "trading_propose";
 const TRADING_SELECT_TOOL: &str = "trading_select";
+const TRADING_SCHEDULE_TOOL: &str = "trading_schedule";
 
 /// Aurea's trading desk: read freely, ask for money actions.
 fn trading_catalog() -> Vec<ToolDef> {
@@ -348,6 +349,22 @@ fn trading_catalog() -> Vec<ToolDef> {
                 "required": ["action", "reason"]
             }),
         },
+        ToolDef {
+            name: TRADING_SCHEDULE_TOOL,
+            description: "Program a start or stop for later, with the person's approval. It NEVER schedules by itself: it appears at once as a card in this chat, above the composer; approving it creates the desk task, and rejecting it does nothing. The task then runs on its own at that time even if this chat is closed, as long as Aurea is running; the desk's Tasks list shows it and the person can cancel it there. If Aurea was off at its time (more than five minutes late), the task is marked missed and does NOT run late. Give either delay_minutes or at_time (the next occurrence of \"HH:MM\" on the PC clock). system_ids is required: use trading_select first for groups like \"los que pierden más de 1 %\", and pass exactly those ids. Returns immediately with the card waiting; do not schedule it again. `trading_snapshot` shows the task in `tasks` and the card's outcome in `pendingProposals` / `recentProposals`.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["start_systems", "stop_systems", "start_system", "stop_system"] },
+                    "system_ids": { "type": "array", "items": { "type": "string" }, "description": "The system ids, exactly as trading_snapshot lists them. One approval schedules all of them as one task." },
+                    "system_id": { "type": "string", "description": "Shorthand for a single system id." },
+                    "delay_minutes": { "type": "number", "exclusiveMinimum": 0, "description": "Minutes from now on the PC clock; use either this or at_time." },
+                    "at_time": { "type": "string", "description": "The next local wall-clock time \"HH:MM\" on the PC clock (tomorrow when already past); use either this or delay_minutes." },
+                    "reason": { "type": "string", "description": "One line the person reads beside the buttons." }
+                },
+                "required": ["action", "reason"]
+            }),
+        },
     ]
 }
 
@@ -370,16 +387,41 @@ struct TradingProposeArgs {
 /// The systems a start/stop proposal covers: `system_ids` in order, with the
 /// single `system_id` shorthand appended and blanks/duplicates dropped.
 fn proposal_system_ids(args: &TradingProposeArgs) -> anyhow::Result<Vec<String>> {
-    let mut ids: Vec<String> = Vec::new();
     let listed = args.system_ids.iter().flatten().chain(args.system_id.iter());
+    collect_system_ids(&args.action, listed)
+}
+
+/// The systems a schedule covers: same rules as a proposal, but a schedule
+/// always names at least one (an empty list would silently mean the whole pool).
+fn schedule_system_ids(args: &TradingScheduleArgs) -> anyhow::Result<Vec<String>> {
+    let listed = args.system_ids.iter().flatten().chain(args.system_id.iter());
+    collect_system_ids(&args.action, listed)
+}
+
+fn collect_system_ids<'a>(
+    action: &str,
+    listed: impl Iterator<Item = &'a String>,
+) -> anyhow::Result<Vec<String>> {
+    let mut ids: Vec<String> = Vec::new();
     for id in listed {
         let id = id.trim();
         if !id.is_empty() && !ids.iter().any(|seen| seen == id) {
             ids.push(id.to_owned());
         }
     }
-    anyhow::ensure!(!ids.is_empty(), "{} needs system_ids", args.action);
+    anyhow::ensure!(!ids.is_empty(), "{action} needs system_ids");
     Ok(ids)
+}
+
+#[derive(Debug, Deserialize)]
+struct TradingScheduleArgs {
+    action: String,
+    #[serde(default)]
+    system_ids: Option<Vec<String>>,
+    system_id: Option<String>,
+    delay_minutes: Option<f64>,
+    at_time: Option<String>,
+    reason: String,
 }
 
 /// `trading_select`: the filters the person's words become. Every one is
@@ -1173,6 +1215,7 @@ impl Tools {
             TRADING_SNAPSHOT_TOOL => self.trading_snapshot(parse(args)?).await,
             TRADING_SELECT_TOOL => self.trading_select(parse(args)?).await,
             TRADING_PROPOSE_TOOL => self.trading_propose(parse(args)?).await,
+            TRADING_SCHEDULE_TOOL => self.trading_schedule(parse(args)?).await,
             theme if themes::NAMES.contains(&theme) => {
                 return self.themes(theme, args).await;
             }
@@ -1297,6 +1340,63 @@ impl Tools {
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+    }
+
+    async fn trading_schedule(&self, args: TradingScheduleArgs) -> anyhow::Result<Value> {
+        let task_kind = match args.action.as_str() {
+            "start_system" | "start_systems" => "start-systems",
+            "stop_system" | "stop_systems" => "stop-systems",
+            other => anyhow::bail!("unknown action: {other}"),
+        };
+        let system_ids = schedule_system_ids(&args)?;
+        anyhow::ensure!(
+            !args.reason.trim().is_empty(),
+            "give the person a reason"
+        );
+        let delay = args.delay_minutes;
+        let at_time = args
+            .at_time
+            .as_deref()
+            .map(str::trim)
+            .filter(|at| !at.is_empty());
+        anyhow::ensure!(
+            delay.is_some() != at_time.is_some(),
+            "give either delay_minutes or at_time, not both"
+        );
+        if let Some(minutes) = delay {
+            anyhow::ensure!(
+                minutes.is_finite() && minutes > 0.0,
+                "delay_minutes must be a positive number of minutes"
+            );
+        }
+        let mut action = json!({
+            "kind": "schedule_task",
+            "task_kind": task_kind,
+            "system_ids": system_ids,
+        });
+        if let Some(minutes) = delay {
+            action["delay_minutes"] = json!(minutes);
+        }
+        if let Some(at) = at_time {
+            action["at_time"] = json!(at);
+        }
+        let proposal = self
+            .zeron
+            .call(
+                zeron_rpc::methods::TRADING_PROPOSE,
+                json!({ "action": action, "reason": args.reason, "chatId": self.zeron.origin().chat_id }),
+            )
+            .await?;
+        let id = proposal
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("the desk did not return a proposal id"))?
+            .to_owned();
+        Ok(json!({
+            "id": id,
+            "status": "pending",
+            "note": "The card is in this chat, waiting for the person to approve or reject. Do not schedule it again; approving it creates the desk task, which then runs on its own at its time. trading_snapshot shows the task in tasks and the card's outcome in pendingProposals / recentProposals.",
+        }))
     }
 
     async fn trading_select(&self, args: TradingSelectArgs) -> anyhow::Result<Value> {
@@ -2738,6 +2838,73 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("needs system_ids"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn trading_schedule_proposes_one_task_and_checks_its_time() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        let answer = tools
+            .call(
+                TRADING_SCHEDULE_TOOL,
+                json!({
+                    "action": "stop_systems",
+                    "system_ids": ["01_a", "03_c"],
+                    "delay_minutes": 15,
+                    "reason": "parar antes del cierre",
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer["status"], "pending");
+        let writes = world.writes.lock().unwrap().clone();
+        assert_eq!(writes[0].1["action"]["kind"], "schedule_task");
+        assert_eq!(writes[0].1["action"]["task_kind"], "stop-systems");
+        assert_eq!(
+            writes[0].1["action"]["system_ids"],
+            json!(["01_a", "03_c"])
+        );
+        assert_eq!(writes[0].1["action"]["delay_minutes"], 15.0);
+
+        let at = tools
+            .call(
+                TRADING_SCHEDULE_TOOL,
+                json!({
+                    "action": "start_system",
+                    "system_id": "01_a",
+                    "at_time": "22:05",
+                    "reason": "arrancar por la noche",
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(at["status"], "pending");
+        let writes = world.writes.lock().unwrap().clone();
+        let action = &writes[1].1["action"];
+        assert_eq!(action["task_kind"], "start-systems");
+        assert_eq!(action["system_ids"], json!(["01_a"]));
+        assert_eq!(action["at_time"], "22:05");
+        assert!(action.get("delay_minutes").is_none(), "{action}");
+
+        // Both or neither time, a non-positive delay and no systems are caught
+        // here, before the desk sees a malformed task.
+        for bad in [
+            json!({"action":"start_systems","system_ids":["01_a"],"reason":"x"}),
+            json!({"action":"start_systems","system_ids":["01_a"],"delay_minutes":5,"at_time":"22:00","reason":"x"}),
+            json!({"action":"start_systems","system_ids":["01_a"],"delay_minutes":0,"reason":"x"}),
+            json!({"action":"start_systems","delay_minutes":5,"reason":"x"}),
+        ] {
+            let error = tools
+                .call(TRADING_SCHEDULE_TOOL, bad)
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains("delay_minutes")
+                    || error.contains("at_time")
+                    || error.contains("needs system_ids"),
+                "{error}"
+            );
+        }
     }
 
     #[tokio::test]

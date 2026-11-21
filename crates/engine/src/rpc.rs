@@ -2514,13 +2514,13 @@ impl EngineRpc {
 }
 
 /// A proposal's systems as the engine stores them: trimmed, without blanks or
-/// duplicates, and never an empty list (an agent that names nothing is a bug,
-/// not a request to run the whole desk).
+/// duplicates, and (except for a scheduled task, where none means the whole
+/// desk) never an empty list: an agent that names nothing is a bug.
 fn normalize_proposal_action(
     action: zeron_proto::trading::ProposalAction,
 ) -> Result<zeron_proto::trading::ProposalAction, RpcError> {
     use zeron_proto::trading::ProposalAction;
-    let clean = |ids: Vec<String>| -> Result<Vec<String>, RpcError> {
+    let tidy = |ids: Vec<String>| -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for id in ids {
             let id = id.trim();
@@ -2528,6 +2528,10 @@ fn normalize_proposal_action(
                 out.push(id.to_owned());
             }
         }
+        out
+    };
+    let clean = |ids: Vec<String>| -> Result<Vec<String>, RpcError> {
+        let out = tidy(ids);
         if out.is_empty() {
             return Err(RpcError::Failed(
                 "Una propuesta de sistemas necesita al menos un id".into(),
@@ -2542,8 +2546,56 @@ fn normalize_proposal_action(
         ProposalAction::StopSystems { system_ids } => ProposalAction::StopSystems {
             system_ids: clean(system_ids)?,
         },
+        ProposalAction::ScheduleTask {
+            task_kind,
+            system_ids,
+            delay_minutes,
+            at_time,
+        } => {
+            let at_time = at_time
+                .map(|at| at.trim().to_owned())
+                .filter(|at| !at.is_empty());
+            if delay_minutes.is_some() == at_time.is_some() {
+                return Err(RpcError::Failed(
+                    "Una tarea programada necesita un plazo en minutos o una hora, no las dos".into(),
+                ));
+            }
+            if let Some(minutes) = delay_minutes {
+                if !minutes.is_finite() || minutes <= 0.0 {
+                    return Err(RpcError::Failed(
+                        "El plazo de la tarea debe ser un número positivo de minutos".into(),
+                    ));
+                }
+            }
+            ProposalAction::ScheduleTask {
+                task_kind,
+                system_ids: tidy(system_ids),
+                delay_minutes,
+                at_time,
+            }
+        }
         other => other,
     })
+}
+
+/// `Tarea programada: parar 2 sistemas a las 22:05.` — what the card says once
+/// the person approves a schedule.
+fn describe_task(task: &zeron_proto::trading::Task) -> String {
+    use zeron_proto::trading::TaskKind;
+    let verb = match task.kind {
+        TaskKind::StartSystems => "arrancar",
+        TaskKind::StopSystems => "parar",
+    };
+    let systems = match task.system_ids.as_slice() {
+        [] => "todos los sistemas".to_string(),
+        [one] => format!("el sistema {one}"),
+        many => format!("{} sistemas", many.len()),
+    };
+    let when = chrono::TimeZone::timestamp_millis_opt(&chrono::Local, task.run_at)
+        .single()
+        .map(|at| at.format("%H:%M").to_string())
+        .unwrap_or_else(|| "--:--".into());
+    format!("Tarea programada: {verb} {systems} a las {when}.")
 }
 
 /// The verdict text for a proposal that ran over several systems.
@@ -2705,6 +2757,113 @@ mod trading_person_tests {
             )
             .await
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_schedules_and_only_the_persons_approval_creates_the_task() {
+        use zeron_rpc::{with_caller, Caller};
+        let dir = tempfile::tempdir().unwrap();
+        let registry = std::sync::Arc::new(HarnessRegistry::new());
+        let core = crate::EngineCore::assemble(
+            &dir.path().join("engine"),
+            registry,
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let agent = || Caller::Agent {
+            chat: Some("chat-1".into()),
+        };
+        let value = |reply: Result<RpcReply, RpcError>| match reply {
+            Ok(RpcReply::Value(value)) => value,
+            Ok(_) => panic!("streamed"),
+            Err(error) => panic!("{error}"),
+        };
+
+        // An agent cannot add a task itself; it proposes the schedule.
+        assert!(
+            with_caller(
+                agent(),
+                rpc.handle(
+                    methods::TRADING_TASK_ADD,
+                    serde_json::json!({
+                        "kind": "stop-systems",
+                        "systemIDs": ["01_eurusd_mt5"],
+                        "delayMinutes": 15.0,
+                    }),
+                ),
+            )
+            .await
+            .is_err()
+        );
+        let proposal = value(
+            with_caller(
+                agent(),
+                rpc.handle(
+                    methods::TRADING_PROPOSE,
+                    serde_json::json!({
+                        "action": {
+                            "kind": "schedule_task",
+                            "task_kind": "stop-systems",
+                            "system_ids": ["01_eurusd_mt5"],
+                            "delay_minutes": 15.0,
+                        },
+                        "reason": "Parar antes del cierre",
+                    }),
+                ),
+            )
+            .await,
+        );
+        assert_eq!(proposal["status"], "pending");
+        let id = proposal["id"].as_str().unwrap().to_owned();
+
+        // The person approves: the desk task exists and the card says when.
+        let resolved = value(
+            rpc.handle(
+                methods::TRADING_PROPOSAL_RESOLVE,
+                serde_json::json!({ "id": id, "approve": true }),
+            )
+            .await,
+        );
+        assert_eq!(resolved["status"], "done", "{resolved}");
+        let result = resolved["result"].as_str().unwrap();
+        assert!(result.contains("Tarea programada"), "{result}");
+        assert!(result.contains("parar"), "{result}");
+        assert!(result.contains("a las"), "{result}");
+    }
+
+    #[test]
+    fn a_schedule_needs_one_time_and_at_least_one_system() {
+        use zeron_proto::trading::{ProposalAction, TaskKind};
+        let schedule = |ids: Vec<&str>, delay: Option<f64>, at: Option<&str>| {
+            normalize_proposal_action(ProposalAction::ScheduleTask {
+                task_kind: TaskKind::StopSystems,
+                system_ids: ids.into_iter().map(str::to_owned).collect(),
+                delay_minutes: delay,
+                at_time: at.map(str::to_owned),
+            })
+        };
+        let ok = schedule(vec![" 01 ", "", "01", "02"], Some(15.0), None).unwrap();
+        assert_eq!(
+            ok,
+            ProposalAction::ScheduleTask {
+                task_kind: TaskKind::StopSystems,
+                system_ids: vec!["01".into(), "02".into()],
+                delay_minutes: Some(15.0),
+                at_time: None,
+            }
+        );
+        assert!(schedule(vec!["01"], None, None).is_err(), "no time");
+        assert!(
+            schedule(vec!["01"], Some(15.0), Some("22:00")).is_err(),
+            "two times"
+        );
+        assert!(schedule(vec!["01"], Some(0.0), None).is_err(), "zero delay");
+        assert!(
+            schedule(vec![], Some(5.0), None).is_ok(),
+            "no ids means the whole desk"
         );
     }
 
@@ -4352,6 +4511,43 @@ impl RpcService for EngineRpc {
                             )
                             .await;
                     }
+                    ProposalAction::ScheduleTask {
+                        task_kind,
+                        system_ids,
+                        delay_minutes,
+                        at_time,
+                    } => {
+                        // Approving a schedule only creates the task; the task
+                        // itself runs at its time, with nobody watching.
+                        let mut params = serde_json::json!({
+                            "kind": task_kind,
+                            "systemIDs": system_ids,
+                        });
+                        if let Some(minutes) = delay_minutes {
+                            params["delayMinutes"] = serde_json::json!(minutes);
+                        }
+                        if let Some(at) = at_time {
+                            params["atTime"] = serde_json::json!(at);
+                        }
+                        let outcome =
+                            Box::pin(self.handle(methods::TRADING_TASK_ADD, params)).await;
+                        let (status, result) = match outcome {
+                            Ok(RpcReply::Value(value)) => {
+                                let message = serde_json::from_value::<zeron_proto::trading::Task>(
+                                    value.clone(),
+                                )
+                                .map(|task| describe_task(&task))
+                                .unwrap_or_else(|_| "Tarea programada.".into());
+                                (ProposalStatus::Done, Some(message))
+                            }
+                            Ok(_) => (ProposalStatus::Done, Some("Tarea programada.".into())),
+                            Err(error) => (ProposalStatus::Failed, Some(error.to_string())),
+                        };
+                        self.trading.finish_proposal(&p.id, status, result);
+                        return RpcReply::value(
+                            &self.trading.proposals().into_iter().find(|x| x.id == p.id),
+                        );
+                    }
                 };
                 let outcome = Box::pin(self.handle(method, params)).await;
                 let (status, result) = match outcome {
@@ -4433,45 +4629,49 @@ impl RpcService for EngineRpc {
             methods::TRADING_TASK_LIST => {
                 if let Some(engine) = &self.trading_engine {
                     let guard = engine.lock().unwrap();
-                    RpcReply::value(&guard.task_list())
-                } else if self.trading.live() {
+                    if guard.has_pool() {
+                        return RpcReply::value(&guard.task_list());
+                    }
+                }
+                if self.trading.live() {
                     RpcReply::value(&Vec::<zeron_proto::trading::Task>::new())
                 } else {
                     RpcReply::value(&zeron_trading::task_list())
                 }
             }
             methods::TRADING_TASK_ADD => {
+                let p: zeron_proto::trading::TaskAddInput = parse_params(params)?;
                 if let Some(engine) = &self.trading_engine {
-                    let p: zeron_proto::trading::TaskAddInput = parse_params(params)?;
                     let guard = engine.lock().unwrap();
-                    match guard.task_add(&p) {
-                        Ok(task) => RpcReply::value(&task),
-                        Err(error) => return Err(RpcError::Failed(error.to_string())),
+                    // A demo desk (no pool) schedules against the fixture.
+                    if guard.has_pool() {
+                        return match guard.task_add(&p) {
+                            Ok(task) => RpcReply::value(&task),
+                            Err(error) => Err(RpcError::Failed(error.to_string())),
+                        };
                     }
-                } else {
-                    self.require_demo_trading("Programar una tarea")?;
-                    let p: zeron_proto::trading::TaskAddInput = parse_params(params)?;
-                    match zeron_trading::mock::task_add(&p) {
-                        Ok(task) => RpcReply::value(&task),
-                        Err(error) => return Err(RpcError::Failed(error.to_string())),
-                    }
+                }
+                self.require_demo_trading("Programar una tarea")?;
+                match zeron_trading::mock::task_add(&p) {
+                    Ok(task) => RpcReply::value(&task),
+                    Err(error) => Err(RpcError::Failed(error.to_string())),
                 }
             }
             methods::TRADING_TASK_CANCEL => {
+                let p: zeron_proto::trading::TaskIdParams = parse_params(params)?;
                 if let Some(engine) = &self.trading_engine {
-                    let p: zeron_proto::trading::TaskIdParams = parse_params(params)?;
                     let guard = engine.lock().unwrap();
-                    match guard.task_cancel(&p.task_id) {
-                        Ok(task) => RpcReply::value(&task),
-                        Err(error) => return Err(RpcError::Failed(error.to_string())),
+                    if guard.has_pool() {
+                        return match guard.task_cancel(&p.task_id) {
+                            Ok(task) => RpcReply::value(&task),
+                            Err(error) => Err(RpcError::Failed(error.to_string())),
+                        };
                     }
-                } else {
-                    self.require_demo_trading("Cancelar una tarea")?;
-                    let p: zeron_proto::trading::TaskIdParams = parse_params(params)?;
-                    match zeron_trading::mock::task_cancel(&p.task_id) {
-                        Ok(task) => RpcReply::value(&task),
-                        Err(error) => return Err(RpcError::Failed(error.to_string())),
-                    }
+                }
+                self.require_demo_trading("Cancelar una tarea")?;
+                match zeron_trading::mock::task_cancel(&p.task_id) {
+                    Ok(task) => RpcReply::value(&task),
+                    Err(error) => Err(RpcError::Failed(error.to_string())),
                 }
             }
             methods::TRADING_POSITION_CLOSE => {

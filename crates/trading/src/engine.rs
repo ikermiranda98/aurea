@@ -65,6 +65,7 @@ impl TradingEngine {
         let store_conn = store.conn();
         let watch_clone = watch.clone();
         let cancel_clone = Arc::clone(&cancel);
+        let scheduler_dir = systems_dir.clone();
 
         let scheduler = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -82,15 +83,34 @@ impl TradingEngine {
                     if task.status != TaskStatus::Pending || task.run_at > now {
                         continue;
                     }
+                    // A task runs its bot action here; the person already said
+                    // yes when they scheduled it.
+                    let (status, note) =
+                        run_due_task(&state_clone, &scheduler_dir, &cancel_clone, task, now);
                     let conn = store_conn.lock().unwrap();
                     let _ = conn.execute(
-                        "UPDATE trading_task SET status='ran', resolved_at=?1, time_updated=?1 WHERE id=?2",
-                        rusqlite::params![now, task.id],
+                        "UPDATE trading_task SET status=?1, resolved_at=?2, time_updated=?2 WHERE id=?3",
+                        rusqlite::params![tasks::status_to_str(status), now, task.id],
                     );
                     drop(conn);
+                    if let Some(note) = note {
+                        state_clone.lock().unwrap().push_log(
+                            zeron_proto::trading::LogLevel::Info,
+                            "motor",
+                            note,
+                            now,
+                            true,
+                        );
+                    }
                 }
 
-                let snap = state_clone.lock().unwrap().snapshot(now);
+                let conn = store_conn.lock().unwrap();
+                let tasks_now = tasks::list_tasks(&conn, 50).unwrap_or_default();
+                drop(conn);
+                let mut state = state_clone.lock().unwrap();
+                state.tasks = tasks_now;
+                let snap = state.snapshot(now);
+                drop(state);
                 let _ = watch_clone.send_replace(snap);
             }
         });
@@ -127,7 +147,23 @@ impl TradingEngine {
     }
 
     pub fn start_system(&self, system_id: &str) -> Result<(), TradingError> {
-        let mut state = self.state.lock().unwrap();
+        let outcome = start_system_in(&self.state, &self.systems_dir, &self.cancel, system_id);
+        if outcome.is_ok() {
+            self.publish();
+        }
+        outcome
+    }
+}
+
+/// Starts one bot from the pool. Shared by the desk's button and the task
+/// scheduler, which runs a start the person already scheduled.
+fn start_system_in(
+    state_arc: &Arc<Mutex<TradingState>>,
+    systems_dir: &Option<PathBuf>,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+    system_id: &str,
+) -> Result<(), TradingError> {
+    let mut state = state_arc.lock().unwrap();
         if !state.systems.iter().any(|d| d.id == system_id) {
             return Err(TradingError::SystemNotFound {
                 system_id: system_id.to_string(),
@@ -137,7 +173,7 @@ impl TradingEngine {
             return Ok(());
         }
 
-        let systems_dir = state.systems_dir.clone().or(self.systems_dir.clone());
+        let systems_dir = state.systems_dir.clone().or(systems_dir.clone());
         let dossier = state.systems.iter().find(|d| d.id == system_id).cloned();
         let dir_name = dossier
             .as_ref()
@@ -219,8 +255,8 @@ impl TradingEngine {
         drop(state);
 
         // Spawn background ingestion task.
-        let state_arc = Arc::clone(&self.state);
-        let cancel = Arc::clone(&self.cancel);
+        let state_arc = Arc::clone(state_arc);
+        let cancel = Arc::clone(cancel);
         let sid = system_id.to_string();
         let sd = systems_dir.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -236,12 +272,24 @@ impl TradingEngine {
             });
         }
 
-        self.publish();
         Ok(())
     }
 
+impl TradingEngine {
     pub fn stop_system(&self, system_id: &str) -> Result<(), TradingError> {
-        let mut state = self.state.lock().unwrap();
+        let outcome = stop_system_in(&self.state, &self.systems_dir, system_id);
+        self.publish();
+        outcome
+    }
+}
+
+/// Stops one bot of the pool (pid-guarded). Shared with the task scheduler.
+fn stop_system_in(
+    state_arc: &Arc<Mutex<TradingState>>,
+    systems_dir: &Option<PathBuf>,
+    system_id: &str,
+) -> Result<(), TradingError> {
+    let mut state = state_arc.lock().unwrap();
         if !state.systems.iter().any(|d| d.id == system_id) {
             return Err(TradingError::SystemNotFound {
                 system_id: system_id.to_string(),
@@ -252,7 +300,7 @@ impl TradingEngine {
             return Ok(());
         }
 
-        let systems_dir = state.systems_dir.clone().or(self.systems_dir.clone());
+        let systems_dir = state.systems_dir.clone().or(systems_dir.clone());
         let dossier = state.systems.iter().find(|d| d.id == system_id).cloned();
         let dir_name = dossier
             .as_ref()
@@ -289,7 +337,6 @@ impl TradingEngine {
                                 true,
                             );
                             drop(state);
-                            self.publish();
                             return Ok(());
                         }
                         Some(false) => {
@@ -310,7 +357,6 @@ impl TradingEngine {
                                         true,
                                     );
                                     drop(state);
-                                    self.publish();
                                     return Err(TradingError::InvalidRequest {
                                         message: "no se pudo confirmar".to_string(),
                                     });
@@ -342,10 +388,10 @@ impl TradingEngine {
             true,
         );
         drop(state);
-        self.publish();
         Ok(())
     }
 
+impl TradingEngine {
     pub fn task_add(&self, input: &TaskAddInput) -> Result<Task, TradingError> {
         let state = self.state.lock().unwrap();
         let valid_ids: Vec<String> = state.systems.iter().map(|d| d.id.clone()).collect();
@@ -848,6 +894,115 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// How late a pending task may still run. Past this the engine was off at its
+/// time: starting a bot hours after the person planned is not what they asked.
+const TASK_GRACE_MS: i64 = 5 * 60_000;
+
+fn task_is_missed(now: i64, run_at: i64) -> bool {
+    now.saturating_sub(run_at) > TASK_GRACE_MS
+}
+
+/// The systems a task acts on: its own ids, or every system when it names none.
+fn task_targets(state: &Arc<Mutex<TradingState>>, task: &Task) -> Vec<String> {
+    if !task.system_ids.is_empty() {
+        return task.system_ids.clone();
+    }
+    state
+        .lock()
+        .unwrap()
+        .systems
+        .iter()
+        .map(|system| system.id.clone())
+        .collect()
+}
+
+/// `HH:MM` on the PC clock.
+fn local_clock(ms: i64) -> String {
+    chrono::TimeZone::timestamp_millis_opt(&chrono::Local, ms)
+        .single()
+        .map(|at| at.format("%H:%M").to_string())
+        .unwrap_or_else(|| "--:--".into())
+}
+
+/// Runs one due task and says how it ended: `Ran`, `Failed` (nothing could be
+/// done) or `Missed` (its time passed while the desk was off). The note is the
+/// engine-log line the person reads.
+fn run_due_task(
+    state: &Arc<Mutex<TradingState>>,
+    systems_dir: &Option<PathBuf>,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+    task: &Task,
+    now: i64,
+) -> (TaskStatus, Option<String>) {
+    let (verb, participle) = match task.kind {
+        TaskKind::StartSystems => ("arrancar", "arrancado"),
+        TaskKind::StopSystems => ("parar", "parado"),
+    };
+    let ids = task_targets(state, task);
+    let label = if ids.is_empty() {
+        "todos los sistemas".to_string()
+    } else if ids.len() == 1 {
+        format!("el sistema {}", ids[0])
+    } else {
+        format!("{} sistemas", ids.len())
+    };
+    if task_is_missed(now, task.run_at) {
+        return (
+            TaskStatus::Missed,
+            Some(format!(
+                "Tarea perdida: {verb} {label} a las {} (el motor no estaba en marcha).",
+                local_clock(task.run_at)
+            )),
+        );
+    }
+    if ids.is_empty() {
+        return (
+            TaskStatus::Failed,
+            Some(format!("Tarea fallida: no hay sistemas que {verb}.")),
+        );
+    }
+    let mut done = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for id in &ids {
+        let outcome = match task.kind {
+            TaskKind::StartSystems => start_system_in(state, systems_dir, cancel, id),
+            TaskKind::StopSystems => stop_system_in(state, systems_dir, id),
+        };
+        match outcome {
+            Ok(()) => done += 1,
+            Err(error) => failed.push(format!("{id}: {error}")),
+        }
+    }
+    if failed.is_empty() {
+        let done_label = if done == 1 {
+            format!("1 sistema {participle}")
+        } else {
+            format!("{done} sistemas {participle}s")
+        };
+        (
+            TaskStatus::Ran,
+            Some(format!("Tarea programada: {done_label}.")),
+        )
+    } else if done == 0 {
+        (
+            TaskStatus::Failed,
+            Some(format!(
+                "Tarea fallida: no se pudo {verb} {label}: {}",
+                failed.join("; ")
+            )),
+        )
+    } else {
+        (
+            TaskStatus::Failed,
+            Some(format!(
+                "Tarea a medias: {done} de {} sistemas {participle}s; fallaron: {}",
+                ids.len(),
+                failed.join("; ")
+            )),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -925,5 +1080,92 @@ mod tests {
         assert_eq!(cancelled.status, TaskStatus::Cancelled);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_task_that_passed_while_the_desk_was_off_is_missed() {
+        let now = 1_000_000_000_000i64;
+        assert!(!task_is_missed(now, now - 60_000), "a minute late still runs");
+        assert!(task_is_missed(now, now - TASK_GRACE_MS - 1));
+    }
+
+    #[test]
+    fn a_task_without_ids_targets_every_system() {
+        let seq = std::sync::atomic::AtomicU64::new(0).fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("aurea_engine_targets_{}_{}", std::process::id(), seq));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("01_uno")).unwrap();
+        fs::create_dir_all(dir.join("02_dos")).unwrap();
+
+        let mut state = TradingState::new();
+        state.scan_pool(&dir);
+        let state = Arc::new(Mutex::new(state));
+
+        let named = Task {
+            id: "trd_named".into(),
+            kind: TaskKind::StopSystems,
+            system_ids: vec!["02".into()],
+            run_at: 0,
+            status: TaskStatus::Pending,
+            resolved_at: None,
+            time_created: 0,
+            time_updated: 0,
+        };
+        assert_eq!(task_targets(&state, &named), ["02"]);
+
+        let every = Task { system_ids: vec![], ..named };
+        let mut ids = task_targets(&state, &every);
+        ids.sort();
+        assert_eq!(ids, ["01", "02"], "no ids means the whole pool");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_due_task_that_cannot_run_is_failed_and_names_the_system() {
+        let state = Arc::new(Mutex::new(TradingState::new()));
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let now = now_ms();
+        let task = Task {
+            id: "trd_missing".into(),
+            kind: TaskKind::StartSystems,
+            system_ids: vec!["99".into()],
+            run_at: now,
+            status: TaskStatus::Pending,
+            resolved_at: None,
+            time_created: now,
+            time_updated: now,
+        };
+        let (status, note) = run_due_task(&state, &None, &cancel, &task, now);
+        assert_eq!(status, TaskStatus::Failed);
+        let note = note.unwrap();
+        assert!(note.contains("99"), "{note}");
+        assert!(note.contains("no se pudo arrancar"), "{note}");
+    }
+
+    #[tokio::test]
+    async fn the_scheduler_never_calls_a_task_done_when_it_could_not_run_it() {
+        let mut engine = TradingEngine::new(None, None).unwrap();
+        // An empty pool: the task is due, there is nothing to start, so the
+        // desk must say failed (before, it marked every due task ran).
+        let task = engine
+            .task_add(&TaskAddInput {
+                kind: TaskKind::StartSystems,
+                system_ids: Some(vec![]),
+                delay_minutes: Some(0.02),
+                at_time: None,
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let snap = engine.snapshot();
+        let stored = snap.tasks.iter().find(|t| t.id == task.id).unwrap();
+        assert_eq!(stored.status, TaskStatus::Failed, "{stored:?}");
+        assert!(
+            snap.logs
+                .iter()
+                .any(|log| log.message.contains("no hay sistemas")),
+            "{:?}",
+            snap.logs.last()
+        );
     }
 }

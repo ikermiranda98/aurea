@@ -45,7 +45,10 @@ moves money or a bot (closing positions, panic, starting or stopping one or seve
 through `trading_propose`: it never runs by itself, a card appears at once in the chat for the person \
 to approve or reject, and you report what they decided. Group the systems the person names into one \
 proposal (`system_ids`) instead of one card each; `trading_select` picks the ids a group means (by \
-symbol, running, P&L % or time without activity) so you pass its answer, never guessed ids. Only paper \
+symbol, running, P&L % or time without activity) so you pass its answer, never guessed ids. A start \
+or stop for later goes through `trading_schedule` (also a card; approving it creates a desk task that \
+runs on its own at that time while Aurea is open, and is marked missed rather than run late if Aurea \
+was off). Only paper \
 accounts are traded; never suggest \
 live trading, never ask for passwords or API keys, and never claim an action ran unless the proposal \
 came back done. When the snapshot says demo, its numbers are invented: say so. You are not a \

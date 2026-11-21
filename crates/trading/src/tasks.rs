@@ -39,7 +39,7 @@ fn kind_from_str(s: &str) -> TaskKind {
     }
 }
 
-fn status_to_str(status: TaskStatus) -> &'static str {
+pub(crate) fn status_to_str(status: TaskStatus) -> &'static str {
     match status {
         TaskStatus::Pending => "pending",
         TaskStatus::Ran => "ran",
