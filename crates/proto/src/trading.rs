@@ -96,6 +96,12 @@ pub struct System {
     pub timeframe: String,
     /// The bot's unrealized PnL from its own registro.log portfolio updates; null until seen today.
     pub pnl_day: Option<f64>,
+    /// Capital the person assigned to this system in its `system.json`; null when undeclared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capital: Option<f64>,
+    /// `pnl_day` over `capital`, in percent; null without both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pnl_pct: Option<f64>,
     /// The bot's configured TWS CLIENT_ID from its config.py; null when the line is missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<i64>,

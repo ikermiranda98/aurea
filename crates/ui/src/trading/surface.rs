@@ -929,6 +929,16 @@ impl TradingSurface {
                 cx.notify();
             }))
         };
+        let meta = match system.capital {
+            Some(capital) => format!(
+                "{} · {} · {} · {}",
+                system.id,
+                system.symbol,
+                system.timeframe,
+                model::money(Some(capital))
+            ),
+            None => format!("{} · {} · {}", system.id, system.symbol, system.timeframe),
+        };
         div()
             .px(px(12.0))
             .py(px(8.0))
@@ -968,21 +978,31 @@ impl TradingSurface {
                             .text_size(px(9.5))
                             .text_color(theme.text_faint)
                             .truncate()
-                            .child(SharedString::from(format!(
-                                "{} · {} · {}",
-                                system.id, system.symbol, system.timeframe
-                            ))),
+                            .child(SharedString::from(meta)),
                     ),
             )
             .child(
                 div()
-                    .w(px(70.0))
+                    .w(px(78.0))
                     .flex_none()
-                    .text_right()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(px(10.5))
-                    .text_color(pnl_tone)
-                    .child(model::signed_money(system.pnl_day)),
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(1.0))
+                    .child(
+                        div()
+                            .font_family(theme.font_mono.clone())
+                            .text_size(px(10.5))
+                            .text_color(pnl_tone)
+                            .child(model::signed_money(system.pnl_day)),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme.font_mono.clone())
+                            .text_size(px(9.5))
+                            .text_color(theme.text_faint)
+                            .child(model::signed_pct(system.pnl_pct)),
+                    ),
             )
             .child(action)
     }

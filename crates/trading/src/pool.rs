@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 
 /// One `NN_name` folder's facts, as stated by the files inside it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Dossier {
     /// Folder name as found in the pool, e.g. `"07_oro_nube_ichimoku"`.
     pub dir_name: String,
@@ -32,6 +32,8 @@ pub struct Dossier {
     pub description: Option<String>,
     /// String-valued `reglas` entries from `reglas.json`.
     pub rules: Option<BTreeMap<String, String>>,
+    /// Capital assigned to the system, from `system.json`; `None` when undeclared.
+    pub capital: Option<f64>,
     /// MT5 destination from `system.json` when the folder asks for MT5.
     pub mt5: Option<Mt5Target>,
 }
@@ -130,7 +132,9 @@ pub fn dossier(pool: &Path, dir_name: &str) -> Dossier {
         Some((symbol, timeframe)) => (Some(symbol.to_owned()), Some(timeframe.to_owned())),
         None => (None, None),
     };
-    let mt5 = read_mt5(&folder, &id);
+    let system = read_system_json(&folder);
+    let capital = system.as_ref().and_then(capital_from);
+    let mt5 = read_mt5(system.as_ref(), &id);
 
     Dossier {
         dir_name: dir_name.to_owned(),
@@ -143,6 +147,7 @@ pub fn dossier(pool: &Path, dir_name: &str) -> Dossier {
         close_hour,
         description,
         rules,
+        capital,
         mt5,
     }
 }
@@ -234,13 +239,28 @@ fn read_rules(folder: &Path) -> (Option<String>, Option<BTreeMap<String, String>
     (description, rules)
 }
 
-/// Reads an MT5 destination: the folder must ask for `mt5` and carry all three
-/// required facts; a missing magic falls back to the folder's default.
-fn read_mt5(folder: &Path, id: &str) -> Option<Mt5Target> {
+/// Reads `system.json`, tolerating a UTF-8 BOM; malformed JSON reads as absent.
+fn read_system_json(folder: &Path) -> Option<serde_json::Value> {
     let bytes = fs::read(folder.join("system.json")).ok()?;
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
     let text = String::from_utf8(bytes.to_vec()).ok()?;
-    let json = serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')).ok()?;
+    serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')).ok()
+}
+
+/// `capital` from `system.json` as a positive amount; anything else is unset.
+fn capital_from(json: &serde_json::Value) -> Option<f64> {
+    let amount = match json.get("capital")? {
+        serde_json::Value::Number(number) => number.as_f64()?,
+        serde_json::Value::String(text) => text.trim().replace(',', ".").parse::<f64>().ok()?,
+        _ => return None,
+    };
+    (amount.is_finite() && amount > 0.0).then_some(amount)
+}
+
+/// Reads an MT5 destination: the folder must ask for `mt5` and carry all three
+/// required facts; a missing magic falls back to the folder's default.
+fn read_mt5(json: Option<&serde_json::Value>, id: &str) -> Option<Mt5Target> {
+    let json = json?;
 
     let asks_mt5 = json
         .get("broker")
@@ -380,7 +400,7 @@ mod tests {
         write(
             &folder,
             "system.json",
-            r#"{"broker":"mt5","login":5058203356,"server":"AureaDemo","symbol":"XAUUSD.cash","magic":7700007}"#,
+            r#"{"broker":"mt5","login":5058203356,"server":"AureaDemo","symbol":"XAUUSD.cash","magic":7700007,"capital":12500}"#,
         );
 
         let def = dossier(pool.path(), "07_oro_nube_ichimoku");
@@ -392,6 +412,7 @@ mod tests {
         assert_eq!(def.port, Some(7497));
         assert_eq!(def.close_hour.as_deref(), Some("16:30:05"));
         assert_eq!(def.description.as_deref(), Some("Idea del oro."));
+        assert_eq!(def.capital, Some(12_500.0));
         let rules = def.rules.expect("debe leer las reglas");
         assert_eq!(rules.get("entrada").map(String::as_str), Some("rompe"));
         assert_eq!(rules.get("salida").map(String::as_str), Some("cierra"));
@@ -496,6 +517,34 @@ mod tests {
             r#"{"broker":"mt5","login":0,"server":"","symbol":"NQ"}"#,
         );
         assert!(dossier(pool.path(), "09_incompleto").mt5.is_none());
+    }
+
+    #[test]
+    fn capital_reads_numbers_and_text_and_ignores_the_rest() {
+        let pool = TempPool::new("capital");
+        let numeric = pool.system("01_numero");
+        write(&numeric, "system.json", r#"{"capital":10000}"#);
+        assert_eq!(dossier(pool.path(), "01_numero").capital, Some(10_000.0));
+
+        let text = pool.system("02_texto");
+        write(&text, "system.json", r#"{"capital":"12500,50"}"#);
+        assert_eq!(dossier(pool.path(), "02_texto").capital, Some(12_500.50));
+
+        let zero = pool.system("03_cero");
+        write(&zero, "system.json", r#"{"capital":0}"#);
+        assert!(dossier(pool.path(), "03_cero").capital.is_none());
+
+        let negative = pool.system("04_negativo");
+        write(&negative, "system.json", r#"{"capital":-50}"#);
+        assert!(dossier(pool.path(), "04_negativo").capital.is_none());
+
+        let broken = pool.system("05_roto");
+        write(&broken, "system.json", r#"{"capital":"mucho"}"#);
+        assert!(dossier(pool.path(), "05_roto").capital.is_none());
+
+        let absent = pool.system("06_ausente");
+        write(&absent, "system.json", r#"{"broker":"ibkr"}"#);
+        assert!(dossier(pool.path(), "06_ausente").capital.is_none());
     }
 
     #[test]

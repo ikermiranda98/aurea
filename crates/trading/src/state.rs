@@ -297,6 +297,13 @@ impl TradingState {
     }
 
     // -- schema mapping ------------------------------------------------------
+    /// `pnl` over the capital assigned to the system, in percent; null without
+    /// both (and for a non-positive or non-finite capital).
+    pub fn pnl_pct(pnl: f64, capital: Option<f64>) -> Option<f64> {
+        let capital = capital.filter(|value| value.is_finite() && *value > 0.0)?;
+        pnl.is_finite().then(|| pnl / capital * 100.0)
+    }
+
     pub fn to_schema_system<R: AsRuntimeRef>(dossier: &pool::Dossier, runtime: R) -> System {
         let runtime = runtime.as_runtime();
         System {
@@ -309,6 +316,8 @@ impl TradingState {
             symbol: dossier.symbol.clone().unwrap_or_default(),
             timeframe: dossier.timeframe.clone().unwrap_or_default(),
             pnl_day: None,
+            capital: dossier.capital,
+            pnl_pct: None,
             client_id: dossier.client_id,
             close_hour: dossier.close_hour.clone(),
             last_activity_at: runtime.and_then(|r| r.ultima_actividad),
@@ -326,6 +335,7 @@ impl TradingState {
                 let mut s = Self::to_schema_system(d, self.bots.get(&d.id));
                 if let Some(pnl) = self.pnl_bots.get(&d.id) {
                     s.pnl_day = Some(*pnl);
+                    s.pnl_pct = Self::pnl_pct(*pnl, s.capital);
                 }
                 s
             })
@@ -508,6 +518,42 @@ mod tests {
 
         let _ = d;
         let _ = std::fs::remove_dir_all(&pool);
+    }
+
+    #[test]
+    fn pnl_pct_needs_capital_and_a_finite_pnl() {
+        let pct = |pnl, capital| TradingState::pnl_pct(pnl, capital).unwrap();
+        assert!((pct(125.0, Some(10_000.0)) - 1.25).abs() < 1e-9);
+        assert!((pct(-50.0, Some(2_000.0)) + 2.5).abs() < 1e-9);
+        assert_eq!(TradingState::pnl_pct(125.0, None), None);
+        assert_eq!(TradingState::pnl_pct(125.0, Some(0.0)), None);
+        assert_eq!(TradingState::pnl_pct(125.0, Some(-10.0)), None);
+        assert_eq!(TradingState::pnl_pct(f64::NAN, Some(10.0)), None);
+    }
+
+    #[test]
+    fn snapshot_computes_pnl_pct_from_the_systems_capital() {
+        let (path, _) = temp_pool();
+        std::fs::write(
+            path.join("07_oro_nube_ichimoku").join("system.json"),
+            r#"{"capital":5000}"#,
+        )
+        .unwrap();
+        let mut st = TradingState::default();
+        st.set_systems_dir(Some(path.clone()));
+        st.scan_pool(path.clone());
+        st.pnl_bots.insert("07".into(), 125.0);
+
+        let snap = st.snapshot(0);
+        let gold = snap.systems.iter().find(|s| s.id == "07").unwrap();
+        assert_eq!(gold.capital, Some(5_000.0));
+        assert!((gold.pnl_pct.unwrap() - 2.5).abs() < 1e-9);
+
+        let without = snap.systems.iter().find(|s| s.id == "02").unwrap();
+        assert_eq!(without.capital, None);
+        assert_eq!(without.pnl_pct, None, "no capital, no percent");
+
+        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]

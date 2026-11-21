@@ -307,7 +307,7 @@ fn trading_catalog() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: TRADING_SNAPSHOT_TOOL,
-            description: "Aurea's trading desk right now: whether it is the DEMO fixture or a live TWS paper link, the shown account (equity, cash, P&L of the day), open positions (symbol, side, size, entry, current price, P&L) plus how many are open across every account, the bot systems (running or not, symbol, P&L, and their own idea and rules when the folder has them), scheduled tasks, connections, the newest engine log rows, the proposals still waiting (`pendingProposals`) and the last answered ones (`recentProposals`). Read-only; call it before answering about positions, before proposing anything, and when the person asks how a proposal ended.",
+            description: "Aurea's trading desk right now: whether it is the DEMO fixture or a live TWS paper link, the shown account (equity, cash, P&L of the day), open positions (symbol, side, size, entry, current price, P&L) plus how many are open across every account, the bot systems (running or not, symbol, P&L, the capital the person assigned to each one and that P&L as a percent of it, and their own idea and rules when the folder has them), scheduled tasks, connections, the newest engine log rows, the proposals still waiting (`pendingProposals`) and the last answered ones (`recentProposals`). Read-only; call it before answering about positions, before proposing anything, and when the person asks how a proposal ended.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -416,7 +416,10 @@ fn summarize_trading(snapshot: &Value, logs: usize) -> Value {
         "openPositionsAllAccounts": snapshot.get("openPositions").and_then(Value::as_array).map(Vec::len),
         "systems": list(
             "systems",
-            &["id", "name", "running", "symbol", "timeframe", "pnlDay", "description", "rules"]
+            &[
+                "id", "name", "running", "symbol", "timeframe", "pnlDay", "capital", "pnlPct",
+                "description", "rules",
+            ]
         ),
         "tasks": list("tasks", &["id", "kind", "status", "runAt", "systemIds"]),
         "links": list("links", &["id", "label", "broker", "connected"]),
@@ -2388,6 +2391,9 @@ mod tests {
                         "active": false,
                         "symbol": "EURUSD",
                         "timeframe": "M15",
+                        "pnlDay": 127.4,
+                        "capital": 12500,
+                        "pnlPct": 1.02,
                         "description": "cruce de medias",
                         "rules": { "entrada": "cruce" },
                     }],
@@ -2482,6 +2488,8 @@ mod tests {
         assert_eq!(recent[0]["result"], "todo cerrado");
         assert_eq!(answer["systems"][0]["description"], "cruce de medias");
         assert_eq!(answer["systems"][0]["rules"]["entrada"], "cruce");
+        assert_eq!(answer["systems"][0]["capital"], 12500);
+        assert_eq!(answer["systems"][0]["pnlPct"], 1.02);
     }
 
     #[tokio::test]

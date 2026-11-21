@@ -145,6 +145,8 @@ mod tests {
             symbol: "MNQ".into(),
             timeframe: "1m".into(),
             pnl_day: None,
+            capital: None,
+            pnl_pct: None,
             client_id: None,
             close_hour: None,
             last_activity_at: None,
