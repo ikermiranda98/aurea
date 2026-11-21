@@ -2477,6 +2477,106 @@ impl EngineRpc {
             }
         }
     }
+
+    /// Runs one approved proposal over several systems, one desk action each,
+    /// and leaves the whole verdict on the proposal. The person's one click is
+    /// the confirmation for every id in the list.
+    async fn run_system_batch(
+        &self,
+        proposal_id: &str,
+        method: &str,
+        system_ids: &[String],
+        infinitive: &str,
+        participle: &str,
+    ) -> Result<RpcReply, RpcError> {
+        let mut done = 0usize;
+        let mut failed: Vec<String> = Vec::new();
+        for system_id in system_ids {
+            let outcome = Box::pin(
+                self.handle(method, serde_json::json!({ "systemId": system_id })),
+            )
+            .await;
+            match outcome {
+                Ok(_) => done += 1,
+                Err(error) => failed.push(format!("{system_id}: {error}")),
+            }
+        }
+        let (status, result) = systems_verdict(infinitive, participle, done, &failed);
+        self.trading.finish_proposal(proposal_id, status, Some(result));
+        RpcReply::value(
+            &self
+                .trading
+                .proposals()
+                .into_iter()
+                .find(|x| x.id == proposal_id),
+        )
+    }
+}
+
+/// A proposal's systems as the engine stores them: trimmed, without blanks or
+/// duplicates, and never an empty list (an agent that names nothing is a bug,
+/// not a request to run the whole desk).
+fn normalize_proposal_action(
+    action: zeron_proto::trading::ProposalAction,
+) -> Result<zeron_proto::trading::ProposalAction, RpcError> {
+    use zeron_proto::trading::ProposalAction;
+    let clean = |ids: Vec<String>| -> Result<Vec<String>, RpcError> {
+        let mut out: Vec<String> = Vec::new();
+        for id in ids {
+            let id = id.trim();
+            if !id.is_empty() && !out.iter().any(|seen| seen == id) {
+                out.push(id.to_owned());
+            }
+        }
+        if out.is_empty() {
+            return Err(RpcError::Failed(
+                "Una propuesta de sistemas necesita al menos un id".into(),
+            ));
+        }
+        Ok(out)
+    };
+    Ok(match action {
+        ProposalAction::StartSystems { system_ids } => ProposalAction::StartSystems {
+            system_ids: clean(system_ids)?,
+        },
+        ProposalAction::StopSystems { system_ids } => ProposalAction::StopSystems {
+            system_ids: clean(system_ids)?,
+        },
+        other => other,
+    })
+}
+
+/// The verdict text for a proposal that ran over several systems.
+fn systems_verdict(
+    infinitive: &str,
+    participle: &str,
+    done: usize,
+    failed: &[String],
+) -> (zeron_proto::trading::ProposalStatus, String) {
+    use zeron_proto::trading::ProposalStatus;
+    if failed.is_empty() {
+        let label = if done == 1 {
+            format!("1 sistema {participle}.")
+        } else {
+            format!("{done} sistemas {participle}s.")
+        };
+        (ProposalStatus::Done, label)
+    } else if done == 0 {
+        (
+            ProposalStatus::Failed,
+            format!("No se pudo {infinitive} ningún sistema: {}", failed.join("; ")),
+        )
+    } else {
+        let done_label = if done == 1 {
+            format!("1 sistema {participle}")
+        } else {
+            format!("{done} sistemas {participle}s")
+        };
+        (
+            ProposalStatus::Failed,
+            format!("{done_label}; fallaron: {}", failed.join("; ")),
+        )
+    }
 }
 
 /// `TradingRepoUpdate`'s refusal while bots run (the app offers to insist).
@@ -2605,6 +2705,59 @@ mod trading_person_tests {
             )
             .await
             .is_err()
+        );
+    }
+
+    #[test]
+    fn systems_verdict_counts_and_names_failures() {
+        use zeron_proto::trading::ProposalStatus;
+        assert_eq!(
+            systems_verdict("parar", "parado", 1, &[]),
+            (ProposalStatus::Done, "1 sistema parado.".into())
+        );
+        assert_eq!(
+            systems_verdict("arrancar", "arrancado", 3, &[]),
+            (ProposalStatus::Done, "3 sistemas arrancados.".into())
+        );
+        assert_eq!(
+            systems_verdict("parar", "parado", 0, &["07: no existe".into()]),
+            (
+                ProposalStatus::Failed,
+                "No se pudo parar ningún sistema: 07: no existe".into()
+            )
+        );
+        assert_eq!(
+            systems_verdict("parar", "parado", 1, &["07: no existe".into()]),
+            (
+                ProposalStatus::Failed,
+                "1 sistema parado; fallaron: 07: no existe".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_proposal_never_carries_blank_or_duplicate_systems() {
+        use zeron_proto::trading::ProposalAction;
+        let action = normalize_proposal_action(ProposalAction::StartSystems {
+            system_ids: vec![" 01_a ".into(), "".into(), "01_a".into(), "02_b".into()],
+        })
+        .unwrap();
+        assert_eq!(
+            action,
+            ProposalAction::StartSystems {
+                system_ids: vec!["01_a".into(), "02_b".into()]
+            }
+        );
+        assert!(
+            normalize_proposal_action(ProposalAction::StopSystems {
+                system_ids: vec![" ".into()],
+            })
+            .is_err()
+        );
+        // The single-position actions pass through untouched.
+        assert_eq!(
+            normalize_proposal_action(ProposalAction::CloseAll).unwrap(),
+            ProposalAction::CloseAll
         );
     }
 }
@@ -4147,7 +4300,8 @@ impl RpcService for EngineRpc {
                     _ => None,
                 }
                 .or(p.chat_id);
-                let proposal = self.trading.propose(p.action, p.reason, chat);
+                let action = normalize_proposal_action(p.action)?;
+                let proposal = self.trading.propose(action, p.reason, chat);
                 RpcReply::value(&proposal)
             }
             methods::TRADING_PROPOSAL_RESOLVE => {
@@ -4176,14 +4330,28 @@ impl RpcService for EngineRpc {
                         serde_json::json!({ "requestId": format!("proposal:{}", p.id) }),
                     ),
                     ProposalAction::Panic => (methods::TRADING_PANIC, serde_json::json!({})),
-                    ProposalAction::StartSystem { system_id } => (
-                        methods::TRADING_SYSTEM_START,
-                        serde_json::json!({ "systemId": system_id }),
-                    ),
-                    ProposalAction::StopSystem { system_id } => (
-                        methods::TRADING_SYSTEM_STOP,
-                        serde_json::json!({ "systemId": system_id }),
-                    ),
+                    ProposalAction::StartSystems { system_ids } => {
+                        return self
+                            .run_system_batch(
+                                &p.id,
+                                methods::TRADING_SYSTEM_START,
+                                &system_ids,
+                                "arrancar",
+                                "arrancado",
+                            )
+                            .await;
+                    }
+                    ProposalAction::StopSystems { system_ids } => {
+                        return self
+                            .run_system_batch(
+                                &p.id,
+                                methods::TRADING_SYSTEM_STOP,
+                                &system_ids,
+                                "parar",
+                                "parado",
+                            )
+                            .await;
+                    }
                 };
                 let outcome = Box::pin(self.handle(method, params)).await;
                 let (status, result) = match outcome {
@@ -4214,18 +4382,21 @@ impl RpcService for EngineRpc {
                 }
             }
             methods::TRADING_SYSTEM_START => {
+                let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
                 if let Some(engine) = &self.trading_engine {
-                    let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
                     let guard = engine.lock().unwrap();
-                    guard.start_system(&p.system_id).map_err(|e| RpcError::Failed(e.to_string()))?;
-                    // Return the system from snapshot.
-                    let snap = guard.snapshot();
-                    let system = snap.systems.into_iter().find(|s| s.id == p.system_id)
-                        .ok_or_else(|| RpcError::Failed(format!("System not found: {}", p.system_id)))?;
-                    return RpcReply::value(&system);
+                    // A demo desk (no pool) shows the fixture's systems; its
+                    // start must not go to the empty native engine.
+                    if guard.has_pool() {
+                        guard.start_system(&p.system_id).map_err(|e| RpcError::Failed(e.to_string()))?;
+                        // Return the system from snapshot.
+                        let snap = guard.snapshot();
+                        let system = snap.systems.into_iter().find(|s| s.id == p.system_id)
+                            .ok_or_else(|| RpcError::Failed(format!("System not found: {}", p.system_id)))?;
+                        return RpcReply::value(&system);
+                    }
                 }
                 self.require_demo_trading("Arrancar un sistema")?;
-                let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
                 match zeron_trading::mock::start_system(&p.system_id) {
                     Some(system) => RpcReply::value(&system),
                     None => {
@@ -4237,17 +4408,18 @@ impl RpcService for EngineRpc {
                 }
             }
             methods::TRADING_SYSTEM_STOP => {
+                let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
                 if let Some(engine) = &self.trading_engine {
-                    let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
                     let guard = engine.lock().unwrap();
-                    guard.stop_system(&p.system_id).map_err(|e| RpcError::Failed(e.to_string()))?;
-                    let snap = guard.snapshot();
-                    let system = snap.systems.into_iter().find(|s| s.id == p.system_id)
-                        .ok_or_else(|| RpcError::Failed(format!("System not found: {}", p.system_id)))?;
-                    return RpcReply::value(&system);
+                    if guard.has_pool() {
+                        guard.stop_system(&p.system_id).map_err(|e| RpcError::Failed(e.to_string()))?;
+                        let snap = guard.snapshot();
+                        let system = snap.systems.into_iter().find(|s| s.id == p.system_id)
+                            .ok_or_else(|| RpcError::Failed(format!("System not found: {}", p.system_id)))?;
+                        return RpcReply::value(&system);
+                    }
                 }
                 self.require_demo_trading("Parar un sistema")?;
-                let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
                 match zeron_trading::mock::stop_system(&p.system_id) {
                     Some(system) => RpcReply::value(&system),
                     None => {

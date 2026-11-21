@@ -437,6 +437,14 @@ impl TradingEngine {
         self.snapshot().systems.iter().any(|system| system.running)
     }
 
+    /// Whether a systems folder is configured (it may hold no systems yet).
+    /// Without one the desk is the demo fixture, so its actions must not go to
+    /// the (empty) native engine.
+    pub fn has_pool(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.systems_dir.is_some() || !state.systems.is_empty()
+    }
+
     /// One engine-log row from the desk itself.
     pub fn note(&self, level: zeron_proto::trading::LogLevel, message: String) {
         self.state.lock().unwrap().push_log(level, "motor", message, now_ms(), true);

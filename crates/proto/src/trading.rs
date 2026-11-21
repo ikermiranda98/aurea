@@ -406,8 +406,10 @@ pub enum ProposalAction {
     ClosePosition { symbol: String },
     CloseAll,
     Panic,
-    StartSystem { system_id: String },
-    StopSystem { system_id: String },
+    /// One or more systems to start in one approval; the card names each.
+    StartSystems { system_ids: Vec<String> },
+    /// One or more systems to stop in one approval; the card names each.
+    StopSystems { system_ids: Vec<String> },
 }
 
 /// Where a proposal stands.
@@ -594,4 +596,26 @@ pub struct RepoState {
 pub struct RepoUpdateParams {
     #[serde(default)]
     pub force: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_group_proposal_keeps_its_wire_name_and_ids() {
+        let group = ProposalAction::StopSystems {
+            system_ids: vec!["01_a".into(), "02_b".into()],
+        };
+        let value = serde_json::to_value(&group).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "stop_systems",
+                "system_ids": ["01_a", "02_b"],
+            })
+        );
+        let back: ProposalAction = serde_json::from_value(value).unwrap();
+        assert_eq!(back, group);
+    }
 }

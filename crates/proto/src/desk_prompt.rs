@@ -103,7 +103,8 @@ Equivalencias con el panel: EQUITY = `account.equity`; P&L DEL DÍA = `account.p
 ## Acciones con dinero o con bots
 
 - Cerrar una posición, cerrar todo, pánico, arrancar o parar un sistema: SOLO con `trading_propose` (en opencode, `zeron_trading_propose`), y solo si la persona lo pidió o lo aceptó claramente. Nunca por iniciativa propia.
-- Acciones: `close_position` (con `symbol` tal como lo da el snapshot), `close_all`, `panic` (para todos los bots, cancela tareas y cierra todo), `start_system` / `stop_system` (con `system_id`). Siempre con un `reason` de una línea en español.
+- Acciones: `close_position` (con `symbol` tal como lo da el snapshot), `close_all`, `panic` (para todos los bots, cancela tareas y cierra todo), `start_systems` / `stop_systems` (con `system_ids`: una lista; una sola tarjeta cubre todos y las nombra; `system_id` vale para uno solo). Siempre con un `reason` de una línea en español.
+- Nombres sueltos ("el de oro", "el NQ"): resuélvelos con `systems` por `name`, `symbol` o `description`. Si hay más de uno o ninguno, pregunta cuál antes de proponer; no adivines. Si piden varios ("los de EURUSD", "los que están parados"), mándalos juntos en `system_ids` de una sola propuesta, no una por sistema.
 - Una propuesta cada vez. La llamada vuelve al instante: la petición aparece como tarjeta en este chat, encima del cuadro de texto, y la acción NO se ejecuta hasta que la persona pulsa Aprobar. Dile que la tarjeta está esperando y no la propongas otra vez.
 - Cuando la persona vuelva a escribir, `trading_snapshot` dirá en `pendingProposals` / `recentProposals` qué decidió y el veredicto. Nunca digas que algo se ha hecho si no aparece como hecha.
 - Si piden algo que no existe en el snapshot (un símbolo o sistema que no está), dilo y no propongas nada.

@@ -590,7 +590,7 @@ impl TradingSurface {
                 .gap(px(6.0))
                 .border_t_1()
                 .border_color(theme.border)
-                .child(chat_proposal_row(proposal, &theme));
+                .child(chat_proposal_row(proposal, snapshot, &theme));
             match proposal.status {
                 ProposalStatus::Pending => {
                     let approve = proposal.id.clone();
@@ -1548,19 +1548,51 @@ fn proposal_title(action: &ProposalAction) -> String {
         ProposalAction::ClosePosition { symbol } => format!("Cerrar la posición de {symbol}"),
         ProposalAction::CloseAll => "Cerrar todas las posiciones".into(),
         ProposalAction::Panic => "Pánico: parar bots, cancelar tareas y cerrar todo".into(),
-        ProposalAction::StartSystem { system_id } => format!("Arrancar el sistema {system_id}"),
-        ProposalAction::StopSystem { system_id } => format!("Parar el sistema {system_id}"),
+        ProposalAction::StartSystems { system_ids } => systems_title("Arrancar", system_ids),
+        ProposalAction::StopSystems { system_ids } => systems_title("Parar", system_ids),
     }
+}
+
+/// `Arrancar el sistema 01_a` for one, `Arrancar 3 sistemas` for a group.
+fn systems_title(verb: &str, system_ids: &[String]) -> String {
+    match system_ids {
+        [one] => format!("{verb} el sistema {one}"),
+        _ => format!("{verb} {} sistemas", system_ids.len()),
+    }
+}
+
+/// The affected systems as the desk names them, for a group's card.
+fn system_names(system_ids: &[String], snapshot: &Snapshot) -> String {
+    system_ids
+        .iter()
+        .map(|id| {
+            snapshot
+                .systems
+                .iter()
+                .find(|system| &system.id == id)
+                .map(|system| system.name.clone())
+                .unwrap_or_else(|| id.clone())
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// One proposal's text column in the chat's narrow inbox; the caller appends
 /// its buttons or status chip on their own line, so the reason is not squeezed.
-fn chat_proposal_row(proposal: &TradingProposal, theme: &Theme) -> Div {
+fn chat_proposal_row(proposal: &TradingProposal, snapshot: &Snapshot, theme: &Theme) -> Div {
     let detail = match &proposal.result {
         Some(result) if proposal.status != ProposalStatus::Pending => result.clone(),
         _ => proposal.reason.clone(),
     };
-    div()
+    let affected = match &proposal.action {
+        ProposalAction::StartSystems { system_ids } | ProposalAction::StopSystems { system_ids }
+            if system_ids.len() > 1 =>
+        {
+            Some(system_names(system_ids, snapshot))
+        }
+        _ => None,
+    };
+    let mut row = div()
         .w_full()
         .min_w(px(0.0))
         .flex()
@@ -1579,7 +1611,18 @@ fn chat_proposal_row(proposal: &TradingProposal, theme: &Theme) -> Div {
                 .text_color(theme.text_muted)
                 .truncate()
                 .child(SharedString::from(detail)),
-        )
+        );
+    if let Some(names) = affected {
+        row = row.child(
+            div()
+                .font_family(theme.font_mono.clone())
+                .text_size(px(9.5))
+                .text_color(theme.text_faint)
+                .truncate()
+                .child(SharedString::from(names)),
+        );
+    }
+    row
 }
 
 fn card(theme: &Theme) -> Div {

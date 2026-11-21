@@ -317,13 +317,14 @@ fn trading_catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: TRADING_PROPOSE_TOOL,
-            description: "Ask the person to run a money or bot action on the trading desk. It NEVER runs by itself: it appears at once as a card in this chat, above the composer, with Approve / Reject. It returns immediately (default), so do not wait: tell the person the card is waiting and do not propose the same action again. When they write again, `trading_snapshot` shows in `pendingProposals` / `recentProposals` what they decided. Actions: close_position (needs symbol, exactly as trading_snapshot names it), close_all (every closable position of the engine account), panic (stop every bot, cancel pending tasks, close everything), start_system / stop_system (need system_id, as trading_snapshot lists it). Always give a short reason in the person's language; propose one action at a time and only when the person asked for it or clearly agreed.",
+            description: "Ask the person to run a money or bot action on the trading desk. It NEVER runs by itself: it appears at once as a card in this chat, above the composer, with Approve / Reject. It returns immediately (default), so do not wait: tell the person the card is waiting and do not propose the same action again. When they write again, `trading_snapshot` shows in `pendingProposals` / `recentProposals` what they decided. Actions: close_position (needs symbol, exactly as trading_snapshot names it), close_all (every closable position of the engine account), panic (stop every bot, cancel pending tasks, close everything), start_systems / stop_systems (need system_ids: one card covers the whole list, naming each system; system_id is the single-system shorthand). Always give a short reason in the person's language; propose one action at a time and only when the person asked for it or clearly agreed.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["close_position", "close_all", "panic", "start_system", "stop_system"] },
+                    "action": { "type": "string", "enum": ["close_position", "close_all", "panic", "start_systems", "stop_systems", "start_system", "stop_system"] },
                     "symbol": { "type": "string", "description": "close_position: the position's symbol." },
-                    "system_id": { "type": "string", "description": "start_system / stop_system: the system id." },
+                    "system_ids": { "type": "array", "items": { "type": "string" }, "description": "start_systems / stop_systems: the system ids, exactly as trading_snapshot lists them. One approval runs all of them." },
+                    "system_id": { "type": "string", "description": "Shorthand for a single start_systems / stop_systems id." },
                     "reason": { "type": "string", "description": "One line the person reads beside the buttons." },
                     "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 600, "description": "0 (default) returns at once with the card waiting. Use a positive value only when you must know the answer in this same turn (the person may not answer within it)." }
                 },
@@ -342,9 +343,26 @@ struct TradingSnapshotArgs {
 struct TradingProposeArgs {
     action: String,
     symbol: Option<String>,
+    #[serde(default)]
+    system_ids: Option<Vec<String>>,
     system_id: Option<String>,
     reason: String,
     wait_seconds: Option<u64>,
+}
+
+/// The systems a start/stop proposal covers: `system_ids` in order, with the
+/// single `system_id` shorthand appended and blanks/duplicates dropped.
+fn proposal_system_ids(args: &TradingProposeArgs) -> anyhow::Result<Vec<String>> {
+    let mut ids: Vec<String> = Vec::new();
+    let listed = args.system_ids.iter().flatten().chain(args.system_id.iter());
+    for id in listed {
+        let id = id.trim();
+        if !id.is_empty() && !ids.iter().any(|seen| seen == id) {
+            ids.push(id.to_owned());
+        }
+    }
+    anyhow::ensure!(!ids.is_empty(), "{} needs system_ids", args.action);
+    Ok(ids)
 }
 
 /// The desk's state, trimmed to what an agent reasons about.
@@ -1061,12 +1079,13 @@ impl Tools {
             }),
             "close_all" => json!({ "kind": "close_all" }),
             "panic" => json!({ "kind": "panic" }),
-            "start_system" | "stop_system" => json!({
-                "kind": args.action,
-                "system_id": args
-                    .system_id
-                    .filter(|s| !s.trim().is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("{} needs system_id", args.action))?,
+            "start_system" | "start_systems" => json!({
+                "kind": "start_systems",
+                "system_ids": proposal_system_ids(&args)?,
+            }),
+            "stop_system" | "stop_systems" => json!({
+                "kind": "stop_systems",
+                "system_ids": proposal_system_ids(&args)?,
             }),
             other => anyhow::bail!("unknown action: {other}"),
         };
@@ -2456,8 +2475,8 @@ mod tests {
             .call(
                 TRADING_PROPOSE_TOOL,
                 json!({
-                    "action": "stop_system",
-                    "system_id": "01_a",
+                    "action": "stop_systems",
+                    "system_ids": ["01_a", "02_b", "01_a", " "],
                     "reason": "parar por la noche",
                 }),
             )
@@ -2469,8 +2488,41 @@ mod tests {
         assert_eq!(writes.len(), 1, "a non-blocking proposal never polls");
         assert_eq!(writes[0].0, methods::TRADING_PROPOSE);
         assert_eq!(writes[0].1["chatId"], "chat-alpha-1");
-        assert_eq!(writes[0].1["action"]["kind"], "stop_system");
-        assert_eq!(writes[0].1["action"]["system_id"], "01_a");
+        assert_eq!(writes[0].1["action"]["kind"], "stop_systems");
+        assert_eq!(
+            writes[0].1["action"]["system_ids"],
+            json!(["01_a", "02_b"]),
+            "one card, blanks and duplicates dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_system_id_still_makes_a_group_of_one() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        tools
+            .call(
+                TRADING_PROPOSE_TOOL,
+                json!({
+                    "action": "start_system",
+                    "system_id": "07_oro",
+                    "reason": "arrancar el oro",
+                }),
+            )
+            .await
+            .unwrap();
+        let writes = world.writes.lock().unwrap().clone();
+        assert_eq!(writes[0].1["action"]["kind"], "start_systems");
+        assert_eq!(writes[0].1["action"]["system_ids"], json!(["07_oro"]));
+
+        let error = tools
+            .call(
+                TRADING_PROPOSE_TOOL,
+                json!({ "action": "start_systems", "reason": "sin ids" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("needs system_ids"), "{error}");
     }
 
     #[tokio::test]
