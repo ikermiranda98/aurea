@@ -2126,16 +2126,24 @@ async fn project_actions_run_in_fresh_host_resolved_terminals() {
         .subscribe(&run.terminal.id, None)
         .expect("main replay");
     let mut main_events = Vec::new();
+    // The command line itself is echoed and carries the literal `CWD=`, so
+    // waiting for the bare marker can stop on the echo and read a transcript
+    // that is still short (a race the full suite hits under load). Wait for
+    // the marker with its value: only the shell's own output writes that.
+    let expected_root = format!("ROOT={}", canonical_repo.display());
+    let expected_main_cwd = format!("CWD={}", shell_path(&canonical_repo));
     drain_until(&mut main_rx, &mut main_events, |events| {
         let output = decoded(events);
         // The three markers arrive in their own writes; CWD is the last one,
         // so waiting only for WT would read a transcript that is still short.
-        output.contains("WT=unset") && output.contains("CWD=")
+        output.contains("WT=unset")
+            && output.contains(&expected_root)
+            && output.contains(&expected_main_cwd)
     })
     .await;
     let main_output = decoded(&main_events);
-    assert!(main_output.contains(&format!("ROOT={}", canonical_repo.display())));
-    assert!(main_output.contains(&format!("CWD={}", shell_path(&canonical_repo))));
+    assert!(main_output.contains(&expected_root));
+    assert!(main_output.contains(&expected_main_cwd));
 
     let second = client
         .call_as::<ProjectActionRun>(
@@ -2170,14 +2178,17 @@ async fn project_actions_run_in_fresh_host_resolved_terminals() {
         .subscribe(&worktree_run.terminal.id, None)
         .expect("worktree replay");
     let mut worktree_events = Vec::new();
+    // Same echo trap as the main run: wait for the CWD marker with its value.
+    let expected_worktree_cwd = format!("CWD={}", shell_path(&canonical_worktree));
+    let expected_worktree = format!("WT={}", canonical_worktree.display());
     drain_until(&mut worktree_rx, &mut worktree_events, |events| {
         let output = decoded(events);
-        output.contains(&format!("WT={}", canonical_worktree.display())) && output.contains("CWD=")
+        output.contains(&expected_worktree) && output.contains(&expected_worktree_cwd)
     })
     .await;
     let worktree_output = decoded(&worktree_events);
-    assert!(worktree_output.contains(&format!("ROOT={}", canonical_repo.display())));
-    assert!(worktree_output.contains(&format!("CWD={}", shell_path(&canonical_worktree))));
+    assert!(worktree_output.contains(&expected_root));
+    assert!(worktree_output.contains(&expected_worktree_cwd));
 
     core.workspace
         .create_space(

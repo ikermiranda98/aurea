@@ -3,7 +3,7 @@
 //! and the verdict. A proposal is still only ever run by the person.
 
 use rusqlite::{params, Connection};
-use zeron_proto::trading::{ProposalAction, ProposalStatus, TradingProposal};
+use zeron_proto::trading::{ProposalStatus, TradingProposal};
 
 /// How many requests the store keeps for the audit. The desk itself shows the
 /// newest 50; a few more survive for the brief.
@@ -98,6 +98,7 @@ pub fn prune(conn: &Connection, keep: usize) -> rusqlite::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeron_proto::trading::ProposalAction;
 
     fn proposal(id: &str, created_at: i64) -> TradingProposal {
         TradingProposal {

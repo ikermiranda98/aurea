@@ -373,10 +373,6 @@ impl TradingService {
         });
     }
 
-    fn load_rules(&self) -> Option<Vec<Rule>> {
-        self.inner.load_rules()
-    }
-
     /// Takes a pending proposal's action to run it, or says why not.
     pub fn start_proposal(&self, id: &str) -> Result<ProposalAction, String> {
         let list = lock(&self.inner.proposals);
