@@ -16,10 +16,12 @@ Everything stays on your computer: no account, no cloud. Actions that touch real
 
 ## Install
 
-There are no published releases yet. Build the installer from source (Windows, Rust and [Inno Setup 6](https://jrsoftware.org/isinfo.php)):
+Download `aurea-<version>-windows-x86_64-setup.exe` from [Releases](https://github.com/ikermiranda98/aurea/releases/latest) and run it (per-user, no administrator rights).
+
+To build the installer yourself (Windows, Rust and [Inno Setup 6](https://jrsoftware.org/isinfo.php)):
 
 ```powershell
-.\scripts\package-windows.ps1 -ReleasesUrl https://github.com/ikermiranda98/aurea/releases
+.\scripts\package-windows.ps1 -ReleasesUrl https://github.com/ikermiranda98/aurea/releases/latest/download
 ```
 
 The installer is written to `target\package\aurea-<version>-windows-x86_64-setup.exe`. To just run it while developing:

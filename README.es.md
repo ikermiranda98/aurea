@@ -16,10 +16,12 @@ Todo se queda en tu ordenador: sin cuenta y sin nube. Las acciones con dinero re
 
 ## Instalación
 
-Todavía no hay versiones publicadas. Genera el instalador desde el código (Windows, Rust e [Inno Setup 6](https://jrsoftware.org/isinfo.php)):
+Descarga `aurea-<versión>-windows-x86_64-setup.exe` desde [Releases](https://github.com/ikermiranda98/aurea/releases/latest) y ejecútalo (se instala para tu usuario, sin permisos de administrador).
+
+Para generar el instalador tú mismo (Windows, Rust e [Inno Setup 6](https://jrsoftware.org/isinfo.php)):
 
 ```powershell
-.\scripts\package-windows.ps1 -ReleasesUrl https://github.com/ikermiranda98/aurea/releases
+.\scripts\package-windows.ps1 -ReleasesUrl https://github.com/ikermiranda98/aurea/releases/latest/download
 ```
 
 El instalador queda en `target\package\aurea-<versión>-windows-x86_64-setup.exe`. Para ejecutarla mientras desarrollas:
