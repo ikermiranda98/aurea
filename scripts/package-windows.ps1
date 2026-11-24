@@ -259,7 +259,8 @@ try {
     # The per-user installer wraps the same staged directory (zeron-update.json
     # included), so installed copies update in place like the portable zip.
     $iscc = Find-InnoSetupCompiler
-    $zgxDefines = if ($ZgxVersion) { @('/DZgx=1', "/DFileVersion=$(($version -split '-')[0])") } else { @() }
+    # @(...) keeps it a list: an `if` yielding an empty array yields $null.
+    $zgxDefines = @(if ($ZgxVersion) { '/DZgx=1'; "/DFileVersion=$(($version -split '-')[0])" })
     if ($Lite) { $zgxDefines += '/DLite=1' }
     & $iscc /Qp "/DAppVersion=$version" "/DArch=$arch" @zgxDefines `
         "/DPackageDir=$([IO.Path]::GetFullPath($stage))" `
