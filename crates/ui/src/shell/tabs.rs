@@ -107,15 +107,28 @@ fn main_column_insets(viewport: f32, sidebar: f32, right: f32, files: f32) -> (f
 /// desk's actions when their measured edge is known (user request: the title
 /// brakes before the chips instead of running under them), and kept inside
 /// the column.
-fn brand_left(viewport: f32, insets: (f32, f32), actions_left: Option<f32>) -> f32 {
+fn brand_left(viewport: f32, insets: (f32, f32), actions: Option<(f32, f32)>) -> f32 {
     let (left, right) = insets;
     let span = (viewport - left - right).max(0.0);
+    let half = brand_width() / 2.0;
     let mut center = left + span / 2.0;
-    if let Some(actions_left) = actions_left {
-        center = center.min(actions_left - BRAND_ACTIONS_GAP - brand_width() / 2.0);
+    // The buttons can sit anywhere (the person aligns them): when the title
+    // would run under them, it steps to the side with more room.
+    if let Some((start, end)) = actions {
+        let overlaps =
+            center + half + BRAND_ACTIONS_GAP > start && center - half - BRAND_ACTIONS_GAP < end;
+        if overlaps {
+            let room_before = start - BRAND_ACTIONS_GAP - left;
+            let room_after = (viewport - right) - (end + BRAND_ACTIONS_GAP);
+            center = if room_before >= room_after {
+                center.min(start - BRAND_ACTIONS_GAP - half)
+            } else {
+                center.max(end + BRAND_ACTIONS_GAP + half)
+            };
+        }
     }
-    center = center.max(left + brand_width() / 2.0);
-    (center - brand_width() / 2.0).clamp(0.0, (viewport - brand_width()).max(0.0))
+    center = center.max(left + half);
+    (center - half).clamp(0.0, (viewport - brand_width()).max(0.0))
 }
 
 /// A target the opener names for the new-session canvas, over the sidebar
@@ -637,13 +650,15 @@ impl Shell {
             // Settings moved out of the sidebar's "…" menu into the bar
             // (user request); the right side is always mounted, so it stays
             // reachable with the drawer collapsed and on every page.
-            .child(header_icon_button(
-                "open-settings",
-                icons::SETTINGS,
-                "Settings",
-                &theme,
-                cx.listener(|this, _, _, cx| this.open_last_settings(cx)),
-            ))
+            .when(self.trading_page.is_none(), |el| {
+                el.child(header_icon_button(
+                    "open-settings",
+                    icons::SETTINGS,
+                    "Settings",
+                    &theme,
+                    cx.listener(|this, _, _, cx| this.open_last_settings(cx)),
+                ))
+            })
             .children(trailing)
             .children(brand);
 
@@ -737,11 +752,11 @@ mod panel_titlebar_tests {
         let insets = main_column_insets(1400.0, 256.0, 0.0, 0.0);
         assert_eq!(brand_left(1400.0, insets, None) + BRAND_WIDTH / 2.0, 828.0);
         // The actions are close: the brand stops with a gap before them.
-        let left = brand_left(1400.0, insets, Some(850.0));
+        let left = brand_left(1400.0, insets, Some((850.0, 1000.0)));
         assert_eq!(left + BRAND_WIDTH, 850.0 - BRAND_ACTIONS_GAP);
         // Room to spare: the measured edge changes nothing.
         assert_eq!(
-            brand_left(1400.0, insets, Some(1200.0)),
+            brand_left(1400.0, insets, Some((1200.0, 1300.0))),
             828.0 - BRAND_WIDTH / 2.0
         );
         // Never outside the window, even in a tiny one.

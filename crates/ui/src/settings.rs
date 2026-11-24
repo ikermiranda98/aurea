@@ -787,6 +787,65 @@ pub fn transcript_compact_mode(cx: &App) -> bool {
         .unwrap_or_default()
 }
 
+/// Where the titlebar's buttons sit (right-click on the bar to change it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TitlebarAlign {
+    Left,
+    Center,
+    #[default]
+    Right,
+}
+
+/// The titlebar's movable buttons, every one once, in the saved order (a
+/// button the saved order lacks keeps its default place at the end).
+pub fn titlebar_order(cx: &App) -> Vec<String> {
+    let saved = cx
+        .try_global::<SettingsStore>()
+        .map(|store| store.current.titlebar_order.clone())
+        .unwrap_or_default();
+    titlebar_order_from(&saved)
+}
+
+/// [`titlebar_order`] for a saved list: unknown names drop, missing ones append.
+pub fn titlebar_order_from(saved: &[String]) -> Vec<String> {
+    const DEFAULT: [&str; 4] = ["links", "tasks", "panic", "settings"];
+    let mut order: Vec<String> = Vec::new();
+    for name in saved {
+        if DEFAULT.contains(&name.as_str()) && !order.contains(name) {
+            order.push(name.clone());
+        }
+    }
+    for name in DEFAULT {
+        if !order.iter().any(|known| known == name) {
+            order.push(name.to_string());
+        }
+    }
+    order
+}
+
+pub fn set_titlebar_order(order: Vec<String>, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.titlebar_order = order;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
+pub fn titlebar_align(cx: &App) -> TitlebarAlign {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.current.titlebar_align)
+        .unwrap_or_default()
+}
+
+pub fn set_titlebar_align(align: TitlebarAlign, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.titlebar_align = align;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
 pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
     if update(SavePolicy::Immediate, cx, |settings| {
         settings.transcript_compact_mode = enabled;
@@ -1225,6 +1284,11 @@ pub struct UiSettings {
     /// the narration between them) fold into one collapsed accordion, so only
     /// the reply text stays visible.
     pub transcript_compact_mode: bool,
+    /// The titlebar's movable buttons, in the order the person dragged them
+    /// into (`links`, `tasks`, `panic`, `settings`); empty is the default.
+    pub titlebar_order: Vec<String>,
+    /// Where the titlebar's buttons sit, like Windows' taskbar alignment.
+    pub titlebar_align: TitlebarAlign,
     /// Destination shared by PR badges, the pull-request board, and pull
     /// request links in messages while [`Self::open_web_links_in_zeron`] is on.
     /// Stored as `pullRequestOpenIn`; [`Self::save`] also writes the legacy
@@ -1349,6 +1413,8 @@ impl Default for UiSettings {
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_zeron: true,
             transcript_compact_mode: false,
+            titlebar_order: Vec::new(),
+            titlebar_align: TitlebarAlign::default(),
             pull_request_destination: PullRequestDestination::Native,
             last_pull_request_repository: None,
             last_pull_request_device: None,
@@ -2189,6 +2255,8 @@ impl UiSettings {
             transcript_width,
             open_web_links_in_zeron,
             transcript_compact_mode,
+            titlebar_order,
+            titlebar_align,
             files_autosave_enabled,
             files_autosave_delay_ms,
             files_word_wrap,
@@ -2449,6 +2517,16 @@ pub use zeron_proto::SidebarSection;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_titlebar_order_keeps_every_button_once() {
+        let saved: Vec<String> = ["panic", "nope", "links", "panic"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            titlebar_order_from(&saved),
+            vec!["panic", "links", "tasks", "settings"]
+        );
+        assert_eq!(titlebar_order_from(&[]), vec!["links", "tasks", "panic", "settings"]);
+    }
+
     use super::*;
 
     #[test]
@@ -3393,6 +3471,8 @@ mod tests {
             transcript_width: 960.0,
             open_web_links_in_zeron: false,
             transcript_compact_mode: true,
+            titlebar_order: vec!["panic".into(), "links".into()],
+            titlebar_align: TitlebarAlign::Center,
             pull_request_destination: PullRequestDestination::External,
             last_pull_request_repository: Some("acme/zeron".into()),
             last_pull_request_device: Some("remote-device".into()),

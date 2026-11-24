@@ -5,7 +5,7 @@
 //! from a click: they stage a [`Confirm`] bar that names the consequence first.
 
 use gpui::{
-    AnyElement, Context, Div, Entity, Hsla, IntoElement, Render, SharedString, Stateful, Task,
+    AnyElement, App, Context, Div, Entity, Hsla, IntoElement, Render, SharedString, Stateful, Task,
     Window, div, prelude::*, px,
 };
 use serde_json::json;
@@ -41,6 +41,41 @@ const SYSTEM_ROW_HEIGHT: f32 = 24.0;
 enum DeskMenu {
     Links,
     Tasks,
+    /// Right-click on the titlebar's buttons: left / centre / right.
+    Align,
+}
+
+/// A titlebar button being dragged to a new place (its settings name).
+#[derive(Clone)]
+struct TitlebarButtonDrag(&'static str);
+
+/// What follows the pointer while a titlebar button is dragged.
+struct TitlebarDragGhost(&'static str);
+
+impl Render for TitlebarDragGhost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        let label = match self.0 {
+            "links" => "Conexiones",
+            "tasks" => "Tareas",
+            "panic" => "Pánico",
+            _ => "Ajustes",
+        };
+        div()
+            .h(px(24.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .bg(theme.surface)
+            .border_1()
+            .border_color(theme.accent)
+            .opacity(0.9)
+            .text_size(px(11.0))
+            .text_color(theme.text)
+            .child(label)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,11 +104,15 @@ pub struct TradingSurface {
     /// never mixes them up.
     links_menu: Popup<()>,
     tasks_menu: Popup<()>,
+    align_menu: Popup<()>,
+    /// Opens Settings (the shell hands it over: an action would only reach
+    /// the shell while focus sits inside it).
+    open_settings: Option<std::rc::Rc<dyn Fn(&mut Window, &mut App)>>,
     /// Left edge (window coordinates) of the titlebar's actions group, read
     /// from the last prepaint. The shell centres `Aurea` on the desk column
     /// and stops it before this edge, so the title never runs under the chips.
     /// A cell (not entity state) because prepaint cannot update the entity.
-    titlebar_actions_left: std::rc::Rc<std::cell::Cell<Option<f32>>>,
+    titlebar_actions_left: std::rc::Rc<std::cell::Cell<Option<(f32, f32)>>>,
     _watch: Option<Task<()>>,
 }
 
@@ -96,6 +135,8 @@ impl TradingSurface {
             stopped_open: false,
             links_menu: Popup::default(),
             tasks_menu: Popup::default(),
+            align_menu: Popup::default(),
+            open_settings: None,
             titlebar_actions_left: std::rc::Rc::default(),
             _watch: None,
         };
@@ -297,6 +338,17 @@ impl TradingSurface {
         // before this group; the measured edge lands in the cell on the next
         // prepaint (the entity itself cannot be touched from here).
         let actions_probe = self.titlebar_actions_left.clone();
+        let align = crate::settings::titlebar_align(cx);
+        let order: Vec<&'static str> = crate::settings::titlebar_order(cx)
+            .iter()
+            .filter_map(|name| match name.as_str() {
+                "links" => Some("links"),
+                "tasks" => Some("tasks"),
+                "panic" => Some("panic"),
+                "settings" => Some("settings"),
+                _ => None,
+            })
+            .collect();
         div()
             .flex_1()
             .min_w_0()
@@ -310,40 +362,58 @@ impl TradingSurface {
             // (user request: no "EN VIVO"/"DEMO" text). `Aurea` is centred by
             // the shell, not by this row.
             .child(self.phase_dot(theme, demo))
-            .child(div().flex_1())
-            // Plumbing on demand: the links and the scheduled tasks live in
-            // these chips instead of holding two cards on the page. Tareas and
-            // Pánico are icon-only (user request) so the centred title keeps
-            // its room; their tooltips carry the labels.
-            .child(
-                div()
+            .when(align != crate::settings::TitlebarAlign::Left, |row| row.child(div().flex_1()))
+            // The buttons, in the order the person dragged them into
+            // (Settings among them); right-click picks where they sit.
+            .child({
+                let group = div()
                     .flex_none()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(10.0))
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_menu(DeskMenu::Align, cx);
+                            cx.notify();
+                        }),
+                    )
                     .on_children_prepainted(move |bounds, window, _| {
-                        let Some(left) = bounds.first().map(|b| b.origin.x.as_f32()) else {
+                        let (Some(first), Some(last)) = (bounds.first(), bounds.last()) else {
                             return;
                         };
-                        let changed = actions_probe.get().map_or(true, |old| (old - left).abs() > 0.5);
-                        actions_probe.set(Some(left));
+                        let edges = (
+                            first.origin.x.as_f32(),
+                            (last.origin.x + last.size.width).as_f32(),
+                        );
+                        let changed = actions_probe.get().map_or(true, |old| {
+                            (old.0 - edges.0).abs() > 0.5 || (old.1 - edges.1).abs() > 0.5
+                        });
+                        actions_probe.set(Some(edges));
                         if changed {
-                            // The shell reads the edge on its next render; ask
-                            // for one so the clamp lands without waiting on a
+                            // The shell reads the edges on its next render; ask
+                            // for one so the title moves without waiting on a
                             // snapshot.
                             window.request_animation_frame();
                         }
                     })
-                    .child(self.links_chip(theme, cx))
-                    .child(self.tasks_chip(theme, cx))
-                    .child(self.panic_button(theme, cx)),
-            )
+                    .children(
+                        order
+                            .iter()
+                            .map(|name| self.movable_button(name, theme, cx)),
+                    )
+                    .id("titlebar-buttons");
+                self.menu_anchor(group, DeskMenu::Align, theme, cx)
+            })
+            .when(align == crate::settings::TitlebarAlign::Center, |row| row.child(div().flex_1()))
+            .when(align == crate::settings::TitlebarAlign::Left, |row| row.child(div().flex_1()))
     }
 
     /// The measured left edge of the titlebar's actions group, in window
     /// coordinates. `None` until the first prepaint.
-    pub(crate) fn titlebar_actions_left(&self) -> Option<f32> {
+    pub(crate) fn titlebar_actions_left(&self) -> Option<(f32, f32)> {
         self.titlebar_actions_left.get()
     }
 
@@ -368,7 +438,6 @@ impl TradingSurface {
             // Inside the titlebar's drag strip: carve the button out of it, or
             // the press becomes a window move and the click never reaches the
             // handler (the chips already do this).
-            .occlude()
             .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
                 window.prevent_default()
             })
@@ -491,7 +560,6 @@ impl TradingSurface {
             .text_color(theme.text_muted)
             .cursor_pointer()
             .hover(|el| el.bg(crate::theme::ink(0.12)))
-            .occlude()
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _, window, _| {
@@ -499,6 +567,7 @@ impl TradingSurface {
                     match menu {
                         DeskMenu::Links => this.links_menu.note_trigger_press(),
                         DeskMenu::Tasks => this.tasks_menu.note_trigger_press(),
+                        DeskMenu::Align => this.align_menu.note_trigger_press(),
                     }
                 }),
             )
@@ -532,7 +601,6 @@ impl TradingSurface {
             .text_color(theme.text_muted)
             .cursor_pointer()
             .hover(|el| el.bg(crate::theme::ink(0.12)))
-            .occlude()
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _, window, _| {
@@ -540,6 +608,7 @@ impl TradingSurface {
                     match menu {
                         DeskMenu::Links => this.links_menu.note_trigger_press(),
                         DeskMenu::Tasks => this.tasks_menu.note_trigger_press(),
+                        DeskMenu::Align => this.align_menu.note_trigger_press(),
                     }
                 }),
             )
@@ -561,6 +630,7 @@ impl TradingSurface {
         let (open, closing) = match menu {
             DeskMenu::Links => (self.links_menu.get().is_some(), self.links_menu.closing_since()),
             DeskMenu::Tasks => (self.tasks_menu.get().is_some(), self.tasks_menu.closing_since()),
+            DeskMenu::Align => (self.align_menu.get().is_some(), self.align_menu.closing_since()),
         };
         if !open {
             return chip.into_any_element();
@@ -568,12 +638,14 @@ impl TradingSurface {
         let content = match menu {
             DeskMenu::Links => self.render_links_menu(theme, cx),
             DeskMenu::Tasks => self.render_tasks_menu(theme, cx),
+            DeskMenu::Align => self.render_align_menu(theme, cx),
         };
         chip.relative()
             .child(popover::anchored_menu_below_gap(
                 match menu {
                     DeskMenu::Links => "trading-links-menu",
                     DeskMenu::Tasks => "trading-tasks-menu",
+                    DeskMenu::Align => "trading-align-menu",
                 },
                 content,
                 closing,
@@ -586,6 +658,7 @@ impl TradingSurface {
         match menu {
             DeskMenu::Links => self.links_menu.is_open(),
             DeskMenu::Tasks => self.tasks_menu.is_open(),
+            DeskMenu::Align => self.align_menu.is_open(),
         }
     }
 
@@ -593,22 +666,22 @@ impl TradingSurface {
         let was_open = match menu {
             DeskMenu::Links => self.links_menu.take_press_was_open(),
             DeskMenu::Tasks => self.tasks_menu.take_press_was_open(),
+            DeskMenu::Align => self.align_menu.take_press_was_open(),
         };
         if was_open {
             self.close_menu(menu, cx);
             return;
         }
-        // One at a time: opening this one dismisses the other.
-        let other = match menu {
-            DeskMenu::Links => DeskMenu::Tasks,
-            DeskMenu::Tasks => DeskMenu::Links,
-        };
-        if self.menu_is_open(other) {
-            self.close_menu(other, cx);
+        // One at a time: opening this one dismisses the others.
+        for other in [DeskMenu::Links, DeskMenu::Tasks, DeskMenu::Align] {
+            if other != menu && self.menu_is_open(other) {
+                self.close_menu(other, cx);
+            }
         }
         match menu {
             DeskMenu::Links => self.links_menu.open(()),
             DeskMenu::Tasks => self.tasks_menu.open(()),
+            DeskMenu::Align => self.align_menu.open(()),
         }
     }
 
@@ -624,7 +697,133 @@ impl TradingSurface {
                     popover::reap_popup(cx, |this: &mut Self| &mut this.tasks_menu);
                 }
             }
+            DeskMenu::Align => {
+                if self.align_menu.begin_close() {
+                    popover::reap_popup(cx, |this: &mut Self| &mut this.align_menu);
+                }
+            }
         }
+    }
+
+    /// Right-click menu of the titlebar's buttons: where the group sits.
+    fn render_align_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        use crate::settings::TitlebarAlign;
+        let current = crate::settings::titlebar_align(cx);
+        let row = |id: &'static str, label: &'static str, align: TitlebarAlign, cx: &mut Context<Self>| {
+            popover::menu_row(theme, false, id)
+                .id(id)
+                .py(px(4.0))
+                .text_size(px(11.5))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    crate::settings::set_titlebar_align(align, cx);
+                    this.close_menu(DeskMenu::Align, cx);
+                    cx.notify();
+                }))
+                .child(div().flex_1().child(label))
+                .when(current == align, |el| {
+                    el.child(
+                        crate::icons::icon(crate::icons::CHECK)
+                            .size(px(12.0))
+                            .text_color(theme.accent),
+                    )
+                })
+        };
+        popover::popover_card(theme)
+            .w(px(200.0))
+            .p(px(4.0))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .text_size(px(10.0))
+                    .text_color(theme.text_faint)
+                    .child("Alinear botones · arrástralos para reordenar"),
+            )
+            .child(row("trading-align-left", "A la izquierda", TitlebarAlign::Left, cx))
+            .child(row("trading-align-center", "Al centro", TitlebarAlign::Center, cx))
+            .child(row("trading-align-right", "A la derecha", TitlebarAlign::Right, cx))
+            .into_any_element()
+    }
+
+    /// The shell's way to open Settings, for the titlebar's Settings button.
+    pub fn set_open_settings(&mut self, open: std::rc::Rc<dyn Fn(&mut Window, &mut App)>) {
+        self.open_settings = Some(open);
+    }
+
+    /// Settings, now one of the titlebar's movable buttons.
+    fn settings_button(&self, theme: &Theme) -> AnyElement {
+        let open = self.open_settings.clone();
+        div()
+            .id("trading-open-settings")
+            .h(px(24.0))
+            .w(px(28.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .bg(crate::theme::ink(0.06))
+            .cursor_pointer()
+            .hover(|el| el.bg(crate::theme::ink(0.12)))
+            .tooltip(crate::settings::widgets::text_tooltip("Ajustes"))
+            .on_click(move |_, window, cx| match &open {
+                Some(open) => open(window, cx),
+                None => window.dispatch_action(Box::new(crate::shell::OpenSettings), cx),
+            })
+            .child(
+                crate::icons::icon(crate::icons::SETTINGS)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted),
+            )
+            .into_any_element()
+    }
+
+    /// One titlebar button, draggable onto another to take its place.
+    fn movable_button(&self, name: &'static str, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let button = match name {
+            "links" => self.links_chip(theme, cx),
+            "tasks" => self.tasks_chip(theme, cx),
+            "panic" => self.panic_button(theme, cx),
+            _ => self.settings_button(theme),
+        };
+        let accent = theme.accent;
+        div()
+            .id(SharedString::from(format!("titlebar-slot-{name}")))
+            .rounded(px(7.0))
+            // Inside the titlebar's drag strip: carve the slot out of it, or a
+            // press becomes a window move (the buttons inside stay clickable).
+            .occlude()
+            // Right-click on any button: where the group sits.
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.toggle_menu(DeskMenu::Align, cx);
+                    cx.notify();
+                }),
+            )
+            .on_drag(TitlebarButtonDrag(name), |drag, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| TitlebarDragGhost(drag.0))
+            })
+            .drag_over::<TitlebarButtonDrag>(move |style, _, _, _| {
+                style.bg(accent.opacity(0.25))
+            })
+            .on_drop::<TitlebarButtonDrag>(cx.listener(move |_, drag: &TitlebarButtonDrag, _, cx| {
+                if drag.0 == name {
+                    return;
+                }
+                let mut order = crate::settings::titlebar_order(cx);
+                order.retain(|item| item != drag.0);
+                let at = order.iter().position(|item| item == name).unwrap_or(order.len());
+                order.insert(at, drag.0.to_string());
+                crate::settings::set_titlebar_order(order, cx);
+                cx.notify();
+            }))
+            .child(button)
+            .into_any_element()
     }
 
     fn render_links_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {

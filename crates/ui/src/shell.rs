@@ -8114,6 +8114,13 @@ impl Shell {
     fn render_trading_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         if self.trading_page.is_none() {
             let page = cx.new(|cx| crate::trading::TradingSurface::new(self.state.clone(), cx));
+            // The desk's Settings button opens the shell's Settings directly.
+            let shell = cx.weak_entity();
+            page.update(cx, |page, _| {
+                page.set_open_settings(std::rc::Rc::new(move |_, cx| {
+                    let _ = shell.update(cx, |shell, cx| shell.open_last_settings(cx));
+                }));
+            });
             // The desk's heading rides the unified titlebar (see
             // `TradingSurface::titlebar_row`), so a snapshot has to redraw the
             // shell too — otherwise the bar would keep the boot-time chips.
