@@ -18,16 +18,30 @@ use zeron_rpc::methods;
 
 use super::i18n;
 use super::model::{self, Confirm, Phase};
+use crate::popover::{self, Popup};
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 
 const ROW_HEIGHT: f32 = 30.0;
-/// Narrowest the main column (equity, positions, log) goes beside the side
-/// column before the side column wraps under it.
-const MAIN_COLUMN_BASIS: f32 = 600.0;
-/// The side column's (systems, connections, tasks) own width beside it.
-const SIDE_COLUMN_BASIS: f32 = 360.0;
+/// The desk is two columns: the systems list and the positions table on the
+/// wide side, the readings (equity, log) and the plumbing (links, tasks, rules)
+/// on the narrow one. The wide side grows faster, and when the two bases no
+/// longer fit the narrow one wraps under and takes the full width.
+const SYSTEMS_COLUMN_BASIS: f32 = 600.0;
+const READINGS_COLUMN_BASIS: f32 = 360.0;
+const COLUMN_GAP: f32 = 10.0;
 const PAGE_PAD: f32 = 16.0;
+/// One row of the systems list: state, id, name, symbol · timeframe, P&L and
+/// the start/stop control, all on a single line.
+const SYSTEM_ROW_HEIGHT: f32 = 24.0;
+
+/// Which titlebar popover is open. Both are plumbing the desk only needs on
+/// demand, so they ride the bar instead of holding a card on the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeskMenu {
+    Links,
+    Tasks,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ButtonTone {
@@ -43,6 +57,23 @@ pub struct TradingSurface {
     error: Option<SharedString>,
     notice: Option<SharedString>,
     confirm: Option<Confirm>,
+    /// The systems list folds to its header (the count stays visible), so the
+    /// rest of the desk fits the screen when the pool is not being watched.
+    systems_collapsed: bool,
+    /// The stopped systems hide behind one summary row unless asked for: a
+    /// normal day runs most of the pool, and 15 rows of which 5 are idle cost
+    /// the positions table its room.
+    stopped_open: bool,
+    /// Titlebar popovers: the links and the scheduled tasks. One `Popup` per
+    /// trigger, so the press-note that distinguishes "dismiss" from "reopen"
+    /// never mixes them up.
+    links_menu: Popup<()>,
+    tasks_menu: Popup<()>,
+    /// Left edge (window coordinates) of the titlebar's actions group, read
+    /// from the last prepaint. The shell centres `Aurea` on the desk column
+    /// and stops it before this edge, so the title never runs under the chips.
+    /// A cell (not entity state) because prepaint cannot update the entity.
+    titlebar_actions_left: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     _watch: Option<Task<()>>,
 }
 
@@ -61,6 +92,11 @@ impl TradingSurface {
             error: None,
             notice: None,
             confirm: None,
+            systems_collapsed: false,
+            stopped_open: false,
+            links_menu: Popup::default(),
+            tasks_menu: Popup::default(),
+            titlebar_actions_left: std::rc::Rc::default(),
             _watch: None,
         };
         surface.subscribe(cx);
@@ -199,15 +235,6 @@ impl TradingSurface {
                     Self::show_close_verdict,
                 );
             }
-            Confirm::CloseAll => {
-                let request_id = format!("ui:{}", uuid::Uuid::new_v4());
-                self.call_with(
-                    methods::TRADING_POSITIONS_CLOSE_ALL,
-                    json!({ "requestId": request_id }),
-                    cx,
-                    Self::show_close_verdict,
-                );
-            }
             Confirm::Panic => self.call_with(
                 methods::TRADING_PANIC,
                 json!({}),
@@ -247,11 +274,10 @@ impl TradingSurface {
             .snapshot
             .as_ref()
             .is_some_and(|snapshot| model::kpis(snapshot).demo);
-        let version = self
-            .snapshot
-            .as_ref()
-            .map(|snapshot| SharedString::from(format!("motor {}", snapshot.version)))
-            .unwrap_or_else(|| SharedString::from("sin snapshot"));
+        // The shell centres `Aurea` on the desk column and needs to stop it
+        // before this group; the measured edge lands in the cell on the next
+        // prepaint (the entity itself cannot be touched from here).
+        let actions_probe = self.titlebar_actions_left.clone();
         div()
             .flex_1()
             .min_w_0()
@@ -261,64 +287,590 @@ impl TradingSurface {
             .items_center()
             .gap(px(10.0))
             .overflow_hidden()
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(13.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Aurea"),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(9.0))
-                    .text_color(theme.text_faint)
-                    .child("MESA DE TRADING"),
-            )
-            // The phase reads "EN VIVO" once the stream is up; on the demo
-            // fixture that would contradict the DEMO chip beside it.
-            .when(!(demo && self.phase == Phase::Live), |el| {
-                el.child(self.phase_chip(theme))
-            })
-            .when(demo, |el| el.child(chip("DEMO", theme.accent)))
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(9.5))
-                    .font_family(theme.font_mono.clone())
-                    .text_color(theme.text_faint)
-                    .child(version),
-            )
+            // The engine's state as one dot, where the phase chip used to sit
+            // (user request: no "EN VIVO"/"DEMO" text). `Aurea` is centred by
+            // the shell, not by this row.
+            .child(self.phase_dot(theme, demo))
             .child(div().flex_1())
+            // Plumbing on demand: the links and the scheduled tasks live in
+            // these chips instead of holding two cards on the page. Tareas and
+            // Pánico are icon-only (user request) so the centred title keeps
+            // its room; their tooltips carry the labels.
             .child(
-                button("trading-close-all", "Cerrar todo", ButtonTone::Ghost, theme).on_click(
-                    cx.listener(|this, _, _, cx| this.ask(Confirm::CloseAll, cx)),
-                ),
-            )
-            .child(
-                button("trading-panic", "Pánico", ButtonTone::Danger, theme)
-                    .on_click(cx.listener(|this, _, _, cx| this.ask(Confirm::Panic, cx))),
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .on_children_prepainted(move |bounds, window, _| {
+                        let Some(left) = bounds.first().map(|b| b.origin.x.as_f32()) else {
+                            return;
+                        };
+                        let changed = actions_probe.get().map_or(true, |old| (old - left).abs() > 0.5);
+                        actions_probe.set(Some(left));
+                        if changed {
+                            // The shell reads the edge on its next render; ask
+                            // for one so the clamp lands without waiting on a
+                            // snapshot.
+                            window.request_animation_frame();
+                        }
+                    })
+                    .child(self.links_chip(theme, cx))
+                    .child(self.tasks_chip(theme, cx))
+                    .child(self.panic_button(theme, cx)),
             )
     }
 
-    fn phase_chip(&self, theme: &Theme) -> Div {
-        let (label, color) = match &self.phase {
-            Phase::Connecting => ("CONECTANDO", theme.warning),
-            Phase::Live => ("EN VIVO", theme.success),
-            Phase::Failed(_) => ("SIN MOTOR", theme.danger),
-        };
+    /// The measured left edge of the titlebar's actions group, in window
+    /// coordinates. `None` until the first prepaint.
+    pub(crate) fn titlebar_actions_left(&self) -> Option<f32> {
+        self.titlebar_actions_left.get()
+    }
+
+    /// Icon-only panic trigger: the label lives in the tooltip and in the
+    /// confirmation bar, so the titlebar keeps room for the centred brand.
+    fn panic_button(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
+            .id("trading-panic")
+            .h(px(24.0))
+            .w(px(28.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .bg(theme.danger.opacity(0.12))
+            .cursor_pointer()
+            .hover({
+                let hover = theme.danger.opacity(0.22);
+                move |style| style.bg(hover)
+            })
+            // Inside the titlebar's drag strip: carve the button out of it, or
+            // the press becomes a window move and the click never reaches the
+            // handler (the chips already do this).
+            .occlude()
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                window.prevent_default()
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.ask(Confirm::Panic, cx)))
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .tooltip(crate::settings::widgets::text_tooltip(
+                "Pánico: parar todos los bots y cerrar todo",
+            ))
+            .child(
+                crate::icons::icon(crate::icons::STOP)
+                    .size(px(14.0))
+                    .text_color(theme.danger),
+            )
+            .into_any_element()
+    }
+
+    /// `● TWS 7497` — the link's health in the titlebar. The card that used to
+    /// hold the rows and the four buttons opens below it on click.
+    fn links_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let links = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.links.clone())
+            .unwrap_or_default();
+        let live = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.accounts.is_some());
+        let connected = links.iter().filter(|link| link.connected).count();
+        let (tone, label) = if links.is_empty() {
+            (theme.text_faint, "sin conexión".to_string())
+        } else if !live {
+            (theme.text_faint, format!("{} de ejemplo", links.len()))
+        } else if connected == 0 {
+            (theme.danger, "caída".to_string())
+        } else {
+            let label = match links.as_slice() {
+                [link] => match (link.broker, link.port) {
+                    (Some(Broker::Mt5), _) => "MT5".to_string(),
+                    (Some(Broker::Nt), _) => "NT".to_string(),
+                    (_, Some(port)) => format!("TWS {port}"),
+                    _ => "IBKR".to_string(),
+                },
+                many => format!("{connected}/{} enlaces", many.len()),
+            };
+            (theme.success, label)
+        };
+        let chip = self
+            .desk_chip("trading-links-chip", DeskMenu::Links, theme, cx)
+            .child(div().size(px(5.0)).rounded(px(2.5)).bg(tone))
+            .child(SharedString::from(label))
+            .child(
+                crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                    .size(px(10.0))
+                    .text_color(theme.text_faint),
+            );
+        self.menu_anchor(chip, DeskMenu::Links, theme, cx)
+    }
+
+    /// `⏱` — the scheduled tasks, icon-only in the titlebar (user request):
+    /// the clock carries the tone and the tooltip carries the next time.
+    /// Faint when the desk has nothing queued.
+    fn tasks_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let pending = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| {
+                model::tasks_sorted(snapshot)
+                    .into_iter()
+                    .filter(|task| task.status == TaskStatus::Pending)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let (tone, label) = match pending.as_slice() {
+            [] => (theme.text_faint, "Sin tareas programadas".to_string()),
+            [task] => (
+                theme.accent,
+                format!("Tarea a las {}", model::short_clock(task.run_at)),
+            ),
+            [task, ..] => (
+                theme.accent,
+                format!(
+                    "{} tareas · la próxima a las {}",
+                    pending.len(),
+                    model::short_clock(task.run_at)
+                ),
+            ),
+        };
+        let chip = self
+            .desk_icon_chip("trading-tasks-chip", DeskMenu::Tasks, theme, cx)
+            .tooltip(crate::settings::widgets::text_tooltip(label))
+            .child(
+                crate::icons::icon(crate::icons::CLOCK_CIRCLE)
+                    .size(px(14.0))
+                    .text_color(tone),
+            );
+        self.menu_anchor(chip, DeskMenu::Tasks, theme, cx)
+    }
+
+    /// The shared trigger chrome for a titlebar chip: small, occluding (the
+    /// bar is a drag strip, so a press must not become a window move) and
+    /// toggling through the popup's press-note.
+    fn desk_chip(
+        &self,
+        id: &'static str,
+        menu: DeskMenu,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        div()
+            .id(id)
+            .h(px(22.0))
+            .flex_none()
+            .px(px(7.0))
             .flex()
             .items_center()
             .gap(px(5.0))
-            .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(color))
+            .rounded(px(6.0))
+            .bg(crate::theme::ink(0.06))
+            .text_size(px(10.0))
+            .text_color(theme.text_muted)
+            .cursor_pointer()
+            .hover(|el| el.bg(crate::theme::ink(0.12)))
+            .occlude()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _, window, _| {
+                    window.prevent_default();
+                    match menu {
+                        DeskMenu::Links => this.links_menu.note_trigger_press(),
+                        DeskMenu::Tasks => this.tasks_menu.note_trigger_press(),
+                    }
+                }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.toggle_menu(menu, cx);
+                cx.notify();
+            }))
+    }
+
+    /// [`desk_chip`]'s square sibling for an icon-only trigger: same chrome and
+    /// the same press-note plumbing, no label.
+    fn desk_icon_chip(
+        &self,
+        id: &'static str,
+        menu: DeskMenu,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        div()
+            .id(id)
+            .h(px(24.0))
+            .w(px(28.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .bg(crate::theme::ink(0.06))
+            .text_size(px(10.0))
+            .text_color(theme.text_muted)
+            .cursor_pointer()
+            .hover(|el| el.bg(crate::theme::ink(0.12)))
+            .occlude()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _, window, _| {
+                    window.prevent_default();
+                    match menu {
+                        DeskMenu::Links => this.links_menu.note_trigger_press(),
+                        DeskMenu::Tasks => this.tasks_menu.note_trigger_press(),
+                    }
+                }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.toggle_menu(menu, cx);
+                cx.notify();
+            }))
+    }
+
+    /// Mounts the open popover under its chip.
+    fn menu_anchor(
+        &self,
+        chip: Stateful<Div>,
+        menu: DeskMenu,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (open, closing) = match menu {
+            DeskMenu::Links => (self.links_menu.get().is_some(), self.links_menu.closing_since()),
+            DeskMenu::Tasks => (self.tasks_menu.get().is_some(), self.tasks_menu.closing_since()),
+        };
+        if !open {
+            return chip.into_any_element();
+        }
+        let content = match menu {
+            DeskMenu::Links => self.render_links_menu(theme, cx),
+            DeskMenu::Tasks => self.render_tasks_menu(theme, cx),
+        };
+        chip.relative()
+            .child(popover::anchored_menu_below_gap(
+                match menu {
+                    DeskMenu::Links => "trading-links-menu",
+                    DeskMenu::Tasks => "trading-tasks-menu",
+                },
+                content,
+                closing,
+                8.0,
+            ))
+            .into_any_element()
+    }
+
+    fn menu_is_open(&self, menu: DeskMenu) -> bool {
+        match menu {
+            DeskMenu::Links => self.links_menu.is_open(),
+            DeskMenu::Tasks => self.tasks_menu.is_open(),
+        }
+    }
+
+    fn toggle_menu(&mut self, menu: DeskMenu, cx: &mut Context<Self>) {
+        let was_open = match menu {
+            DeskMenu::Links => self.links_menu.take_press_was_open(),
+            DeskMenu::Tasks => self.tasks_menu.take_press_was_open(),
+        };
+        if was_open {
+            self.close_menu(menu, cx);
+            return;
+        }
+        // One at a time: opening this one dismisses the other.
+        let other = match menu {
+            DeskMenu::Links => DeskMenu::Tasks,
+            DeskMenu::Tasks => DeskMenu::Links,
+        };
+        if self.menu_is_open(other) {
+            self.close_menu(other, cx);
+        }
+        match menu {
+            DeskMenu::Links => self.links_menu.open(()),
+            DeskMenu::Tasks => self.tasks_menu.open(()),
+        }
+    }
+
+    fn close_menu(&mut self, menu: DeskMenu, cx: &mut Context<Self>) {
+        match menu {
+            DeskMenu::Links => {
+                if self.links_menu.begin_close() {
+                    popover::reap_popup(cx, |this: &mut Self| &mut this.links_menu);
+                }
+            }
+            DeskMenu::Tasks => {
+                if self.tasks_menu.begin_close() {
+                    popover::reap_popup(cx, |this: &mut Self| &mut this.tasks_menu);
+                }
+            }
+        }
+    }
+
+    fn render_links_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let theme = &theme.for_popup();
+        let links = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.links.clone())
+            .unwrap_or_default();
+        let live = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.accounts.is_some());
+        let mut rows: Vec<Div> = Vec::with_capacity(links.len());
+        if links.is_empty() {
+            rows.push(empty_row(theme, "Sin conexiones registradas."));
+        } else {
+            for (ix, link) in links.iter().enumerate() {
+                rows.push(self.link_row(ix, link, !live, theme, cx));
+            }
+        }
+        let mut actions: Vec<Stateful<Div>> = Vec::with_capacity(4);
+        actions.push(
+            popover::menu_row(theme, false, "trading-menu-add-tws")
+                .id("trading-menu-add-tws")
+                .py(px(4.0))
+                .text_size(px(11.5))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.add_tws_link(cx);
+                    this.close_menu(DeskMenu::Links, cx);
+                }))
+                .child("Añadir TWS paper"),
+        );
+        actions.push(
+            popover::menu_row(theme, false, "trading-menu-add-mt5")
+                .id("trading-menu-add-mt5")
+                .py(px(4.0))
+                .text_size(px(11.5))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.add_mt5_link(cx);
+                    this.close_menu(DeskMenu::Links, cx);
+                }))
+                .child("Añadir MT5"),
+        );
+        actions.push(
+            popover::menu_row(theme, false, "trading-menu-toggle-link")
+                .id("trading-menu-toggle-link")
+                .py(px(4.0))
+                .text_size(px(11.5))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_link(live, cx);
+                    this.close_menu(DeskMenu::Links, cx);
+                }))
+                .child(if live {
+                    "Desconectar TWS"
+                } else {
+                    "Conectar TWS paper"
+                }),
+        );
+        actions.push(
+            popover::menu_row(theme, false, "trading-menu-detect-ports")
+                .id("trading-menu-detect-ports")
+                .py(px(4.0))
+                .text_size(px(11.5))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.detect_ports(cx);
+                    this.close_menu(DeskMenu::Links, cx);
+                }))
+                .child("Buscar puertos"),
+        );
+        popover::popover_card(theme)
+            .w(px(320.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_menu(DeskMenu::Links, cx)))
             .child(
                 div()
-                    .text_size(px(9.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(color)
-                    .child(label),
+                    .px(px(12.0))
+                    .pb(px(4.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child("Conexiones"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.0))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(if live {
+                                format!("{} registradas", links.len())
+                            } else {
+                                "de ejemplo".to_string()
+                            })),
+                    ),
             )
+            .children(rows)
+            .child(div().h(px(1.0)).w_full().bg(theme.border))
+            .child(div().flex().flex_col().gap(px(2.0)).children(actions))
+            .into_any_element()
+    }
+
+    fn render_tasks_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let theme = &theme.for_popup();
+        let tasks = self
+            .snapshot
+            .as_ref()
+            .map(model::tasks_sorted)
+            .unwrap_or_default();
+        let pending = tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Pending)
+            .count();
+        let mut rows: Vec<Div> = Vec::with_capacity(tasks.len());
+        if tasks.is_empty() {
+            rows.push(empty_row(theme, "Sin tareas programadas. Pídelas en el chat."));
+        } else {
+            let snapshot = self.snapshot.clone();
+            for (ix, task) in tasks.iter().take(6).enumerate() {
+                if let Some(snapshot) = &snapshot {
+                    rows.push(self.task_row(ix, task, snapshot, theme, cx));
+                }
+            }
+        }
+        popover::popover_card(theme)
+            .w(px(320.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_menu(DeskMenu::Tasks, cx)))
+            .child(
+                div()
+                    .px(px(12.0))
+                    .pb(px(4.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child("Tareas"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(9.0))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(if pending == 0 {
+                                "nada pendiente".to_string()
+                            } else {
+                                format!("{pending} pendientes")
+                            })),
+                    ),
+            )
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// Registers the TWS paper link the desk ships with (port 7497 only).
+    fn add_tws_link(&mut self, cx: &mut Context<Self>) {
+        self.notice = Some("Registrando TWS paper en 127.0.0.1:7497…".into());
+        self.call(
+            methods::TRADING_LINK_ADD,
+            json!({
+                "host": "127.0.0.1",
+                "port": 7497,
+                "label": "TWS paper",
+                "broker": "ibkr",
+            }),
+            cx,
+        );
+    }
+
+    /// Detects an installed MetaTrader 5 and links its account.
+    fn add_mt5_link(&mut self, cx: &mut Context<Self>) {
+        self.notice = Some("Buscando terminales MetaTrader 5 en este equipo…".into());
+        self.call_with(
+            methods::TRADING_MT5_DETECT,
+            json!({ "probe": false }),
+            cx,
+            |this, value, cx| {
+                let detected = match serde_json::from_value::<Vec<Mt5Detected>>(value) {
+                    Ok(detected) => detected,
+                    Err(error) => {
+                        this.error = Some(format!("Respuesta MT5 inválida: {error}").into());
+                        return;
+                    }
+                };
+                let Some(account) = detected.into_iter().next() else {
+                    this.notice = Some("No se detectó ningún MetaTrader 5 instalado.".into());
+                    return;
+                };
+                this.notice =
+                    Some(format!("Vinculando MT5 {}@{}…", account.login, account.server).into());
+                this.call(
+                    methods::TRADING_LINK_ADD,
+                    json!({
+                        "broker": "mt5",
+                        "mt5Login": account.login,
+                        "mt5Server": account.server,
+                        "label": account.name,
+                    }),
+                    cx,
+                );
+            },
+        );
+    }
+
+    fn toggle_link(&mut self, live: bool, cx: &mut Context<Self>) {
+        if live {
+            self.notice = Some("Cerrando la conexión con TWS…".into());
+            self.call(methods::TRADING_DISCONNECT, json!({}), cx);
+        } else {
+            self.notice = Some("Conectando con TWS paper en 127.0.0.1:7497…".into());
+            self.call(methods::TRADING_CONNECT, json!({}), cx);
+        }
+    }
+
+    fn detect_ports(&mut self, cx: &mut Context<Self>) {
+        self.notice = Some("Sondeando los puertos de TWS…".into());
+        self.call_with(
+            methods::TRADING_IBKR_DETECT,
+            json!({}),
+            cx,
+            |this, value, _cx| {
+                let ports = match serde_json::from_value::<Vec<IbkrPort>>(value) {
+                    Ok(ports) => ports,
+                    Err(error) => {
+                        this.error = Some(format!("Respuesta de puertos inválida: {error}").into());
+                        return;
+                    }
+                };
+                let summary = ports
+                    .iter()
+                    .map(|port| {
+                        format!(
+                            "{}:{} {}",
+                            port.host,
+                            port.port,
+                            if port.open { "abierto" } else { "cerrado" }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                this.notice = Some(format!("TWS → {summary}").into());
+            },
+        );
+    }
+
+    /// The engine's phase as one coloured dot (user request: the label was
+    /// noise). Red wins over demo so a dead engine is never hidden behind the
+    /// accent, and the demo fixture gets the accent instead of "live" green.
+    fn phase_dot(&self, theme: &Theme, demo: bool) -> Div {
+        let color = match &self.phase {
+            Phase::Failed(_) => theme.danger,
+            Phase::Connecting => theme.warning,
+            Phase::Live if demo => theme.accent,
+            Phase::Live => theme.success,
+        };
+        div().flex_none().size(px(7.0)).rounded(px(3.5)).bg(color)
     }
 
     fn confirm_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
@@ -507,7 +1059,7 @@ impl TradingSurface {
             .p(px(PAGE_PAD))
             .flex()
             .flex_col()
-            .gap(px(14.0))
+            .gap(px(10.0))
             .child(self.kpi_strip(&snapshot, theme))
             .child(
                 div()
@@ -515,37 +1067,21 @@ impl TradingSurface {
                     .flex_row()
                     .flex_wrap()
                     .items_start()
-                    .gap(px(14.0))
-                    // Both columns grow from their basis (2:1); when the two
-                    // bases no longer fit side by side, the side column wraps
-                    // under the main one and each takes the full width, so the
-                    // positions table never squeezes its figures to "21.4…".
+                    .gap(px(COLUMN_GAP))
+                    // The systems grid and the positions table on the wide
+                    // side: all 15 bots and what is open read at a glance.
                     .child(
-                        div()
-                            .flex_basis(px(MAIN_COLUMN_BASIS))
-                            .flex_grow(2.0)
-                            .flex_shrink(1.0)
-                            .min_w(px(0.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(14.0))
-                            .child(self.equity_card(&snapshot, theme))
-                            .child(self.positions_card(&snapshot, theme, cx))
-                            .child(self.logs_card(&snapshot, theme, now)),
-                    )
-                    .child(
-                        div()
-                            .flex_basis(px(SIDE_COLUMN_BASIS))
-                            .flex_grow(1.0)
-                            .flex_shrink(1.0)
-                            .min_w(px(0.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(14.0))
+                        board_column(SYSTEMS_COLUMN_BASIS, 1.7)
                             .child(self.systems_card(&snapshot, theme, cx))
-                            .child(self.rules_card(&snapshot, theme, cx))
-                            .child(self.links_card(&snapshot, theme, cx))
-                            .child(self.tasks_card(&snapshot, theme, cx)),
+                            .child(self.positions_card(&snapshot, theme, cx)),
+                    )
+                    // The readings and the plumbing on the narrow side. The
+                    // links and the tasks now ride the titlebar, so the column
+                    // is just the log and the rules.
+                    .child(
+                        board_column(READINGS_COLUMN_BASIS, 1.15)
+                            .child(self.logs_card(&snapshot, theme, now))
+                            .child(self.rules_card(&snapshot, theme, cx)),
                     ),
             )
             .into_any_element()
@@ -693,7 +1229,9 @@ impl TradingSurface {
             .flex_row()
             .flex_wrap()
             .gap(px(10.0))
-            .child(self.kpi_card(theme, "EQUITY", model::money(kpis.equity), theme.text))
+            // The equity KPI carries the sparkline the separate card used to
+            // hold: one number and its shape, one card.
+            .child(self.equity_kpi_card(snapshot, theme))
             .child(self.kpi_card(
                 theme,
                 "P&L DEL DÍA",
@@ -715,49 +1253,23 @@ impl TradingSurface {
             .child(self.kpi_card(theme, "BOTS ACTIVOS", bots_label, theme.accent))
     }
 
-    fn kpi_card(&self, theme: &Theme, label: &'static str, value: String, tone: Hsla) -> Div {
-        div()
-            .flex_1()
-            .min_w(px(110.0))
-            .p(px(12.0))
-            .rounded(px(10.0))
-            .bg(theme.surface_card)
-            .border_1()
-            .border_color(theme.border)
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .text_size(px(9.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_faint)
-                    .child(label),
-            )
-            .child(
-                div()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(px(17.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(tone)
-                    .child(value),
-            )
-    }
-
-    fn equity_card(&self, snapshot: &Snapshot, theme: &Theme) -> Div {
+    /// The equity card: the figure plus the last 15 minutes as a 16px strip.
+    fn equity_kpi_card(&self, snapshot: &Snapshot, theme: &Theme) -> Div {
+        let kpis = model::kpis(snapshot);
         let bars = model::spark_bars(snapshot, 64);
-        let chart = if bars.is_empty() {
+        // A flat series has no shape to draw: a rule reads as "sin cambios",
+        // a row of minimum bars reads as a chart that failed to load.
+        let flat = !bars.is_empty() && bars.iter().all(|value| *value == 0.0);
+        let chart = if flat {
             div()
-                .h(px(56.0))
+                .h(px(16.0))
+                .w_full()
                 .flex()
                 .items_center()
-                .text_size(px(11.0))
-                .text_color(theme.text_faint)
-                .child("Sin datos de equity todavía.")
-                .into_any_element()
+                .child(div().h(px(1.0)).w_full().bg(theme.accent.opacity(0.35)))
         } else {
             div()
-                .h(px(56.0))
+                .h(px(16.0))
                 .w_full()
                 .flex()
                 .flex_row()
@@ -766,27 +1278,94 @@ impl TradingSurface {
                 .children(bars.into_iter().map(|value| {
                     div()
                         .flex_1()
-                        .h(px(3.0 + 53.0 * value.clamp(0.0, 1.0)))
+                        .h(px(2.0 + 14.0 * value.clamp(0.0, 1.0)))
                         .rounded(px(1.0))
                         .bg(theme.accent.opacity(0.55))
                 }))
-                .into_any_element()
         };
-        card(theme)
-            .child(section_header(theme, "Curva de equity", "últimos 15 min".into()))
-            .child(div().px(px(12.0)).py(px(10.0)).child(chart))
+        div()
+            .flex_1()
+            .min_w(px(104.0))
+            .px(px(11.0))
+            .py(px(8.0))
+            .rounded(px(10.0))
+            .bg(theme.surface_card)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .text_size(px(9.0))
+                    .line_height(px(11.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_faint)
+                    .child("EQUITY"),
+            )
+            .child(
+                div()
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(16.0))
+                    .line_height(px(18.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .truncate()
+                    .child(model::money(kpis.equity)),
+            )
+            .child(chart)
+    }
+
+    fn kpi_card(&self, theme: &Theme, label: &'static str, value: String, tone: Hsla) -> Div {
+        div()
+            .flex_1()
+            .min_w(px(104.0))
+            .px(px(11.0))
+            .py(px(8.0))
+            .rounded(px(10.0))
+            .bg(theme.surface_card)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .text_size(px(9.0))
+                    .line_height(px(11.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_faint)
+                    .child(label),
+            )
+            .child(
+                div()
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(16.0))
+                    .line_height(px(18.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(tone)
+                    .truncate()
+                    .child(value),
+            )
     }
 
     fn positions_card(&self, snapshot: &Snapshot, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let positions = model::positions_sorted(snapshot);
         let closable = positions.len();
-        let mut rows: Vec<Div> = Vec::with_capacity(positions.len());
+        // Nothing open: one line, no table head. The desk keeps the space for
+        // the systems list instead of framing an empty table.
         if positions.is_empty() {
-            rows.push(empty_row(theme, "Sin posiciones abiertas."));
-        } else {
-            for (ix, position) in positions.iter().enumerate() {
-                rows.push(self.position_row(ix, position, theme, cx));
-            }
+            return card(theme)
+                .child(section_header(
+                    theme,
+                    "Posiciones",
+                    SharedString::from("0 abiertas"),
+                ))
+                .child(empty_row(theme, "Sin posiciones abiertas."));
+        }
+        let mut rows: Vec<Div> = Vec::with_capacity(positions.len());
+        for (ix, position) in positions.iter().enumerate() {
+            rows.push(self.position_row(ix, position, theme, cx));
         }
         card(theme)
             .child(section_header(
@@ -872,23 +1451,151 @@ impl TradingSurface {
     fn systems_card(&self, snapshot: &Snapshot, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let systems = model::systems_sorted(snapshot);
         let running = systems.iter().filter(|system| system.running).count();
-        let mut rows: Vec<Div> = Vec::with_capacity(systems.len());
-        if systems.is_empty() {
-            rows.push(empty_row(theme, "El pool no tiene sistemas."));
-        } else {
-            for (ix, system) in systems.iter().enumerate() {
-                rows.push(self.system_row(ix, system, theme, cx));
+        let stopped = systems.len() - running;
+        let collapsed = self.systems_collapsed;
+        let stopped_open = self.stopped_open;
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(systems.len() + 1);
+        if !collapsed {
+            if systems.is_empty() {
+                rows.push(empty_row(theme, "El pool no tiene sistemas.").into_any_element());
+            } else {
+                // Running bots first (the sort already does that), then the
+                // idle ones behind a summary row: on a normal day that is 10
+                // rows instead of 15, and the positions table keeps its room.
+                let mut ix = 0;
+                for system in systems.iter().filter(|system| system.running) {
+                    rows.push(self.system_row(ix, system, theme, cx).into_any_element());
+                    ix += 1;
+                }
+                if stopped > 0 {
+                    rows.push(self.stopped_toggle(stopped, stopped_open, theme, cx));
+                    if stopped_open {
+                        for system in systems.iter().filter(|system| !system.running) {
+                            rows.push(self.system_row(ix, system, theme, cx).into_any_element());
+                            ix += 1;
+                        }
+                    }
+                }
             }
         }
         card(theme)
-            .child(section_header(
-                theme,
-                "Sistemas",
-                SharedString::from(format!("{running} en marcha")),
-            ))
+            .child(self.systems_header(theme, running, systems.len(), collapsed, cx))
             .children(rows)
     }
 
+    /// `▸ 5 parados` / `⌃ 5 parados · ocultar` — the disclosure that keeps the
+    /// idle bots out of the list until they are wanted.
+    fn stopped_toggle(
+        &self,
+        count: usize,
+        open: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chevron = if open {
+            crate::icons::ALT_ARROW_UP
+        } else {
+            crate::icons::ALT_ARROW_RIGHT
+        };
+        div()
+            .id("trading-stopped-toggle")
+            .h(px(SYSTEM_ROW_HEIGHT))
+            .flex_none()
+            .px(px(12.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .cursor_pointer()
+            .hover(|el| el.bg(crate::theme::ink(0.04)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.stopped_open = !this.stopped_open;
+                cx.notify();
+            }))
+            .child(
+                crate::icons::icon(chevron)
+                    .size(px(10.0))
+                    .text_color(theme.text_faint),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(format!("{count} parados"))),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(px(9.0))
+                    .text_color(theme.text_faint.opacity(0.8))
+                    .child(if open { "ocultar" } else { "ver" }),
+            )
+            .into_any_element()
+    }
+
+    /// The systems card's header is the fold control: one click hides the list
+    /// and leaves the count ("10 de 15 en marcha") in sight.
+    fn systems_header(
+        &self,
+        theme: &Theme,
+        running: usize,
+        total: usize,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let chevron = if collapsed {
+            crate::icons::ALT_ARROW_RIGHT
+        } else {
+            crate::icons::ALT_ARROW_DOWN
+        };
+        div()
+            .id("trading-systems-fold")
+            .w_full()
+            .h(px(30.0))
+            .flex_none()
+            .px(px(12.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(7.0))
+            .bg(theme.surface_raised.opacity(0.5))
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.surface_raised.opacity(0.9)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.systems_collapsed = !this.systems_collapsed;
+                cx.notify();
+            }))
+            .child(
+                div().flex_none().size(px(12.0)).child(
+                    crate::icons::icon(chevron)
+                        .size(px(11.0))
+                        .text_color(theme.text_muted),
+                ),
+            )
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child("Sistemas"),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(px(9.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(format!(
+                        "{running} de {total} en marcha"
+                    ))),
+            )
+    }
+
+    /// One line of the systems list: a state dot, id, name, symbol ·
+    /// timeframe, P&L and the start/stop control. The state is the dot plus
+    /// the row's brightness (running names are full-strength, idle ones dim):
+    /// the word would cost 58px of a 24px row.
     fn system_row(
         &self,
         ix: usize,
@@ -896,23 +1603,20 @@ impl TradingSurface {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Div {
-        let id = SharedString::from(system.id.clone());
-        let (state_label, state_tone) = if system.running {
-            ("EN MARCHA", theme.success)
-        } else {
-            ("PARADO", theme.text_faint)
-        };
-        let pnl_tone = if system.pnl_day.unwrap_or(0.0) >= 0.0 {
+        let stop_id = SharedString::from(system.id.clone());
+        let state_tone = if system.running {
             theme.success
         } else {
-            theme.danger
+            theme.text_faint
         };
         let action = if system.running {
-            button(("trading-stop-system", ix), "Parar", ButtonTone::Ghost, theme).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.ask(Confirm::Stop(id.to_string()), cx);
-                }),
-            )
+            button(("trading-stop-system", ix), "Parar", ButtonTone::Ghost, theme)
+                .h(px(18.0))
+                .px(px(6.0))
+                .text_size(px(10.0))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.ask(Confirm::Stop(stop_id.to_string()), cx);
+                }))
         } else {
             let system_id = system.id.clone();
             button(
@@ -921,6 +1625,9 @@ impl TradingSurface {
                 ButtonTone::Primary,
                 theme,
             )
+            .h(px(18.0))
+            .px(px(6.0))
+            .text_size(px(10.0))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.call(
                     methods::TRADING_SYSTEM_START,
@@ -930,265 +1637,84 @@ impl TradingSurface {
                 cx.notify();
             }))
         };
-        let meta = match system.capital {
-            Some(capital) => format!(
-                "{} · {} · {} · {}",
-                system.id,
-                system.symbol,
-                system.timeframe,
-                model::money(Some(capital))
-            ),
-            None => format!("{} · {} · {}", system.id, system.symbol, system.timeframe),
+        let meta = match (system.symbol.is_empty(), system.timeframe.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => system.timeframe.clone(),
+            (false, true) => system.symbol.clone(),
+            (false, false) => format!("{} · {}", system.symbol, system.timeframe),
+        };
+        let pnl_tone = match system.pnl_day {
+            Some(value) if value < 0.0 => theme.danger,
+            Some(_) => theme.success,
+            None => theme.text_faint,
         };
         div()
+            .h(px(SYSTEM_ROW_HEIGHT))
+            .flex_none()
             .px(px(12.0))
-            .py(px(8.0))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(7.0))
             .border_t_1()
             .border_color(theme.border)
             .child(
                 div()
+                    .w(px(5.0))
+                    .h(px(5.0))
+                    .flex_none()
+                    .rounded(px(2.5))
+                    .bg(state_tone),
+            )
+            .child(
+                // Pool ids are two digits; longer ones (the demo fixture's
+                // folder names) stay on one line and end in "…" instead of
+                // wrapping into a column over the card's header.
+                div()
+                    .min_w(px(18.0))
+                    .max_w(px(96.0))
+                    .flex_none()
+                    .truncate()
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(9.5))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(system.id.clone())),
+            )
+            .child(
+                div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .min_w(px(0.0))
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .truncate()
-                                    .child(SharedString::from(system.name.clone())),
-                            )
-                            .child(div().flex_none().child(chip(state_label, state_tone))),
-                    )
-                    .child(
-                        div()
-                            .font_family(theme.font_mono.clone())
-                            .text_size(px(9.5))
-                            .text_color(theme.text_faint)
-                            .truncate()
-                            .child(SharedString::from(meta)),
-                    ),
+                    .truncate()
+                    .text_size(px(11.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(if system.running {
+                        theme.text
+                    } else {
+                        theme.text_muted
+                    })
+                    .child(SharedString::from(model::system_label(&system.name))),
+            )
+            .child(
+                div()
+                    .w(px(80.0))
+                    .flex_none()
+                    .truncate()
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(9.5))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(meta)),
             )
             .child(
                 div()
                     .w(px(78.0))
                     .flex_none()
-                    .flex()
-                    .flex_col()
-                    .items_end()
-                    .gap(px(1.0))
-                    .child(
-                        div()
-                            .font_family(theme.font_mono.clone())
-                            .text_size(px(10.5))
-                            .text_color(pnl_tone)
-                            .child(model::signed_money(system.pnl_day)),
-                    )
-                    .child(
-                        div()
-                            .font_family(theme.font_mono.clone())
-                            .text_size(px(9.5))
-                            .text_color(theme.text_faint)
-                            .child(model::signed_pct(system.pnl_pct)),
-                    ),
+                    .text_right()
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(9.5))
+                    .text_color(pnl_tone)
+                    .child(model::signed_money(system.pnl_day)),
             )
             .child(action)
-    }
-
-    fn links_card(&self, snapshot: &Snapshot, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let links = snapshot.links.clone().unwrap_or_default();
-        let connected = links.iter().filter(|link| link.connected).count();
-        // The demo fixture never enumerates accounts (`accounts: None`); a live
-        // TWS paper link always does. That is what tells the button which way
-        // the surface is running.
-        let live = snapshot.accounts.is_some();
-        let mut rows: Vec<Div> = Vec::with_capacity(links.len());
-        if links.is_empty() {
-            rows.push(empty_row(theme, "Sin conexiones registradas."));
-        } else {
-            for (ix, link) in links.iter().enumerate() {
-                rows.push(self.link_row(ix, link, !live, theme, cx));
-            }
-        }
-        let actions = div()
-            .w_full()
-            .px(px(12.0))
-            .py(px(8.0))
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap(px(6.0))
-            .border_t_1()
-            .border_color(theme.border)
-            .child(
-                button(
-                    "trading-link-add-tws",
-                    "Añadir TWS paper",
-                    ButtonTone::Ghost,
-                    theme,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.notice = Some("Registrando TWS paper en 127.0.0.1:7497…".into());
-                    this.call(
-                        methods::TRADING_LINK_ADD,
-                        json!({
-                            "host": "127.0.0.1",
-                            "port": 7497,
-                            "label": "TWS paper",
-                            "broker": "ibkr",
-                        }),
-                        cx,
-                    );
-                    cx.notify();
-                })),
-            )
-            .child(
-                button(
-                    "trading-link-add-mt5",
-                    "Añadir MT5",
-                    ButtonTone::Ghost,
-                    theme,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.notice = Some("Buscando terminales MetaTrader 5 en este equipo…".into());
-                    this.call_with(
-                        methods::TRADING_MT5_DETECT,
-                        json!({ "probe": false }),
-                        cx,
-                        |this, value, cx| {
-                            let detected = match serde_json::from_value::<Vec<Mt5Detected>>(value) {
-                                Ok(detected) => detected,
-                                Err(error) => {
-                                    this.error =
-                                        Some(format!("Respuesta MT5 inválida: {error}").into());
-                                    return;
-                                }
-                            };
-                            let Some(account) = detected.into_iter().next() else {
-                                this.notice =
-                                    Some("No se detectó ningún MetaTrader 5 instalado.".into());
-                                return;
-                            };
-                            this.notice = Some(
-                                format!("Vinculando MT5 {}@{}…", account.login, account.server)
-                                    .into(),
-                            );
-                            this.call(
-                                methods::TRADING_LINK_ADD,
-                                json!({
-                                    "broker": "mt5",
-                                    "mt5Login": account.login,
-                                    "mt5Server": account.server,
-                                    "label": account.name,
-                                }),
-                                cx,
-                            );
-                        },
-                    );
-                    cx.notify();
-                })),
-            )
-            .child(div().flex_1())
-            .child(if live {
-                button(
-                    "trading-disconnect-tws",
-                    "Desconectar TWS",
-                    ButtonTone::Ghost,
-                    theme,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.notice = Some("Cerrando la conexión con TWS…".into());
-                    this.call(methods::TRADING_DISCONNECT, json!({}), cx);
-                    cx.notify();
-                }))
-            } else {
-                button(
-                    "trading-connect-tws",
-                    "Conectar TWS paper",
-                    ButtonTone::Primary,
-                    theme,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.notice = Some("Conectando con TWS paper en 127.0.0.1:7497…".into());
-                    this.call(methods::TRADING_CONNECT, json!({}), cx);
-                    cx.notify();
-                }))
-            })
-            .child(
-                button(
-                    "trading-detect-ports",
-                    "Detectar puertos",
-                    ButtonTone::Ghost,
-                    theme,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.notice = Some("Sondeando los puertos de TWS…".into());
-                    this.call_with(
-                        methods::TRADING_IBKR_DETECT,
-                        json!({}),
-                        cx,
-                        |this, value, _cx| {
-                            let ports = match serde_json::from_value::<Vec<IbkrPort>>(value) {
-                                Ok(ports) => ports,
-                                Err(error) => {
-                                    this.error =
-                                        Some(format!("Respuesta de puertos inválida: {error}").into());
-                                    return;
-                                }
-                            };
-                            let summary = ports
-                                .iter()
-                                .map(|port| {
-                                    format!(
-                                        "{}:{} {}",
-                                        port.host,
-                                        port.port,
-                                        if port.open { "abierto" } else { "cerrado" }
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join(" · ");
-                            this.notice = Some(format!("TWS → {summary}").into());
-                        },
-                    );
-                    cx.notify();
-                })),
-            );
-        let meta = if live {
-            SharedString::from(format!("{connected}/{} activas", links.len()))
-        } else {
-            SharedString::from("de ejemplo")
-        };
-        card(theme)
-            .child(section_header(theme, "Conexiones", meta))
-            .children(rows)
-            .when(!live, |el| {
-                el.child(
-                    div()
-                        .px(px(12.0))
-                        .py(px(7.0))
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .text_size(px(10.5))
-                        .text_color(theme.text_faint)
-                        .child("Modo demo: estas conexiones son de ejemplo. Conecta TWS paper para ver tu cuenta."),
-                )
-            })
-            .child(actions)
     }
 
     fn link_row(
@@ -1269,21 +1795,23 @@ impl TradingSurface {
     }
 
     fn rules_card(&self, snapshot: &Snapshot, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let rules = model::rules_sorted(snapshot);
-        let watching = rules
-            .iter()
+        // Only the rules that are watching: a fired or cancelled one has
+        // already said what it had to say, and the card exists to show what
+        // the desk is still waiting for.
+        let rules: Vec<&Rule> = model::rules_sorted(snapshot)
+            .into_iter()
             .filter(|rule| rule.status == RuleStatus::Watching)
-            .count();
-        let meta = match watching {
+            .collect();
+        let meta = match rules.len() {
             0 => "ninguna vigilando".to_string(),
             1 => "1 vigilando".to_string(),
             n => format!("{n} vigilando"),
         };
         let mut rows: Vec<Div> = Vec::with_capacity(rules.len());
         if rules.is_empty() {
-            rows.push(empty_row(theme, "Sin reglas. Pídelas en el chat."));
+            rows.push(empty_row(theme, "Sin reglas vigilando. Pídelas en el chat."));
         } else {
-            for (ix, rule) in rules.iter().take(6).enumerate() {
+            for (ix, rule) in rules.iter().take(3).enumerate() {
                 rows.push(self.rule_row(ix, rule, snapshot, theme, cx));
             }
         }
@@ -1372,21 +1900,6 @@ impl TradingSurface {
             );
         }
         row
-    }
-
-    fn tasks_card(&self, snapshot: &Snapshot, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let tasks = model::tasks_sorted(snapshot);
-        let mut rows: Vec<Div> = Vec::with_capacity(tasks.len());
-        if tasks.is_empty() {
-            rows.push(empty_row(theme, "Sin tareas programadas."));
-        } else {
-            for (ix, task) in tasks.iter().take(6).enumerate() {
-                rows.push(self.task_row(ix, task, snapshot, theme, cx));
-            }
-        }
-        card(theme)
-            .child(section_header(theme, "Tareas", "programadas".into()))
-            .children(rows)
     }
 
     fn task_row(
@@ -1481,7 +1994,7 @@ impl TradingSurface {
     }
 
     fn logs_card(&self, snapshot: &Snapshot, theme: &Theme, now: i64) -> Div {
-        let logs = model::logs_newest(snapshot, 12);
+        let logs = model::logs_newest(snapshot, 8);
         let mut rows: Vec<Div> = Vec::with_capacity(logs.len());
         if logs.is_empty() {
             rows.push(empty_row(theme, "El motor no ha registrado eventos."));
@@ -1499,7 +2012,7 @@ impl TradingSurface {
                         .items_center()
                         .gap(px(8.0))
                         .px(px(12.0))
-                        .h(px(24.0))
+                        .h(px(20.0))
                         .border_t_1()
                         .border_color(theme.border)
                         .when(log.level == LogLevel::Error, |el| {
@@ -1507,7 +2020,7 @@ impl TradingSurface {
                         })
                         .child(
                             div()
-                                .w(px(56.0))
+                                .w(px(48.0))
                                 .flex_none()
                                 .font_family(theme.font_mono.clone())
                                 .text_size(px(9.5))
@@ -1516,7 +2029,7 @@ impl TradingSurface {
                         )
                         .child(
                             div()
-                                .w(px(48.0))
+                                .w(px(36.0))
                                 .flex_none()
                                 .text_size(px(9.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
@@ -1525,7 +2038,7 @@ impl TradingSurface {
                         )
                         .child(
                             div()
-                                .w(px(110.0))
+                                .w(px(48.0))
                                 .flex_none()
                                 .font_family(theme.font_mono.clone())
                                 .text_size(px(9.5))
@@ -1591,6 +2104,19 @@ impl Render for TradingSurface {
 }
 
 // ---------------------------------------------------------------- helpers
+
+/// A column of the desk: grows from its basis and stacks its cards with the
+/// page's gap.
+fn board_column(basis: f32, grow: f32) -> Div {
+    div()
+        .flex_basis(px(basis))
+        .flex_grow(grow)
+        .flex_shrink(1.0)
+        .min_w(px(0.0))
+        .flex()
+        .flex_col()
+        .gap(px(COLUMN_GAP))
+}
 
 fn button(
     id: impl Into<gpui::ElementId>,
@@ -1828,7 +2354,7 @@ fn section_header(
 fn empty_row(theme: &Theme, message: &'static str) -> Div {
     div()
         .px(px(12.0))
-        .py(px(14.0))
+        .py(px(8.0))
         .text_size(px(11.0))
         .text_color(theme.text_faint)
         .border_t_1()

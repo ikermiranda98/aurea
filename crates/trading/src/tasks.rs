@@ -10,12 +10,25 @@ use rusqlite::{params, Connection};
 // Re-export the domain types so callers can use `crate::tasks::*`.
 pub use zeron_proto::trading::{Task, TaskAddInput, TaskKind, TaskStatus};
 
-/// Monotonic counter used to mint `trd_<n>` ids (kept process-local; the
-/// store is the source of truth for persistence).
+/// Monotonic counter used to mint `trd_<n>` ids. It restarts with the process
+/// while the store outlives the engine, so [`next_task_id`] skips numbers the
+/// database already holds — otherwise a fresh run would collide on `trd_1`.
 static TASK_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-fn next_task_id() -> String {
-    format!("trd_{}", TASK_COUNTER.fetch_add(1, Ordering::SeqCst))
+fn next_task_id(conn: &Connection) -> String {
+    loop {
+        let id = format!("trd_{}", TASK_COUNTER.fetch_add(1, Ordering::SeqCst));
+        let taken = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM trading_task WHERE id = ?1)",
+                params![id],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
+        if !taken {
+            return id;
+        }
+    }
 }
 
 fn kind_to_str(kind: TaskKind) -> &'static str {
@@ -175,7 +188,7 @@ pub fn add_task(
         }
     }
 
-    let id = next_task_id();
+    let id = next_task_id(conn);
     let kind_str = kind_to_str(kind);
     let system_ids_json = serde_json::to_string(&system_ids).unwrap_or_else(|_| "[]".to_string());
 
@@ -259,17 +272,32 @@ pub fn cancel_task(conn: &Connection, task_id: &str, now_ms: i64) -> Result<Task
 
 /// List tasks, newest first.
 pub fn list_tasks(conn: &Connection, limit: usize) -> Result<Vec<Task>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, kind, system_ids, run_at, status, resolved_at, time_created, time_updated \
-             FROM trading_task \
-             ORDER BY time_created DESC, run_at DESC \
-             LIMIT ?1",
-        )
-        .map_err(|e| e.to_string())?;
+    query_tasks(
+        conn,
+        "SELECT id, kind, system_ids, run_at, status, resolved_at, time_created, time_updated          FROM trading_task          ORDER BY time_created DESC, run_at DESC          LIMIT ?1",
+        params![limit as i64],
+    )
+}
 
+/// Every task still waiting for its time, soonest first — what the scheduler
+/// runs. Unlike [`list_tasks`] it has no cap: a pending task must never fall
+/// out of sight behind newer ones (the store keeps every task it ever held).
+pub fn list_pending_tasks(conn: &Connection) -> Result<Vec<Task>, String> {
+    query_tasks(
+        conn,
+        "SELECT id, kind, system_ids, run_at, status, resolved_at, time_created, time_updated          FROM trading_task          WHERE status = 'pending'          ORDER BY run_at ASC",
+        params![],
+    )
+}
+
+fn query_tasks(
+    conn: &Connection,
+    sql: &str,
+    args: impl rusqlite::Params,
+) -> Result<Vec<Task>, String> {
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(params![limit as i64], |row| {
+        .query_map(args, |row| {
             let id: String = row.get(0)?;
             let kind_str: String = row.get(1)?;
             let system_ids_raw: String = row.get(2)?;
@@ -299,7 +327,6 @@ pub fn list_tasks(conn: &Connection, limit: usize) -> Result<Vec<Task>, String> 
     }
     Ok(out)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -429,6 +456,54 @@ mod tests {
         // missing task fails
         let err = cancel_task(&conn, "trd_nope", now).unwrap_err();
         assert!(err.contains("task not found"));
+    }
+
+    #[test]
+    fn a_pending_task_stays_in_sight_behind_newer_ones() {
+        let conn = setup();
+        let insert = |id: &str, status: &str, run_at: i64, created: i64| {
+            conn.execute(
+                "INSERT INTO trading_task                  (id, kind, system_ids, run_at, status, resolved_at, time_created, time_updated)                  VALUES (?1, 'stop-systems', '[]', ?2, ?3, NULL, ?4, ?4)",
+                params![id, run_at, status, created],
+            )
+            .unwrap();
+        };
+        // An old pending task, then sixty newer ones already done.
+        insert("old", "pending", 9_000, 1);
+        for n in 0..60 {
+            insert(&format!("done_{n}"), "ran", 100 + n, 10 + n);
+        }
+        assert!(list_tasks(&conn, 50).unwrap().iter().all(|t| t.id != "old"));
+        let pending = list_pending_tasks(&conn).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "old");
+    }
+
+    #[test]
+    fn task_ids_skip_rows_the_store_already_holds() {
+        let conn = setup();
+        // The engine restarts with a fresh counter while the DB keeps its
+        // rows: plant the id the counter would hand out and make sure the
+        // next mint skips it.
+        let taken = next_task_id(&conn);
+        conn.execute(
+            "INSERT INTO trading_task \
+             (id, kind, system_ids, run_at, status, resolved_at, time_created, time_updated) \
+             VALUES (?1, 'start-systems', '[]', 1, 'cancelled', NULL, 1, 1)",
+            params![taken],
+        )
+        .unwrap();
+        let fresh = next_task_id(&conn);
+        assert_ne!(fresh, taken);
+
+        let input = TaskAddInput {
+            kind: TaskKind::StartSystems,
+            system_ids: Some(vec!["02".into()]),
+            delay_minutes: Some(1.0),
+            at_time: None,
+        };
+        let task = add_task(&conn, &input, 1_000, &["02".to_string()]).unwrap();
+        assert_ne!(task.id, taken);
     }
 
     #[test]

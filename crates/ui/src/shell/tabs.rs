@@ -54,6 +54,10 @@ pub(super) struct TitlebarTrailing {
     right_pad: f32,
     widths: PanelTitlebarWidths,
     content_width: f32,
+    /// The main column's side insets: the brand centres between them.
+    main_insets: (f32, f32),
+    /// The right pane owns the band; the main column is a clipped mask.
+    takeover: bool,
 }
 
 /// The two fixed right-edge anchors: the explorer toggle and the pane toggle
@@ -77,6 +81,37 @@ fn panel_titlebar_widths(
         surface_reveal: surfaces.min(available - files_controls).max(0.0),
         files_controls,
     }
+}
+
+/// The brand box: `Aurea` at 13px semibold fits inside with room on both
+/// sides, so the box's centre is the text's centre.
+const BRAND_WIDTH: f32 = 64.0;
+/// Clearance kept between the brand and the desk's actions.
+const BRAND_ACTIONS_GAP: f32 = 16.0;
+
+/// The main column's titlebar insets. The brand centres between them, so it
+/// rides the sidebar, the right pane and Files instead of staying pinned to
+/// the window's middle (user request). Clamped so the box never runs past
+/// either window edge.
+fn main_column_insets(viewport: f32, sidebar: f32, right: f32, files: f32) -> (f32, f32) {
+    let left = sidebar.clamp(0.0, viewport);
+    let right = (right.max(0.0) + files.max(0.0)).min((viewport - left).max(0.0));
+    (left, right)
+}
+
+/// The brand's left edge: centred on the main column, stopped before the
+/// desk's actions when their measured edge is known (user request: the title
+/// brakes before the chips instead of running under them), and kept inside
+/// the column.
+fn brand_left(viewport: f32, insets: (f32, f32), actions_left: Option<f32>) -> f32 {
+    let (left, right) = insets;
+    let span = (viewport - left - right).max(0.0);
+    let mut center = left + span / 2.0;
+    if let Some(actions_left) = actions_left {
+        center = center.min(actions_left - BRAND_ACTIONS_GAP - BRAND_WIDTH / 2.0);
+    }
+    center = center.max(left + BRAND_WIDTH / 2.0);
+    (center - BRAND_WIDTH / 2.0).clamp(0.0, (viewport - BRAND_WIDTH).max(0.0))
 }
 
 /// A target the opener names for the new-session canvas, over the sidebar
@@ -388,6 +423,13 @@ impl Shell {
             right_pad,
             widths,
             content_width,
+            main_insets: main_column_insets(
+                self.viewport_width,
+                sidebar_now,
+                right_visible,
+                files_width,
+            ),
+            takeover,
         }
     }
 
@@ -414,6 +456,8 @@ impl Shell {
             right_pad,
             widths,
             content_width,
+            main_insets,
+            takeover,
         } = self.titlebar_trailing_layout(on_canvas, cx);
 
         // The right pane's controls stay in the bar with or without a chat:
@@ -545,8 +589,39 @@ impl Shell {
                 .update(cx, |surface, cx| surface.titlebar_row(&theme, cx))
                 .into_any_element()
         });
+        // Brand centred on the MAIN column, between the sidebar seam and the
+        // right pane / Files: it glides with those panels instead of staying
+        // pinned to the window's middle (user request). It brakes before the
+        // desk's actions (measured in the desk's prepaint), so the title never
+        // runs under TWS/tareas/Pánico. Hidden in takeover, where that column
+        // is a clipped mask and the pane's own header owns the band. The
+        // overlay carries no mouse handlers, so the drag strip and the
+        // controls underneath keep receiving the pointer.
+        let actions_left = self
+            .trading_page
+            .as_ref()
+            .and_then(|page| page.read(cx).titlebar_actions_left());
+        let brand = (self.trading_page.is_some() && !takeover).then(|| {
+            div()
+                .absolute()
+                .top(px(Theme::TITLEBAR_TOP_PAD))
+                .bottom_0()
+                .left(px(brand_left(self.viewport_width, main_insets, actions_left)))
+                .w(px(BRAND_WIDTH))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("Aurea"),
+                )
+                .into_any_element()
+        });
         let inner = div()
             .size_full()
+            .relative()
             .flex()
             .items_center()
             .pt(px(Theme::TITLEBAR_TOP_PAD))
@@ -555,7 +630,18 @@ impl Shell {
             .pr(px(right_pad))
             .children(desk)
             .when(self.trading_page.is_none(), |el| el.child(div().flex_1()))
-            .children(trailing);
+            // Settings moved out of the sidebar's "…" menu into the bar
+            // (user request); the right side is always mounted, so it stays
+            // reachable with the drawer collapsed and on every page.
+            .child(header_icon_button(
+                "open-settings",
+                icons::SETTINGS,
+                "Settings",
+                &theme,
+                cx.listener(|this, _, _, cx| this.open_last_settings(cx)),
+            ))
+            .children(trailing)
+            .children(brand);
 
         // The unified window titlebar: full-width on the glass shell, ABOVE
         // the inset card. No bottom border — the card's own hairline is the
@@ -613,6 +699,50 @@ mod panel_titlebar_tests {
                 assert_eq!(controls_left, sidebar.max(row_left + 8.0));
             }
         }
+    }
+
+    #[test]
+    fn brand_centres_on_the_main_column_between_the_panels() {
+        // Sidebar open, Files open, no right pane: the brand box spans the
+        // conversation column, so its centre rides both seams.
+        let (left, right) = main_column_insets(1400.0, 256.0, 0.0, 286.0);
+        assert_eq!((left, right), (256.0, 286.0));
+        assert_eq!(
+            left + (1400.0 - left - right) / 2.0,
+            (256.0 + (1400.0 - 286.0)) / 2.0
+        );
+        // Everything open: right pane + Files both push from the right.
+        let (left, right) = main_column_insets(1400.0, 256.0, 520.0, 286.0);
+        assert_eq!((left, right), (256.0, 806.0));
+        // Nothing open: the box spans the window.
+        assert_eq!(main_column_insets(1400.0, 0.0, 0.0, 0.0), (0.0, 0.0));
+        // Tweens can overshoot; insets never run past an edge.
+        assert_eq!(main_column_insets(1000.0, -20.0, -5.0, 0.0), (0.0, 0.0));
+        assert_eq!(
+            main_column_insets(1000.0, 900.0, 400.0, 200.0),
+            (900.0, 100.0)
+        );
+    }
+
+    #[test]
+    fn brand_brakes_before_the_desk_actions() {
+        // No panels open and nothing measured: the window centre.
+        let insets = main_column_insets(1400.0, 0.0, 0.0, 0.0);
+        assert_eq!(brand_left(1400.0, insets, None) + BRAND_WIDTH / 2.0, 700.0);
+        // Sidebar open: the desk column's centre.
+        let insets = main_column_insets(1400.0, 256.0, 0.0, 0.0);
+        assert_eq!(brand_left(1400.0, insets, None) + BRAND_WIDTH / 2.0, 828.0);
+        // The actions are close: the brand stops with a gap before them.
+        let left = brand_left(1400.0, insets, Some(850.0));
+        assert_eq!(left + BRAND_WIDTH, 850.0 - BRAND_ACTIONS_GAP);
+        // Room to spare: the measured edge changes nothing.
+        assert_eq!(
+            brand_left(1400.0, insets, Some(1200.0)),
+            828.0 - BRAND_WIDTH / 2.0
+        );
+        // Never outside the window, even in a tiny one.
+        assert!(brand_left(200.0, (0.0, 0.0), None) >= 0.0);
+        assert!(brand_left(200.0, (0.0, 0.0), None) + BRAND_WIDTH <= 200.0);
     }
 
     #[test]

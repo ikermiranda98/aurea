@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 use zeron_proto::trading::{
     PoolSelectResult, Snapshot, Task, TaskAddInput, TaskKind, TaskStatus, TradingError,
 };
@@ -84,7 +84,8 @@ impl TradingEngine {
                 }
                 let now = now_ms();
                 let conn = store_conn.lock().unwrap();
-                let pending = tasks::list_tasks(&conn, 50).unwrap_or_default();
+                // Every pending task, however many newer ones the store holds.
+                let pending = tasks::list_pending_tasks(&conn).unwrap_or_default();
                 drop(conn);
 
                 for task in &pending {
@@ -132,6 +133,57 @@ impl TradingEngine {
             }
         });
 
+        // The desk's sweep: a bot that exits on its own must stop reading as
+        // running (the panel used to keep it forever), and a live `panel.pid`
+        // left by a previous boot is adopted.
+        let sweep_state = Arc::clone(&state);
+        let sweep_watch = watch.clone();
+        let sweep_cancel = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(45));
+            loop {
+                // The first tick is immediate, so a boot adopts what a previous
+                // run left alive before the panel shows anything.
+                interval.tick().await;
+                if sweep_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let snap = {
+                    let mut state = sweep_state.lock().unwrap();
+                    sweep_state_in(&mut state);
+                    state.snapshot(now_ms())
+                };
+                let _ = sweep_watch.send_replace(snap);
+            }
+        });
+
+        // One reader for the whole desk: every running bot - started here or
+        // adopted by the sweep - has its logs ingested every 5s.
+        let ingest_state = Arc::clone(&state);
+        let ingest_cancel = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                if ingest_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let running: Vec<(String, Option<PathBuf>)> = {
+                    let state = ingest_state.lock().unwrap();
+                    let dir = state.systems_dir.clone();
+                    state
+                        .bots
+                        .iter()
+                        .filter(|(_, runtime)| runtime.started_at.is_some())
+                        .map(|(id, _)| (id.clone(), dir.clone()))
+                        .collect()
+                };
+                for (id, dir) in running {
+                    ingest_one(&ingest_state, &id, dir.as_deref());
+                }
+            }
+        });
+
         let engine = Self {
             store,
             state,
@@ -174,7 +226,7 @@ impl TradingEngine {
     }
 
     pub fn start_system(&self, system_id: &str) -> Result<(), TradingError> {
-        let outcome = start_system_in(&self.state, &self.systems_dir, &self.cancel, system_id);
+        let outcome = start_system_in(&self.state, &self.systems_dir, system_id);
         if outcome.is_ok() {
             self.publish();
         }
@@ -187,7 +239,6 @@ impl TradingEngine {
 fn start_system_in(
     state_arc: &Arc<Mutex<TradingState>>,
     systems_dir: &Option<PathBuf>,
-    cancel: &Arc<std::sync::atomic::AtomicBool>,
     system_id: &str,
 ) -> Result<(), TradingError> {
     let mut state = state_arc.lock().unwrap();
@@ -281,24 +332,6 @@ fn start_system_in(
         );
         drop(state);
 
-        // Spawn background ingestion task.
-        let state_arc = Arc::clone(state_arc);
-        let cancel = Arc::clone(cancel);
-        let sid = system_id.to_string();
-        let sd = systems_dir.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(5));
-                loop {
-                    interval.tick().await;
-                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
-                    ingest_one(&state_arc, &sid, sd.as_deref());
-                }
-            });
-        }
-
         Ok(())
     }
 
@@ -355,16 +388,22 @@ fn stop_system_in(
                     let es_bot = pid_es_bot_sync(pid, Some(&folder));
                     match es_bot {
                         None => {
-                            // keep running, warn
+                            // Unverified: nothing was stopped, and saying so
+                            // matters (a proposal or a task would otherwise
+                            // report the bot as stopped while it runs).
                             state.push_log(
                                 zeron_proto::trading::LogLevel::Warning,
                                 "motor",
-                                format!("Bot {} no se pudo verificar", system_id),
+                                format!("Bot {} no se pudo verificar; sigue en marcha", system_id),
                                 now_ms(),
                                 true,
                             );
                             drop(state);
-                            return Ok(());
+                            return Err(TradingError::InvalidRequest {
+                                message: format!(
+                                    "no se pudo verificar que el proceso {pid} sea el bot; no se ha parado"
+                                ),
+                            });
                         }
                         Some(false) => {
                             // recycled; clean up
@@ -394,14 +433,24 @@ fn stop_system_in(
                 }
             }
         } else {
-            // external without pid: warn
-            state.push_log(
-                zeron_proto::trading::LogLevel::Warning,
-                "motor",
-                format!("Bot {} externo sin PID", system_id),
-                now_ms(),
-                true,
-            );
+            // Running without a known process: there is nothing the desk can
+            // stop. A panel row without a pid is stale (the sweep retires
+            // it); one started elsewhere must be stopped there.
+            let es_panel = state.bots.get(system_id).and_then(|r| r.source)
+                == Some(crate::lifecycle::RuntimeSource::Panel);
+            if !es_panel {
+                state.push_log(
+                    zeron_proto::trading::LogLevel::Warning,
+                    "motor",
+                    format!("Bot {} externo sin PID; sigue en marcha", system_id),
+                    now_ms(),
+                    true,
+                );
+                drop(state);
+                return Err(TradingError::InvalidRequest {
+                    message: "el bot se arrancó fuera de Aurea y no se conoce su proceso; páralo desde donde se arrancó".into(),
+                });
+            }
         }
 
         // cleanup
@@ -621,68 +670,16 @@ impl TradingEngine {
         }
     }
 
-    /// 45s sweep: keep adopted bots honest, retire stale ones, adopt new ones.
+    /// 45s sweep: retire bots whose process is gone, adopt the ones a live
+    /// `panel.pid` points at. A `tasklist` answer of "unknown" retires nobody:
+    /// a bot left running outside the panel must never be forgotten.
     pub fn sweep(&self) {
-        let mut state = self.state.lock().unwrap();
-        let now = now_ms();
-        let systems_dir = state.systems_dir.clone().unwrap_or_default();
-
-        // Retire bots that are no longer alive (pragmatic: check panel.pid exists).
-        let mut to_remove = Vec::new();
-        for (id, rt) in state.bots.iter() {
-            if rt.started_at.is_some() && rt.source != Some(crate::lifecycle::RuntimeSource::Panel) {
-                continue; // only sweep adopted bots
-            }
-            if let Some(pid) = rt.pid {
-                let panel_pid_path = state
-                    .systems
-                    .iter()
-                    .find(|d| d.id == *id)
-                    .map(|d| systems_dir.join(&d.dir_name).join("panel.pid"));
-                if let Some(path) = panel_pid_path {
-                    if !path.exists() {
-                        to_remove.push(id.clone());
-                    }
-                }
-            }
-        }
-        for id in to_remove {
-            state.bots.remove(&id);
-            state.push_log(
-                zeron_proto::trading::LogLevel::Info,
-                "motor",
-                format!("Bot {} retirado por sweep", id),
-                now,
-                true,
-            );
-        }
-
-        // Try to adopt bots not currently running.
-        let system_ids: Vec<String> = state.systems.iter().map(|d| d.id.clone()).collect();
-        for id in system_ids {
-            if state.bots.contains_key(&id) {
-                continue;
-            }
-            let dir_name = state.systems.iter().find(|d| d.id == id).map(|d| d.dir_name.clone()).unwrap_or_default();
-            let panel_pid_path = systems_dir.join(&dir_name).join("panel.pid");
-            if panel_pid_path.exists() {
-                // Attempt adoption (pragmatic: just adopt).
-                let runtime = crate::lifecycle::runtime_nuevo();
-                let mut rt = runtime;
-                rt.source = Some(crate::lifecycle::RuntimeSource::Panel);
-                rt.started_at = Some(now);
-                state.bots.insert(id.clone(), rt);
-                state.push_log(
-                    zeron_proto::trading::LogLevel::Info,
-                    "motor",
-                    format!("Bot {} adoptado por sweep", id),
-                    now,
-                    true,
-                );
-            }
-        }
-        drop(state);
-        self.publish();
+        let snap = {
+            let mut state = self.state.lock().unwrap();
+            sweep_state_in(&mut state);
+            state.snapshot(now_ms())
+        };
+        let _ = self.watch.send_replace(snap);
     }
 
     pub fn shutdown(&self) {
@@ -693,6 +690,113 @@ impl TradingEngine {
     fn publish(&self) {
         let snap = self.state.lock().unwrap().snapshot(now_ms());
         let _ = self.watch.send_replace(snap);
+    }
+}
+
+/// One sweep pass over the desk's runtimes (the caller publishes the result).
+fn sweep_state_in(state: &mut TradingState) {
+    let now = now_ms();
+    let systems_dir = state.systems_dir.clone().unwrap_or_default();
+
+    let mut to_remove: Vec<(String, Option<u32>)> = Vec::new();
+    for (id, runtime) in state.bots.iter() {
+        let es_panel = runtime.source == Some(crate::lifecycle::RuntimeSource::Panel);
+        let vivo = runtime.pid.and_then(pid_vivo_sync);
+        if sweep_debe_retirar(runtime.started_at.is_some(), runtime.pid, es_panel, vivo) {
+            to_remove.push((id.clone(), runtime.pid));
+        }
+    }
+    for (id, pid) in to_remove {
+        state.bots.remove(&id);
+        if let Some(dir_name) = state
+            .systems
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.dir_name.clone())
+        {
+            let _ = std::fs::remove_file(systems_dir.join(dir_name).join("panel.pid"));
+        }
+        let detalle = pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
+        state.push_log(
+            zeron_proto::trading::LogLevel::Info,
+            "motor",
+            format!("Bot {id} terminó{detalle}"),
+            now,
+            true,
+        );
+    }
+
+    // Adopt a bot whose `panel.pid` points at a live process: it was started
+    // outside the panel (or the app restarted under it). A stale file goes.
+    let system_ids: Vec<String> = state.systems.iter().map(|d| d.id.clone()).collect();
+    for id in system_ids {
+        if state.bots.contains_key(&id) {
+            continue;
+        }
+        let Some(dir_name) = state
+            .systems
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.dir_name.clone())
+        else {
+            continue;
+        };
+        let panel_pid_path = systems_dir.join(&dir_name).join("panel.pid");
+        let Ok(raw) = std::fs::read_to_string(&panel_pid_path) else {
+            continue;
+        };
+        let Some(pid) = raw.trim().parse::<u32>().ok() else {
+            let _ = std::fs::remove_file(&panel_pid_path);
+            continue;
+        };
+        if pid_vivo_sync(pid) != Some(true) {
+            let _ = std::fs::remove_file(&panel_pid_path);
+            continue;
+        }
+        // Windows reuses process ids: a live pid is only this bot when its
+        // command line says so (the check Stop uses). Another program means
+        // the file is stale; no answer means asking again next sweep.
+        match pid_es_bot_sync(pid, Some(&systems_dir.join(&dir_name))) {
+            Some(true) => {}
+            Some(false) => {
+                let _ = std::fs::remove_file(&panel_pid_path);
+                continue;
+            }
+            None => continue,
+        }
+        let mut runtime = crate::lifecycle::runtime_nuevo();
+        runtime.source = Some(crate::lifecycle::RuntimeSource::Panel);
+        runtime.pid = Some(pid);
+        runtime.started_at = Some(now);
+        // Adopt at the end of the logs, like a fresh start: re-reading the
+        // whole `registro.log` would replay trades the desk already booked.
+        let folder = systems_dir.join(&dir_name);
+        let today_prefix = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        runtime.registro_offset = crate::lifecycle::today_offset(
+            &folder.join("registro.log"),
+            &today_prefix,
+        );
+        runtime.consola_offset = crate::lifecycle::file_tail_size(&folder.join("consola.log"));
+        state.bots.insert(id.clone(), runtime);
+        state.push_log(
+            zeron_proto::trading::LogLevel::Info,
+            "motor",
+            format!("Bot {id} adoptado por sweep (pid {pid})"),
+            now,
+            true,
+        );
+    }
+}
+
+/// The sweep's verdict on one runtime: a live process is never retired, and an
+/// unknown answer from `tasklist` never retires anyone either.
+fn sweep_debe_retirar(started: bool, pid: Option<u32>, es_panel: bool, vivo: Option<bool>) -> bool {
+    if !started {
+        return false;
+    }
+    match pid {
+        Some(_) => vivo == Some(false),
+        None => es_panel,
     }
 }
 
@@ -885,7 +989,32 @@ fn is_sorro(msg: &str) -> bool {
             return true;
         }
     }
-    false
+    is_ib_link_noise(msg)
+}
+
+/// IB API chatter about the link and the request budget, as each bot's own
+/// `ib_async` session reports it. The desk's log is the desk's: the bots keep
+/// these in their own `registro.log`. They are:
+///
+/// - `1100`/`1102` — TWS lost/restored its link to IBKR (a farm heartbeat).
+/// - `322` — `ib_async` resubscribes the account summary on every `1102`
+///   without cancelling the previous one, until TWS refuses more.
+/// - `162` — TWS's trading session changed IP, so historical data is refused
+///   for that bot (WARP/another login); the bot then logs its own decision
+///   error, which is the actionable line.
+/// - `10339` — `ib_async` sends an end date for a continuous future.
+fn is_ib_link_noise(msg: &str) -> bool {
+    let Some(rest) = msg.strip_prefix("Error ") else {
+        return false;
+    };
+    let code = rest
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    matches!(
+        code.parse::<u32>().ok(),
+        Some(162 | 322 | 1100 | 1102 | 10339)
+    )
 }
 
 fn is_close(msg: &str) -> bool {
@@ -957,7 +1086,7 @@ fn local_clock(ms: i64) -> String {
 fn run_due_task(
     state: &Arc<Mutex<TradingState>>,
     systems_dir: &Option<PathBuf>,
-    cancel: &Arc<std::sync::atomic::AtomicBool>,
+    _cancel: &Arc<std::sync::atomic::AtomicBool>,
     task: &Task,
     now: i64,
 ) -> (TaskStatus, Option<String>) {
@@ -992,7 +1121,7 @@ fn run_due_task(
     let mut failed: Vec<String> = Vec::new();
     for id in &ids {
         let outcome = match task.kind {
-            TaskKind::StartSystems => start_system_in(state, systems_dir, cancel, id),
+            TaskKind::StartSystems => start_system_in(state, systems_dir, id),
             TaskKind::StopSystems => stop_system_in(state, systems_dir, id),
         };
         match outcome {
@@ -1046,6 +1175,44 @@ mod tests {
     async fn start_system_unknown_returns_error() {
         let engine = TradingEngine::new(None, None).unwrap();
         assert!(engine.start_system("99").is_err());
+    }
+
+    #[test]
+    fn ib_link_chatter_never_reaches_the_desk_log() {
+        // What the bots' own ib_async sessions report on a TWS↔IBKR blip.
+        assert!(is_sorro(
+            "Error 322, reqId 13: Error processing request.-'ReqAccountSummary(62)' : cause - Maximum number of account summary requests exceeded; desubscribe to previous request first"
+        ));
+        assert!(is_sorro(
+            "Error 1100, reqId -1: Connectivity between IBKR and Trader Workstation has been lost."
+        ));
+        assert!(is_sorro(
+            "Error 1102, reqId -1: Connectivity between IBKR and Trader Workstation has been restored - data maintained."
+        ));
+        assert!(is_sorro(
+            "Error 162, reqId 14: Historical Market Data Service error message:Trading TWS session is connected from a different IP address, contract: Forex('USDJPY')"
+        ));
+        assert!(is_sorro(
+            "Error 10339, reqId 83: Setting end date/time for continuous future security type is not allowed."
+        ));
+        // The desk's own decisions and real failures still land.
+        assert!(!is_sorro("vela 2026-11-24 00:00 UTC | cierre 3660.2 | fuera -> nada"));
+        assert!(!is_sorro("Error 201, reqId 9: Order rejected - reason: margin"));
+        assert!(!is_sorro("error en la decision: 'ts'"));
+    }
+
+    #[test]
+    fn the_sweep_retires_only_bots_whose_process_is_gone() {
+        // A live process is never retired; an unknown answer never either.
+        assert!(!sweep_debe_retirar(true, Some(7), true, Some(true)));
+        assert!(!sweep_debe_retirar(true, Some(7), true, None));
+        assert!(sweep_debe_retirar(true, Some(7), true, Some(false)));
+        // A panel row without a pid cannot be proven alive.
+        assert!(sweep_debe_retirar(true, None, true, None));
+        // A row that never started, and an external one without a pid, are
+        // left alone.
+        assert!(!sweep_debe_retirar(false, None, true, None));
+        assert!(!sweep_debe_retirar(true, None, false, None));
     }
 
     #[tokio::test]

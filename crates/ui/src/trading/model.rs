@@ -27,8 +27,6 @@ pub enum Phase {
 pub enum Confirm {
     /// Close one position, by symbol.
     Close(String),
-    /// Close every closable position.
-    CloseAll,
     /// Stop every bot and close everything.
     Panic,
     /// Stop one bot, by system id.
@@ -39,7 +37,6 @@ impl Confirm {
     pub fn title(&self) -> String {
         match self {
             Confirm::Close(symbol) => format!("¿Cerrar la posición {symbol}?"),
-            Confirm::CloseAll => "¿Cerrar todas las posiciones abiertas?".into(),
             Confirm::Panic => "¿Pánico: parar todos los bots y cerrar todo?".into(),
             Confirm::Stop(system) => format!("¿Parar el bot {system}?"),
         }
@@ -48,7 +45,6 @@ impl Confirm {
     pub fn detail(&self) -> &'static str {
         match self {
             Confirm::Close(_) => "Se enviará una orden de cierre al broker. No se puede deshacer.",
-            Confirm::CloseAll => "Se enviará una orden de cierre por cada posición abierta.",
             Confirm::Panic => {
                 "Se pararán todos los bots y se cerrará toda la exposición. No se puede deshacer."
             }
@@ -59,7 +55,6 @@ impl Confirm {
     pub fn accept_label(&self) -> &'static str {
         match self {
             Confirm::Close(_) => "Confirmar cierre",
-            Confirm::CloseAll => "Cerrar todo",
             Confirm::Panic => "Ejecutar pánico",
             Confirm::Stop(_) => "Parar bot",
         }
@@ -114,6 +109,24 @@ pub fn kpis(snapshot: &Snapshot) -> Kpis {
         running: snapshot.systems.iter().filter(|s| s.running).count(),
         systems: snapshot.systems.len(),
         demo: account.is_some_and(|a| a.demo == Some(true) || a.id.starts_with("DU")),
+    }
+}
+
+/// A system's display name: the pool's folder name without its `NN_` prefix and
+/// with underscores turned into spaces (`06_nasdaq_pullback` → `Nasdaq pullback`).
+/// The id keeps the number, so the name can be the readable part.
+pub fn system_label(name: &str) -> String {
+    let body = match name.split_once('_') {
+        Some((prefix, rest)) if !rest.is_empty() && prefix.chars().all(|ch| ch.is_ascii_digit()) => {
+            rest
+        }
+        _ => name,
+    };
+    let spaced = body.replace('_', " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => spaced,
     }
 }
 
@@ -271,7 +284,8 @@ pub fn spark_bars(snapshot: &Snapshot, max_bars: usize) -> Vec<f32> {
     let min = tail.iter().copied().fold(f64::INFINITY, f64::min);
     let max = tail.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     if (max - min).abs() <= f64::EPSILON {
-        return vec![0.5; tail.len()];
+        // A flat series is a line, not a block: every bar sits at the floor.
+        return vec![0.0; tail.len()];
     }
     tail.iter()
         .map(|value| ((value - min) / (max - min)) as f32)
@@ -452,6 +466,16 @@ mod tests {
     }
 
     #[test]
+    fn system_labels_read_like_names_not_folders() {
+        assert_eq!(system_label("06_nasdaq_pullback"), "Nasdaq pullback");
+        assert_eq!(system_label("11_usdjpy_ruptura_bollinger"), "Usdjpy ruptura bollinger");
+        // A name without the numeric prefix is left as it is.
+        assert_eq!(system_label("A"), "A");
+        assert_eq!(system_label("nasdaq"), "Nasdaq");
+        assert_eq!(system_label(""), "");
+    }
+
+    #[test]
     fn orderings_put_attention_first() {
         let snapshot = snapshot();
         assert_eq!(systems_sorted(&snapshot)[0].id, "01_a");
@@ -495,7 +519,7 @@ mod tests {
             }]),
             ..snapshot()
         };
-        assert_eq!(spark_bars(&flat, 48), vec![0.5]);
+        assert_eq!(spark_bars(&flat, 48), vec![0.0]);
     }
 
     #[test]

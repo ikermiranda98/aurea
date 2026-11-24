@@ -150,12 +150,24 @@ struct Inner {
     /// One rule pass at a time: a fired rule files a proposal, which publishes
     /// again, and that second pass must not loop.
     evaluating: AtomicBool,
+    /// Proposals approved and running now: a second approval (a double
+    /// click) must not run the same action twice.
+    claimed: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Default for TradingService {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Which halves of a snapshot a rule pass may read (`TradingService`'s rules).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RuleTrust {
+    /// The account and positions come from a live TWS link.
+    pub broker: bool,
+    /// The systems come from the engine's real pool.
+    pub pool: bool,
 }
 
 impl TradingService {
@@ -174,6 +186,7 @@ impl TradingService {
             rule_listener: Mutex::new(None),
             proposal_listener: Mutex::new(None),
             evaluating: AtomicBool::new(false),
+            claimed: Mutex::new(std::collections::HashSet::new()),
         });
         // The demo fixture ticks every 2 s; keep forwarding it while no live
         // link owns the snapshot. Without a runtime (unit tests, a CLI probe)
@@ -294,6 +307,20 @@ impl TradingService {
         rules::validate(&input.condition).map_err(|message| TradingError::InvalidRequest {
             message,
         })?;
+        // An agent that loops must not pile up watchers: the desk shows and
+        // checks every one each second.
+        let watching = lock(&self.inner.rules)
+            .iter()
+            .filter(|rule| rule.status == RuleStatus::Watching)
+            .count();
+        if watching >= rules::MAX_WATCHING {
+            return Err(TradingError::InvalidRequest {
+                message: format!(
+                    "ya hay {watching} reglas vigilando (el máximo es {}); cancela alguna antes de crear otra",
+                    rules::MAX_WATCHING
+                ),
+            });
+        }
         let minutes = input
             .expires_minutes
             .unwrap_or(rules::DEFAULT_EXPIRES_MINUTES);
@@ -350,7 +377,7 @@ impl TradingService {
     /// holds becomes `Fired`; if it carries a proposal, that proposal lands in
     /// the desk for the person to approve or reject.
     pub fn evaluate_rules(&self, snapshot: &Snapshot) {
-        self.inner.evaluate_rules(snapshot);
+        self.inner.evaluate_rules(snapshot, RuleTrust { broker: true, pool: true });
     }
 
     /// Evaluates the rules on every engine update (the engine ticks once a
@@ -367,13 +394,21 @@ impl TradingService {
                     break;
                 }
                 let engine = watch.borrow_and_update().clone();
+                // The systems are real once the engine has a pool; the account
+                // and positions once TWS is live. Demo figures fire nothing.
+                let trust = RuleTrust {
+                    broker: service.live(),
+                    pool: !engine.systems.is_empty(),
+                };
                 let merged = service.merged_with(engine);
-                service.evaluate_rules(&merged);
+                service.inner.evaluate_rules(&merged, trust);
             }
         });
     }
 
-    /// Takes a pending proposal's action to run it, or says why not.
+    /// Takes a pending proposal's action to run it, or says why not. The
+    /// proposal stays claimed until [`Self::finish_proposal`], so a second
+    /// approval meanwhile is refused instead of running it again.
     pub fn start_proposal(&self, id: &str) -> Result<ProposalAction, String> {
         let list = lock(&self.inner.proposals);
         match list.iter().find(|p| p.id == id) {
@@ -381,12 +416,18 @@ impl TradingService {
             Some(p) if p.status != ProposalStatus::Pending => {
                 Err("That proposal was already resolved.".into())
             }
-            Some(p) => Ok(p.action.clone()),
+            Some(p) => {
+                if !lock(&self.inner.claimed).insert(id.to_string()) {
+                    return Err("Esa petición ya se está ejecutando.".into());
+                }
+                Ok(p.action.clone())
+            }
         }
     }
 
     /// Records how a proposal ended (rejected, done, failed).
     pub fn finish_proposal(&self, id: &str, status: ProposalStatus, result: Option<String>) {
+        lock(&self.inner.claimed).remove(id);
         let updated = {
             let mut list = lock(&self.inner.proposals);
             match list.iter_mut().find(|p| p.id == id) {
@@ -726,7 +767,7 @@ impl Inner {
 
     /// One rule pass. A fired rule files a proposal and publishes again; the
     /// guard makes that second pass return instead of looping.
-    fn evaluate_rules(&self, snapshot: &Snapshot) {
+    fn evaluate_rules(&self, snapshot: &Snapshot, trust: RuleTrust) {
         if self.evaluating.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -742,6 +783,15 @@ impl Inner {
                     rule.status = RuleStatus::Expired;
                     rule.note = Some("Caducó sin cumplirse.".into());
                     changed.push(rule.clone());
+                    continue;
+                }
+                // A half that isn't real (the demo fixture) is never read.
+                let trusted = if rules::reads_broker(&rule.condition) {
+                    trust.broker
+                } else {
+                    trust.pool
+                };
+                if !trusted {
                     continue;
                 }
                 if let Some(note) = rules::condition_met(&rule.condition, snapshot, now) {
@@ -797,7 +847,10 @@ impl Inner {
         self.snapshot.send_replace(snapshot.clone());
         // Rules see the desk as it now stands. A fired one files a proposal
         // and publishes again; the guard in `evaluate_rules` stops there.
-        self.evaluate_rules(&snapshot);
+        // This half has no pool, and its account and positions are the demo
+        // fixture until TWS is live: only those live figures may fire.
+        let live = lock(&self.state).live;
+        self.evaluate_rules(&snapshot, RuleTrust { broker: live, pool: false });
     }
 
     /// Folds one event in; every path that changes the state republishes.
@@ -1044,6 +1097,9 @@ mod tests {
             service.start_proposal(&p.id).unwrap(),
             ProposalAction::ClosePosition { symbol: "MNQZ6".into() }
         );
+        // While it runs (still pending), a second approval — a double click —
+        // is refused instead of running the action again.
+        assert!(service.start_proposal(&p.id).is_err());
         service.finish_proposal(&p.id, ProposalStatus::Done, Some("Cerrada.".into()));
         let done = &service.proposals()[0];
         assert_eq!(done.status, ProposalStatus::Done);
@@ -1093,8 +1149,16 @@ mod tests {
             })
             .unwrap();
 
-        // The fixture's NQ is stopped, so the rule fires on the publish that
-        // follows its creation: one banner, one proposal, no action run.
+        // The publish that follows its creation reads the demo fixture,
+        // whose stopped NQ is made up: nothing fires on it.
+        let watching = service.rules().into_iter().find(|r| r.id == rule.id).unwrap();
+        assert_eq!(watching.status, RuleStatus::Watching);
+        assert!(service.proposals().is_empty());
+        assert!(rang.lock().unwrap().is_empty());
+
+        // Read as a real desk, the stopped NQ fires it: one banner, one
+        // proposal, no action run.
+        service.evaluate_rules(&service.snapshot());
         let fired = service
             .rules()
             .into_iter()
@@ -1111,6 +1175,32 @@ mod tests {
         service.evaluate_rules(&service.snapshot());
         assert_eq!(rang.lock().unwrap().len(), 1);
         assert_eq!(service.proposals().len(), 1);
+    }
+
+    /// Without TWS the account and positions are the demo fixture: a rule
+    /// they would satisfy (the fixture's +0,85 %) must not fire on them.
+    #[tokio::test]
+    async fn demo_figures_never_fire_a_broker_rule() {
+        use zeron_proto::trading::{RuleAddInput, RuleCondition, RuleStatus};
+        let service = TradingService::new();
+        assert!(!service.live());
+        let rule = service
+            .add_rule(RuleAddInput {
+                name: "La cuenta gana".into(),
+                condition: RuleCondition::AccountPnlPct {
+                    at_most: None,
+                    at_least: Some(0.5),
+                },
+                proposal: Some(ProposalAction::CloseAll),
+                reason: "asegurar".into(),
+                expires_minutes: None,
+            })
+            .unwrap();
+        // The publishes (creation, a later one) read the fixture: untouched.
+        service.inner.publish();
+        let still = service.rules().into_iter().find(|r| r.id == rule.id).unwrap();
+        assert_eq!(still.status, RuleStatus::Watching);
+        assert!(service.proposals().is_empty());
     }
 
     #[tokio::test]
@@ -1212,6 +1302,7 @@ mod tests {
                 expires_minutes: None,
             })
             .unwrap();
+        service.evaluate_rules(&service.snapshot());
         assert_eq!(rung.lock().unwrap().len(), 1);
         assert_eq!(service.proposals().len(), 3);
     }

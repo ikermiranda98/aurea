@@ -38,6 +38,12 @@ pub struct IbClientConfig {
     pub reconnect_interval: Duration,
     /// Close and rebuild the socket when no byte arrives for this long.
     pub connection_watchdog_interval: Duration,
+    /// Ask TWS for the session clock this often while the link is quiet.
+    /// TWS never heartbeats a session nobody asks anything of, so without this
+    /// a healthy but idle link trips the watchdog and recycles every few
+    /// seconds. The request does not postpone the watchdog: only a byte from
+    /// TWS does, which is what the answer proves. Zero disables it.
+    pub keepalive_interval: Duration,
     /// A link is "connected" only after the socket survives this window.
     pub stability_window: Duration,
 }
@@ -50,6 +56,7 @@ impl Default for IbClientConfig {
             client_id: 1000,
             reconnect_interval: Duration::from_secs(5),
             connection_watchdog_interval: Duration::from_secs(15),
+            keepalive_interval: Duration::from_secs(10),
             stability_window: Duration::from_millis(1500),
         }
     }
@@ -264,6 +271,7 @@ async fn session(
     let mut stable = false;
     let mut started = false;
     let mut watchdog_at = tokio::time::Instant::now() + config.connection_watchdog_interval;
+    let mut keepalive_at = tokio::time::Instant::now() + config.keepalive_interval;
 
     loop {
         tokio::select! {
@@ -314,6 +322,9 @@ async fn session(
                         decoder.push(&buf[..n]);
                         watchdog_at = tokio::time::Instant::now()
                             + config.connection_watchdog_interval;
+                        // Bytes from TWS are the only proof the link is alive:
+                        // a fresh read also delays our next keepalive.
+                        keepalive_at = tokio::time::Instant::now() + config.keepalive_interval;
 
                         while let Some(fields) = decoder.next_message() {
                             if let Some(error) = decoder.take_error() {
@@ -362,6 +373,23 @@ async fn session(
                         return SessionOutcome::Dropped;
                     }
                 }
+            }
+
+            // A quiet session is not a dead one: TWS answers nothing it is not
+            // asked, so the clock request is the cheapest frame that makes it
+            // speak: `reqCurrentTime` is message 49 with its version field
+            // (1), as ib_insync sends it (`send(49, 1)`). Without the version
+            // TWS reads the next frame's first field as it and only answers
+            // once a second frame arrives. The watchdog is left alone on
+            // purpose: if TWS never answers, the link must still be recycled.
+            _ = tokio::time::sleep_until(keepalive_at),
+                if started && !config.keepalive_interval.is_zero() =>
+            {
+                let frames = crate::codec::encode_message(&["49", "1"]);
+                if stream.write_all(&frames).await.is_err() {
+                    return SessionOutcome::Dropped;
+                }
+                keepalive_at = tokio::time::Instant::now() + config.keepalive_interval;
             }
 
             _ = tokio::time::sleep_until(stable_at), if !stable => {
@@ -820,6 +848,34 @@ mod tests {
 
         let connects = collect_n_connects(&mut events, 2, WAIT).await;
         assert!(connects >= 2, "the watchdog never recycled the socket");
+        assert!(client.is_connected());
+        client.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn a_quiet_link_asks_for_the_clock_instead_of_dying() {
+        let tws = fake_tws().await;
+        let mut cfg = config(tws.port);
+        cfg.keepalive_interval = Duration::from_millis(30);
+        cfg.connection_watchdog_interval = Duration::from_secs(5);
+        cfg.stability_window = Duration::from_millis(20);
+        let (client, _events) = IbClient::connect(cfg).await.unwrap();
+
+        let mut sockets = tws.sockets;
+        let mut socket = tokio::time::timeout(WAIT, sockets.recv())
+            .await
+            .expect("a socket before the deadline")
+            .expect("the fake TWS hands its side over");
+        // START_API answers the server version; the keepalive follows once
+        // TWS stays quiet, which is exactly what the real one does.
+        let mut decoder = Decoder::new();
+        let mut keepalives = 0;
+        for _ in 0..4 {
+            if read_frame(&mut socket, &mut decoder).await == ["49", "1"] {
+                keepalives += 1;
+            }
+        }
+        assert!(keepalives >= 2, "a quiet link got no keepalive");
         assert!(client.is_connected());
         client.disconnect().await;
     }

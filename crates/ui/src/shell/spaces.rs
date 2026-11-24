@@ -476,24 +476,17 @@ impl Shell {
             "escape" => self.close_sidebar_view_menu(cx),
             "up" | "down" => {
                 let delta = if key == "up" { -1 } else { 1 };
-                menu.active = popover::menu_step(menu.active, 2, delta);
+                menu.active = popover::menu_step(menu.active, 1, delta);
                 cx.notify();
             }
-            "enter" | "space" if !event.is_held => match menu.active.unwrap_or(0) {
-                0 => self.activate_clean_chat(cx),
-                _ => {
-                    self.close_sidebar_view_menu(cx);
-                    let section = self.settings.settings_section.reopenable();
-                    self.open_settings(section, cx);
-                }
-            },
+            "enter" | "space" if !event.is_held => self.activate_clean_chat(cx),
             _ => return,
         }
         cx.stop_propagation();
     }
 
-    /// The drawer's "..." menu in Aurea: Clean Chat (asks once more before
-    /// it wipes the history) and Settings.
+    /// The drawer's "..." menu in Aurea: Clean Chat (asks once more before it
+    /// wipes the history). Settings lives in the titlebar now (user request).
     fn render_sidebar_view_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let theme = &theme.for_popup();
         let Some(menu_state) = self.sidebar_view_menu.get() else {
@@ -534,30 +527,7 @@ impl Shell {
                     .when(armed, |el| el.text_color(theme.danger))
                     .child(clean_label),
             );
-        let open_settings = row(1, "sidebar-open-settings")
-            // The row already owns `on_hover` (its hover blend): follow the
-            // pointer with mouse moves instead.
-            .on_mouse_move(cx.listener(|this, _: &gpui::MouseMoveEvent, _, cx| {
-                if let Some(menu) = this.sidebar_view_menu.open_mut()
-                    && menu.active != Some(1)
-                {
-                    menu.active = Some(1);
-                    cx.notify();
-                }
-            }))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.close_sidebar_view_menu(cx);
-                let section = this.settings.settings_section.reopenable();
-                this.open_settings(section, cx);
-                cx.stop_propagation();
-            }))
-            .child(
-                icon(icons::SETTINGS)
-                    .size(px(14.0))
-                    .text_color(theme.text_muted),
-            )
-            .child(div().flex_1().child("Settings"));
-        // Sized to its two rows, not to the drawer.
+        // Sized to its one row, not to the drawer.
         popover::popover_card(theme)
             .w(px(184.0))
             .track_focus(&focus)
@@ -571,7 +541,6 @@ impl Shell {
             .flex_col()
             .gap(px(2.0))
             .child(clean)
-            .child(open_settings)
             .into_any_element()
     }
 

@@ -54,6 +54,12 @@ pub(crate) fn stage(value: f32, start: f32, end: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Air between the docked pill and the window's bottom edge. The chat column
+/// ends at the window edge (the titlebar overlays the content row), so without
+/// this the pill's border and rounded corners sat on the frame and read as cut
+/// off — the drawer's `overflow_hidden` clipped the last row of pixels.
+const DOCKED_BOTTOM_INSET: f32 = 12.0;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DockFrame {
     /// Canonical position: zero is the hero, one is the established thread.
@@ -647,7 +653,9 @@ impl Element for DockedComposer {
         let x = f32::from(bounds.left()) + self.shift_x;
         // Anchor by the top of the input surface, not its shrinking bottom.
         let y = if docked {
-            f32::from(bounds.top())
+            // Never land flush on the window's bottom edge: the drawer clips
+            // at that edge, so a pill touching it loses its border and corners.
+            (f32::from(bounds.top()) - DOCKED_BOTTOM_INSET).max(0.0)
         } else {
             (self.viewport_height - f32::from(bounds.size.height)) * 0.5 + 8.0
         };

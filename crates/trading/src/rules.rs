@@ -78,6 +78,19 @@ pub fn validate(condition: &RuleCondition) -> Result<(), String> {
     }
 }
 
+/// How many rules may watch at once.
+pub const MAX_WATCHING: usize = 30;
+
+/// Whether the condition reads the broker half (account, positions) rather
+/// than the systems pool. Each half is only trusted when it is real: never
+/// against the demo fixture, whose made-up figures must not fire anything.
+pub fn reads_broker(condition: &RuleCondition) -> bool {
+    matches!(
+        condition,
+        RuleCondition::AccountPnlPct { .. } | RuleCondition::PositionPnlUsd { .. }
+    )
+}
+
 /// The value falls inside the thresholds the rule declared.
 fn within(value: f64, at_most: Option<f64>, at_least: Option<f64>) -> bool {
     at_most.is_none_or(|most| value <= most) && at_least.is_none_or(|least| value >= least)
