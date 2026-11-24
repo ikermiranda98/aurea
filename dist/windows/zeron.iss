@@ -68,8 +68,12 @@ WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
 ; A running Aurea is closed through the Restart Manager before its files are
-; replaced; the updated app starts again from the finish page.
-CloseApplications=yes
+; replaced; the updated app starts again from the finish page. `force` matters:
+; Aurea runs its engine as a child `zeron.exe engine` that has no window of its
+; own, and the Restart Manager cannot ask that one to close — with a plain
+; `yes` Setup gives up ("unable to automatically close all applications") and
+; the install never happens.
+CloseApplications=force
 RestartApplications=no
 
 [Tasks]
