@@ -58,7 +58,10 @@ DisableDirPage=auto
 DisableReadyPage=yes
 ArchitecturesAllowed={#ArchAllowed}
 ArchitecturesInstallIn64BitMode={#ArchAllowed}
-MinVersion=10.0
+; zeron.exe imports DirectML.dll, which ships with Windows 10 1903 and later
+; (the system ICU DLL icuuc.dll arrived earlier, in 1703). On anything older
+; the app would install and then fail to start, so Setup refuses up front.
+MinVersion=10.0.19041
 OutputDir={#OutputDir}
 OutputBaseFilename=aurea-{#AppVersion}-windows-{#Arch}-setup
 SetupIconFile=zeron.ico
@@ -111,3 +114,23 @@ Type: files; Name: "{app}\.zeron-completing.lock"
 Type: files; Name: "{app}\zeron-version"
 ; The zgx app's folder, whichever versions an update brought.
 Type: filesandordirs; Name: "{app}\beta"
+
+[Code]
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
+  Command: String;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    { The uninstaller doesn't go through the Restart Manager (the installer
+      does, see CloseApplications), and Aurea's engine keeps zeron.exe loaded
+      with no window of its own: without this, the uninstall "succeeds" and
+      leaves zeron.exe and the runtime DLLs behind, with the engine running.
+      Only this installation's processes are stopped, so a development build
+      elsewhere is left alone. }
+    Command := '-NoProfile -NonInteractive -Command "Get-Process zeron -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '\*'' } | Stop-Process -Force"';
+    Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Command,
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+end;
