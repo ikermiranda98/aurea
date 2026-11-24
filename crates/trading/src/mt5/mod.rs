@@ -8,6 +8,7 @@
 //! talks to the terminal is embedded as `puente.py`.
 
 pub mod enlace;
+pub mod escritorio;
 pub mod instruments;
 pub mod libro;
 pub mod lots;

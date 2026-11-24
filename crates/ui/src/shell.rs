@@ -10021,7 +10021,6 @@ fn header_icon_button_with(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::perf_stats::bump(&crate::perf_stats::FRAMES, 1);
         // Every repaint (state frame, input, or the clock firing) reschedules
         // the next clock-driven one; the sidebar and transcript follow this
         // view's notifications.
@@ -10698,7 +10697,6 @@ impl Render for Shell {
         // ride the same clock; their once-per-frame tick lives here (this is
         // the window's root render — it runs exactly once per frame).
         if self.motion_active.get() | motion::hover_fades_active() | motion::state_morphs_active() {
-            crate::perf_stats::bump(&crate::perf_stats::RAF_SHELL, 1);
             window.request_animation_frame();
         }
 

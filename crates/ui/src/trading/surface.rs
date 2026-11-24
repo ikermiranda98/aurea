@@ -139,11 +139,6 @@ impl TradingSurface {
                         value = newer;
                     }
                 }
-                crate::perf_stats::bump(&crate::perf_stats::SNAPSHOTS, 1);
-                crate::perf_stats::bump(
-                    &crate::perf_stats::SNAPSHOT_BYTES,
-                    if crate::perf_stats::enabled() { value.to_string().len() as u64 } else { 0 },
-                );
                 match serde_json::from_value::<Snapshot>(value) {
                     Ok(snapshot) => {
                         let alive = this
@@ -334,7 +329,6 @@ impl TradingSurface {
                         let changed = actions_probe.get().map_or(true, |old| (old - left).abs() > 0.5);
                         actions_probe.set(Some(left));
                         if changed {
-                            crate::perf_stats::bump(&crate::perf_stats::RAF_PROBE, 1);
                             // The shell reads the edge on its next render; ask
                             // for one so the clamp lands without waiting on a
                             // snapshot.
@@ -404,12 +398,11 @@ impl TradingSurface {
             .as_ref()
             .is_some_and(|snapshot| snapshot.accounts.is_some());
         let connected = links.iter().filter(|link| link.connected).count();
+        let _ = live;
         let (tone, label) = if links.is_empty() {
             (theme.text_faint, "sin conexión".to_string())
-        } else if !live {
-            (theme.text_faint, format!("{} de ejemplo", links.len()))
         } else if connected == 0 {
-            (theme.danger, "caída".to_string())
+            (theme.text_faint, "desconectado".to_string())
         } else {
             let label = match links.as_slice() {
                 [link] => match (link.broker, link.port) {
@@ -645,6 +638,11 @@ impl TradingSurface {
             .snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.accounts.is_some());
+        // The TWS action follows the TWS link itself, not whether any
+        // account (an MT5 one, say) reads.
+        let tws_up = links
+            .iter()
+            .any(|link| link.broker != Some(Broker::Mt5) && link.connected);
         let mut rows: Vec<Div> = Vec::with_capacity(links.len());
         if links.is_empty() {
             rows.push(empty_row(theme, "Sin conexiones registradas."));
@@ -682,10 +680,10 @@ impl TradingSurface {
                 .py(px(4.0))
                 .text_size(px(11.5))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_link(live, cx);
+                    this.toggle_link(tws_up, cx);
                     this.close_menu(DeskMenu::Links, cx);
                 }))
-                .child(if live {
+                .child(if tws_up {
                     "Desconectar TWS"
                 } else {
                     "Conectar TWS paper"
@@ -725,11 +723,7 @@ impl TradingSurface {
                         div()
                             .text_size(px(9.0))
                             .text_color(theme.text_faint)
-                            .child(SharedString::from(if live {
-                                format!("{} registradas", links.len())
-                            } else {
-                                "de ejemplo".to_string()
-                            })),
+                            .child(SharedString::from(format!("{} registradas", links.len()))),
                     ),
             )
             .children(rows)
@@ -830,7 +824,8 @@ impl TradingSurface {
                 };
                 this.notice =
                     Some(format!("Vinculando MT5 {}@{}…", account.login, account.server).into());
-                this.call(
+                let linked = format!("MT5 {}@{} conectado.", account.login, account.server);
+                this.call_with(
                     methods::TRADING_LINK_ADD,
                     json!({
                         "broker": "mt5",
@@ -839,6 +834,7 @@ impl TradingSurface {
                         "label": account.name,
                     }),
                     cx,
+                    move |this, _, _| this.notice = Some(linked.into()),
                 );
             },
         );
@@ -1482,7 +1478,10 @@ impl TradingSurface {
         let mut rows: Vec<AnyElement> = Vec::with_capacity(systems.len() + 1);
         if !collapsed {
             if systems.is_empty() {
-                rows.push(empty_row(theme, "El pool no tiene sistemas.").into_any_element());
+                rows.push(
+                    empty_row(theme, "Sin sistemas: elige su carpeta en Ajustes → Sistemas.")
+                        .into_any_element(),
+                );
             } else {
                 // Running bots first (the sort already does that), then the
                 // idle ones behind a summary row: on a normal day that is 10
@@ -1755,15 +1754,11 @@ impl TradingSurface {
             Some(Broker::Nt) => ("NT", theme.warning),
             Some(Broker::Ibkr) | None => ("IBKR", theme.success),
         };
-        let (state_label, state_tone) = if demo {
-            // The demo fixture's links are invented: they are not connected
-            // to anything, and "CONECTADA" beside "Conectar TWS paper" read
-            // as a contradiction.
-            ("EJEMPLO", theme.text_faint)
-        } else if link.connected {
+        let _ = demo;
+        let (state_label, state_tone) = if link.connected {
             ("CONECTADA", theme.success)
         } else {
-            ("CAÍDA", theme.danger)
+            ("DESCONECTADA", theme.warning)
         };
         let link_id = link.id.clone();
         let label = link.label.clone().unwrap_or_else(|| link.id.clone());
@@ -2103,7 +2098,6 @@ impl TradingSurface {
 
 impl Render for TradingSurface {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::perf_stats::bump(&crate::perf_stats::DESK_RENDERS, 1);
         let theme = Theme::of(cx).clone();
         // The page starts under the titlebar row, which now carries the desk's
         // heading too (`titlebar_row`) — this body keeps only the strips and

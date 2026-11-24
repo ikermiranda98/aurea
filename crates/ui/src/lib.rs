@@ -14,7 +14,6 @@
 
 mod account_usage;
 pub mod lite;
-mod perf_stats;
 pub mod app_menus;
 pub mod app_update;
 pub mod appearance;

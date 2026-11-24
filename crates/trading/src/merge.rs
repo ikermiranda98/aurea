@@ -30,22 +30,10 @@ pub const MERGE_COALESCE: std::time::Duration = std::time::Duration::from_millis
 /// How many log rows the merged snapshot keeps (the engine ring is 800).
 const MAX_LOGS: usize = 800;
 
-/// Merges `engine` (pool) with `broker` (TWS) under the module rule.
-pub fn merge(engine: &Snapshot, broker: &Snapshot, broker_live: bool) -> Snapshot {
-    if !broker_live {
-        let has_pool = !engine.systems.is_empty() || engine.systems_dir.is_some();
-        return if has_pool {
-            // The desk's proposals and rules live with the broker half,
-            // whatever mode.
-            Snapshot {
-                proposals: broker.proposals.clone(),
-                rules: broker.rules.clone(),
-                ..engine.clone()
-            }
-        } else {
-            broker.clone()
-        };
-    }
+/// Merges `engine` (pool) with `broker` (TWS and MT5). The broker half is
+/// always real (empty while nothing is connected), so both halves always
+/// combine: the systems from the pool, the money from the links.
+pub fn merge(engine: &Snapshot, broker: &Snapshot, _broker_live: bool) -> Snapshot {
     let mut logs: Vec<_> = engine.logs.iter().chain(broker.logs.iter()).cloned().collect();
     logs.sort_by_key(|log| log.ts);
     if logs.len() > MAX_LOGS {
@@ -121,6 +109,18 @@ impl TradingService {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn without_a_link_the_pool_shows_and_no_money_is_invented() {
+        let mut engine = crate::mock::current();
+        engine.account = None;
+        engine.positions.clear();
+        let broker = crate::service::TradingService::new().snapshot();
+        let merged = merge(&engine, &broker, false);
+        assert_eq!(merged.systems.len(), engine.systems.len());
+        assert!(merged.account.is_none());
+        assert!(merged.positions.is_empty());
+    }
+
     use super::*;
     use zeron_proto::trading::{Log, LogLevel, Position, PositionSide, ProgramState};
 
@@ -188,23 +188,6 @@ mod tests {
         let programs = merged.programs.unwrap();
         assert_eq!(programs.tws, ProgramState::Running);
         assert_eq!(programs.mt5, Some(ProgramState::Running));
-    }
-
-    #[test]
-    fn demo_positions_never_sit_next_to_a_real_pool() {
-        let engine = engine_with_pool();
-        let merged = merge(&engine, &crate::mock::current(), false);
-        assert!(merged.positions.is_empty());
-        assert_eq!(merged.version, "nativo-1");
-    }
-
-    #[test]
-    fn without_a_pool_or_a_link_the_desk_keeps_the_demo() {
-        let mut engine = engine_with_pool();
-        engine.systems.clear();
-        engine.systems_dir = None;
-        let demo = crate::mock::current();
-        assert_eq!(merge(&engine, &demo, false), demo);
     }
 
     #[tokio::test]

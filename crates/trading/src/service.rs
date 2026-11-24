@@ -37,7 +37,7 @@ use crate::ibkr::IbkrLedger;
 use crate::proposals;
 use crate::rules;
 use crate::store::Store;
-use crate::{SnapshotWatch, mock};
+use crate::SnapshotWatch;
 
 /// The IB Gateway/TWS live API port. Aurea never trades live: it is refused at
 /// the socket, whatever a caller asked for.
@@ -153,6 +153,8 @@ struct Inner {
     /// Proposals approved and running now: a second approval (a double
     /// click) must not run the same action twice.
     claimed: Mutex<std::collections::HashSet<String>>,
+    /// The desk's MetaTrader 5 accounts (set by the engine's assembly).
+    mt5: Mutex<Option<Arc<crate::mt5::escritorio::Mt5Escritorio>>>,
 }
 
 impl Default for TradingService {
@@ -171,9 +173,10 @@ pub(crate) struct RuleTrust {
 }
 
 impl TradingService {
-    /// A service showing the demo snapshot, with no socket open.
+    /// A service with no link open: the desk shows nothing until TWS or an
+    /// MT5 account connects (Aurea never invents a desk).
     pub fn new() -> Self {
-        let (snapshot, _rx) = watch::channel(mock::current());
+        let (snapshot, _rx) = watch::channel(State::default().live_snapshot());
         let inner = Arc::new(Inner {
             state: Mutex::new(State::default()),
             snapshot,
@@ -187,26 +190,8 @@ impl TradingService {
             proposal_listener: Mutex::new(None),
             evaluating: AtomicBool::new(false),
             claimed: Mutex::new(std::collections::HashSet::new()),
+            mt5: Mutex::new(None),
         });
-        // The demo fixture ticks every 2 s; keep forwarding it while no live
-        // link owns the snapshot. Without a runtime (unit tests, a CLI probe)
-        // the initial snapshot is all there is, which is fine.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let weak = Arc::downgrade(&inner);
-            handle.spawn(async move {
-                let mut demo = mock::watch();
-                loop {
-                    if demo.changed().await.is_err() {
-                        break;
-                    }
-                    let Some(inner) = weak.upgrade() else { break };
-                    let live = lock(&inner.state).live;
-                    if !live {
-                        inner.publish();
-                    }
-                }
-            });
-        }
         Self { inner }
     }
 
@@ -224,6 +209,38 @@ impl TradingService {
         }
         service.inner.publish();
         service
+    }
+
+    /// Attaches the desk's MetaTrader 5 accounts: their bridges start now and
+    /// the desk follows what they read (republished only when it changes).
+    pub fn set_mt5(&self, mt5: Arc<crate::mt5::escritorio::Mt5Escritorio>) {
+        *lock(&self.inner.mt5) = Some(Arc::clone(&mt5));
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let weak = Arc::downgrade(&self.inner);
+            handle.spawn(async move {
+                for fallo in mt5.restaurar() {
+                    tracing::warn!(target: "mt5", "{fallo}");
+                }
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let Some(inner) = weak.upgrade() else { break };
+                    if mt5.hay_enlaces() {
+                        inner.publish();
+                    }
+                }
+            });
+        }
+        self.inner.publish();
+    }
+
+    /// The desk's MetaTrader 5 accounts, once attached.
+    pub fn mt5(&self) -> Option<Arc<crate::mt5::escritorio::Mt5Escritorio>> {
+        lock(&self.inner.mt5).clone()
+    }
+
+    /// Republishes the desk (after an MT5 account was added or removed).
+    pub fn refresh(&self) {
+        self.inner.publish();
     }
 
     /// The persisted active account, if a store is attached and holds one.
@@ -621,7 +638,9 @@ impl TradingService {
     /// Switches the dashboard's shown account. In demo mode the mock owns it.
     pub fn select(&self, account: &str) -> Result<Option<Account>, TradingError> {
         if !self.live() {
-            return mock::account_select(account);
+            return Err(TradingError::InvalidRequest {
+                message: "Conecta TWS para elegir una de sus cuentas.".into(),
+            });
         }
         let selected = account.to_string();
         let mut state = lock(&self.inner.state);
@@ -829,17 +848,43 @@ impl Inner {
         self.evaluating.store(false, Ordering::SeqCst);
     }
 
-    /// Publishes what the state says: the demo fixture while no link is live.
+    /// Publishes what the links say: TWS (when live) and every MT5 account.
+    /// With nothing connected the desk is empty, never a made-up one.
     fn publish(&self) {
-        let mut snapshot = {
+        let (mut snapshot, live) = {
             let mut state = lock(&self.state);
-            if !state.live {
-                mock::current()
-            } else {
+            if state.live {
                 state.sample_equity(now_ms());
-                state.live_snapshot()
             }
+            (state.live_snapshot(), state.live)
         };
+        let mt5 = lock(&self.mt5).clone();
+        let mut mt5_read = false;
+        if let Some(mt5) = mt5 {
+            let vista = mt5.vista();
+            mt5_read = !vista.accounts.is_empty();
+            if !vista.links.is_empty() {
+                snapshot.links.get_or_insert_with(Vec::new).extend(vista.links);
+                snapshot
+                    .programs
+                    .get_or_insert(Programs { tws: ProgramState::Closed, mt5: None })
+                    .mt5 = Some(vista.programa.unwrap_or(ProgramState::Closed));
+            }
+            if !vista.accounts.is_empty() {
+                if snapshot.account.is_none() {
+                    snapshot.account = vista.accounts.first().cloned();
+                }
+                snapshot.accounts.get_or_insert_with(Vec::new).extend(vista.accounts);
+                snapshot.connected = true;
+            }
+            if !vista.positions.is_empty() {
+                snapshot.positions.extend(vista.positions.iter().cloned());
+                snapshot
+                    .open_positions
+                    .get_or_insert_with(Vec::new)
+                    .extend(vista.positions);
+            }
+        }
         let proposals = lock(&self.proposals).clone();
         snapshot.proposals = (!proposals.is_empty()).then_some(proposals);
         let rules = lock(&self.rules).clone();
@@ -847,10 +892,9 @@ impl Inner {
         crate::engine::publish_if_changed(&self.snapshot, snapshot.clone());
         // Rules see the desk as it now stands. A fired one files a proposal
         // and publishes again; the guard in `evaluate_rules` stops there.
-        // This half has no pool, and its account and positions are the demo
-        // fixture until TWS is live: only those live figures may fire.
-        let live = lock(&self.state).live;
-        self.evaluate_rules(&snapshot, RuleTrust { broker: live, pool: false });
+        // This half has no pool; its account and positions are real once TWS
+        // is live or an MT5 account reads.
+        self.evaluate_rules(&snapshot, RuleTrust { broker: live || mt5_read, pool: false });
     }
 
     /// Folds one event in; every path that changes the state republishes.
@@ -1018,7 +1062,7 @@ impl State {
         let positions = self.ledger.positions();
         let (host, port, up) = match &self.link {
             Some((host, port)) => (host.clone(), *port, self.ledger.connected()),
-            None => (String::new(), PAPER_PORT, false),
+            None => ("127.0.0.1".to_string(), PAPER_PORT, false),
         };
         let link_id = format!("{host}:{port}");
         let with_link = |mut account: Account| {
@@ -1158,7 +1202,7 @@ mod tests {
 
         // Read as a real desk, the stopped NQ fires it: one banner, one
         // proposal, no action run.
-        service.evaluate_rules(&service.snapshot());
+        service.evaluate_rules(&crate::mock::current());
         let fired = service
             .rules()
             .into_iter()
@@ -1172,7 +1216,7 @@ mod tests {
         assert!(proposals[0].reason.contains("NQ parado"), "{proposals:?}");
 
         // Another pass neither rings nor proposes again.
-        service.evaluate_rules(&service.snapshot());
+        service.evaluate_rules(&crate::mock::current());
         assert_eq!(rang.lock().unwrap().len(), 1);
         assert_eq!(service.proposals().len(), 1);
     }
@@ -1224,7 +1268,7 @@ mod tests {
             RuleStatus::Watching
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
-        service.evaluate_rules(&service.snapshot());
+        service.evaluate_rules(&crate::mock::current());
         let expired = service
             .rules()
             .into_iter()
@@ -1302,7 +1346,7 @@ mod tests {
                 expires_minutes: None,
             })
             .unwrap();
-        service.evaluate_rules(&service.snapshot());
+        service.evaluate_rules(&crate::mock::current());
         assert_eq!(rung.lock().unwrap().len(), 1);
         assert_eq!(service.proposals().len(), 3);
     }
@@ -1536,7 +1580,9 @@ mod tests {
 
         service.disconnect().await;
         assert!(!service.live());
-        assert_eq!(service.snapshot().version, "0.1.0-mock");
+        // Nothing connected: an empty desk, never a made-up one.
+        let offline = service.snapshot();
+        assert!(offline.account.is_none() && offline.positions.is_empty());
     }
 
     #[tokio::test]
@@ -1562,7 +1608,9 @@ mod tests {
         let service = TradingService::new();
         assert!(service.connect_to(fast(port)).await.is_err());
         assert!(!service.live());
-        assert_eq!(service.snapshot().version, "0.1.0-mock");
+        // Nothing connected: an empty desk, never a made-up one.
+        let offline = service.snapshot();
+        assert!(offline.account.is_none() && offline.positions.is_empty());
     }
 
     #[tokio::test]

@@ -432,6 +432,11 @@ impl EngineCore {
             ),
             None => zeron_trading::TradingService::new(),
         };
+        // Real MetaTrader 5: the accounts registered on this desk reconnect
+        // their bridges now (crates/trading/src/mt5/escritorio.rs).
+        trading.set_mt5(zeron_trading::mt5::escritorio::Mt5Escritorio::new(
+            &data_dir.join("trading"),
+        ));
         // Rules watch every desk update (the engine ticks once a second), and
         // only ever file a proposal: the person still approves it.
         if let Some(engine) = &trading_engine {

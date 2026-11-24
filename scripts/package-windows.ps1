@@ -72,6 +72,47 @@ function Find-VcRuntime([string]$Arch) {
     throw "The Visual C++ runtime DLLs ($($VcRuntimeDlls -join ', ')) weren't found: install the Visual Studio C++ build tools"
 }
 
+# MetaTrader 5 needs CPython 3.10-3.14 with MetaQuotes' `MetaTrader5`
+# package (crates/trading/src/mt5/escritorio.rs). Every package ships its own:
+# python.org's embeddable CPython plus MetaTrader5 and numpy, in `mt5-python`
+# beside zeron.exe, so no machine needs a Python of its own. Downloads are
+# cached under target/vendor.
+$Mt5PythonVersion = '3.12.10'
+
+function Add-Mt5Python([string]$Stage, [string]$Root) {
+    $vendor = Join-Path $Root 'target/vendor'
+    New-Item -ItemType Directory -Force -Path $vendor | Out-Null
+    $zip = Join-Path $vendor "python-$Mt5PythonVersion-embed-amd64.zip"
+    if (-not (Test-Path -LiteralPath $zip)) {
+        $url = "https://www.python.org/ftp/python/$Mt5PythonVersion/python-$Mt5PythonVersion-embed-amd64.zip"
+        Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+    }
+    $target = Join-Path $Stage 'mt5-python'
+    Expand-Archive -LiteralPath $zip -DestinationPath $target -Force
+    # The embeddable build ignores site-packages until its ._pth says so.
+    $pth = Get-ChildItem -LiteralPath $target -Filter 'python*._pth' | Select-Object -First 1
+    $lines = @(Get-Content -LiteralPath $pth.FullName | Where-Object { $_ -notmatch '^\s*#?\s*import site' })
+    $lines += 'Lib\site-packages'
+    $lines += 'import site'
+    Set-Content -LiteralPath $pth.FullName -Value $lines -Encoding ascii
+    $packages = Join-Path $target 'Lib/site-packages'
+    $wheels = Join-Path $vendor 'mt5-wheels'
+    New-Item -ItemType Directory -Force -Path $packages, $wheels | Out-Null
+    $short = ($Mt5PythonVersion -split '\.')[0..1] -join ''
+    $pyver = ($Mt5PythonVersion -split '\.')[0..1] -join '.'
+    # Wheels for the bundled CPython, whatever Python runs this script.
+    & py -m pip download MetaTrader5 --only-binary=:all: --platform win_amd64 `
+        --python-version $short --implementation cp --dest $wheels --quiet
+    if ($LASTEXITCODE -ne 0) { throw 'Could not download the MetaTrader5 wheels' }
+    & py -m pip install --no-index --find-links $wheels --target $packages `
+        --only-binary=:all: --platform win_amd64 --python-version $short --implementation cp `
+        MetaTrader5 --quiet --no-compile
+    if ($LASTEXITCODE -ne 0) { throw 'Could not install MetaTrader5 into the bundled Python' }
+    $check = & (Join-Path $target 'python.exe') -c "import MetaTrader5, sys; print(sys.version_info[:2])"
+    if ($LASTEXITCODE -ne 0) { throw "The bundled Python $pyver can't import MetaTrader5" }
+    Write-Host "Bundled Python $Mt5PythonVersion with MetaTrader5 ($check)"
+}
+
 function Get-WindowsPackageArch([string]$Path) {
     # Match zeron-update's `std::env::consts::ARCH` so the standalone .exe
     # name agrees with crates/update/src/windows.rs::artifact. Read the built
@@ -184,6 +225,7 @@ try {
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     Copy-Item -LiteralPath $built -Destination (Join-Path $stage 'zeron.exe')
+    Add-Mt5Python $stage $root
     $vcRuntime = Find-VcRuntime $arch
     foreach ($dll in $VcRuntimeDlls) {
         Copy-Item -LiteralPath (Join-Path $vcRuntime $dll) -Destination $stage

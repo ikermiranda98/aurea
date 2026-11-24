@@ -983,15 +983,6 @@ impl EngineRpc {
     /// Actions that only the demo fixture can honour (systems, tasks, links and
     /// order entry). A live TWS link refuses them instead of reporting success
     /// for a real account nothing acted on.
-    fn require_demo_trading(&self, what: &str) -> Result<(), RpcError> {
-        if self.trading.live() {
-            return Err(RpcError::Failed(format!(
-                "{what} aún no está disponible con TWS en vivo (llega con D3)."
-            )));
-        }
-        Ok(())
-    }
-
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
         self.previews = Some(previews);
         self
@@ -2631,6 +2622,12 @@ fn systems_verdict(
     }
 }
 
+/// What the desk says when a bot action has no systems folder to act on.
+const NO_SYSTEMS_DIR: &str =
+    "Elige la carpeta de tus sistemas en Ajustes → Sistemas para arrancarlos, pararlos o programarlos.";
+/// What the desk says when a money action has no account to act on.
+const NOTHING_CONNECTED: &str = "No hay ninguna cuenta conectada: conecta TWS paper o MetaTrader 5.";
+
 /// `TradingRepoUpdate`'s refusal while bots run (the app offers to insist).
 pub const SYSTEMS_RUNNING: &str = "Hay sistemas en marcha: actualizar cambiaría su código mientras se ejecutan";
 
@@ -2742,7 +2739,8 @@ mod trading_person_tests {
         let snapshot = value(rpc.handle(methods::TRADING_SNAPSHOT, serde_json::json!({})).await);
         assert_eq!(snapshot["proposals"][0]["id"], id.as_str());
 
-        // The person approves: the (demo) close runs and the verdict lands.
+        // The person approves: the close runs and its real verdict lands
+        // (no account is connected here, so it says so; nothing is invented).
         let resolved = value(
             rpc.handle(
                 methods::TRADING_PROPOSAL_RESOLVE,
@@ -2750,8 +2748,11 @@ mod trading_person_tests {
             )
             .await,
         );
-        assert_eq!(resolved["status"], "done", "{resolved}");
-        assert!(resolved["result"].as_str().is_some_and(|r| !r.is_empty()));
+        assert_eq!(resolved["status"], "failed", "{resolved}");
+        assert!(
+            resolved["result"].as_str().is_some_and(|r| r.contains("ninguna cuenta conectada")),
+            "{resolved}"
+        );
         // Answered once: approving again runs nothing.
         assert!(
             rpc.handle(
@@ -2822,7 +2823,8 @@ mod trading_person_tests {
         assert_eq!(proposal["status"], "pending");
         let id = proposal["id"].as_str().unwrap().to_owned();
 
-        // The person approves: the desk task exists and the card says when.
+        // The person approves: it runs, and without a systems folder the
+        // engine says what's missing instead of scheduling against made-up bots.
         let resolved = value(
             rpc.handle(
                 methods::TRADING_PROPOSAL_RESOLVE,
@@ -2830,11 +2832,9 @@ mod trading_person_tests {
             )
             .await,
         );
-        assert_eq!(resolved["status"], "done", "{resolved}");
+        assert_eq!(resolved["status"], "failed", "{resolved}");
         let result = resolved["result"].as_str().unwrap();
-        assert!(result.contains("Tarea programada"), "{result}");
-        assert!(result.contains("parar"), "{result}");
-        assert!(result.contains("a las"), "{result}");
+        assert!(result.contains("Ajustes → Sistemas"), "{result}");
     }
 
     #[test]
@@ -4595,16 +4595,7 @@ impl RpcService for EngineRpc {
                         return RpcReply::value(&system);
                     }
                 }
-                self.require_demo_trading("Arrancar un sistema")?;
-                match zeron_trading::mock::start_system(&p.system_id) {
-                    Some(system) => RpcReply::value(&system),
-                    None => {
-                        return Err(RpcError::Failed(format!(
-                            "System not found: {}",
-                            p.system_id
-                        )));
-                    }
-                }
+                Err(RpcError::Failed(NO_SYSTEMS_DIR.into()))
             }
             methods::TRADING_SYSTEM_STOP => {
                 let p: zeron_proto::trading::SystemIdParams = parse_params(params)?;
@@ -4618,16 +4609,7 @@ impl RpcService for EngineRpc {
                         return RpcReply::value(&system);
                     }
                 }
-                self.require_demo_trading("Parar un sistema")?;
-                match zeron_trading::mock::stop_system(&p.system_id) {
-                    Some(system) => RpcReply::value(&system),
-                    None => {
-                        return Err(RpcError::Failed(format!(
-                            "System not found: {}",
-                            p.system_id
-                        )));
-                    }
-                }
+                Err(RpcError::Failed(NO_SYSTEMS_DIR.into()))
             }
             methods::TRADING_TASK_LIST => {
                 if let Some(engine) = &self.trading_engine {
@@ -4636,11 +4618,7 @@ impl RpcService for EngineRpc {
                         return RpcReply::value(&guard.task_list());
                     }
                 }
-                if self.trading.live() {
-                    RpcReply::value(&Vec::<zeron_proto::trading::Task>::new())
-                } else {
-                    RpcReply::value(&zeron_trading::task_list())
-                }
+                RpcReply::value(&Vec::<zeron_proto::trading::Task>::new())
             }
             methods::TRADING_TASK_ADD => {
                 let p: zeron_proto::trading::TaskAddInput = parse_params(params)?;
@@ -4654,11 +4632,7 @@ impl RpcService for EngineRpc {
                         };
                     }
                 }
-                self.require_demo_trading("Programar una tarea")?;
-                match zeron_trading::mock::task_add(&p) {
-                    Ok(task) => RpcReply::value(&task),
-                    Err(error) => Err(RpcError::Failed(error.to_string())),
-                }
+                Err(RpcError::Failed(NO_SYSTEMS_DIR.into()))
             }
             methods::TRADING_TASK_CANCEL => {
                 let p: zeron_proto::trading::TaskIdParams = parse_params(params)?;
@@ -4671,11 +4645,7 @@ impl RpcService for EngineRpc {
                         };
                     }
                 }
-                self.require_demo_trading("Cancelar una tarea")?;
-                match zeron_trading::mock::task_cancel(&p.task_id) {
-                    Ok(task) => RpcReply::value(&task),
-                    Err(error) => Err(RpcError::Failed(error.to_string())),
-                }
+                Err(RpcError::Failed(NO_SYSTEMS_DIR.into()))
             }
             methods::TRADING_RULE_LIST => {
                 RpcReply::value(&self.trading.rules())
@@ -4696,6 +4666,18 @@ impl RpcService for EngineRpc {
             }
             methods::TRADING_POSITION_CLOSE => {
                 let p: zeron_proto::trading::ClosePositionParams = parse_params(params)?;
+                // A position an MT5 account holds closes on that terminal.
+                if let Some(mt5) = self.trading.mt5()
+                    && let Some(answer) = mt5.cerrar_posicion(&p.symbol).await
+                {
+                    self.trading.refresh();
+                    return RpcReply::value(&zeron_proto::trading::PositionCloseResult {
+                        ok: answer.ok,
+                        message: answer.message,
+                        message_key: None,
+                        message_params: None,
+                    });
+                }
                 if self.trading.live() {
                     if let Some(engine) = &self.trading_engine {
                         let store = {
@@ -4711,11 +4693,33 @@ impl RpcService for EngineRpc {
                         return RpcReply::value(&result);
                     }
                 }
-                self.require_demo_trading("Cerrar una posición")?;
-                RpcReply::value(&zeron_trading::mock::close_position(&p.symbol))
+                Err(RpcError::Failed(format!(
+                    "No hay ninguna cuenta conectada con una posición en {}.",
+                    p.symbol
+                )))
             }
             methods::TRADING_POSITIONS_CLOSE_ALL => {
                 let _ = params;
+                // MT5 accounts close here; TWS (when live) below.
+                let mt5_lines = match self.trading.mt5() {
+                    Some(mt5) => {
+                        let (ok, lines) = mt5.cerrar_todo().await;
+                        self.trading.refresh();
+                        Some((ok, lines))
+                    }
+                    None => None,
+                };
+                if !self.trading.live()
+                    && let Some((ok, lines)) = mt5_lines.clone()
+                    && !lines.is_empty()
+                {
+                    return RpcReply::value(&zeron_proto::trading::PositionCloseResult {
+                        ok,
+                        message: lines.join(" · "),
+                        message_key: None,
+                        message_params: None,
+                    });
+                }
                 if self.trading.live() {
                     if let Some(engine) = &self.trading_engine {
                         let store = {
@@ -4730,11 +4734,18 @@ impl RpcService for EngineRpc {
                         return RpcReply::value(&result);
                     }
                 }
-                self.require_demo_trading("Cerrar todas las posiciones")?;
-                RpcReply::value(&zeron_trading::mock::close_all_positions())
+                Err(RpcError::Failed(NOTHING_CONNECTED.into()))
             }
             methods::TRADING_PANIC => {
                 let _ = params;
+                // MT5 positions close first (TWS's own panic follows when live).
+                if let Some(mt5) = self.trading.mt5() {
+                    let (_, lines) = mt5.cerrar_todo().await;
+                    for line in lines {
+                        tracing::warn!(target: "mt5", "pánico: {line}");
+                    }
+                    self.trading.refresh();
+                }
                 if self.trading.live() {
                     if let Some(engine) = &self.trading_engine {
                         let store = {
@@ -4754,8 +4765,39 @@ impl RpcService for EngineRpc {
                         return RpcReply::value(&result);
                     }
                 }
-                self.require_demo_trading("El botón de pánico")?;
-                RpcReply::value(&zeron_trading::mock::panic())
+                // Without TWS: stop every bot of the pool (MT5 closed above).
+                if let Some(engine) = &self.trading_engine {
+                    let guard = engine.lock().unwrap();
+                    if guard.has_pool() {
+                        let ids: Vec<String> = guard
+                            .snapshot()
+                            .systems
+                            .into_iter()
+                            .filter(|system| system.running)
+                            .map(|system| system.id)
+                            .collect();
+                        let mut stopped = Vec::new();
+                        for id in ids {
+                            if guard.stop_system(&id).is_ok() {
+                                stopped.push(id);
+                            }
+                        }
+                        let message = format!("Pánico: {} sistemas parados.", stopped.len());
+                        return RpcReply::value(&zeron_proto::trading::PanicResult {
+                            stopped,
+                            close: zeron_proto::trading::PositionCloseResult {
+                                ok: true,
+                                message: "Posiciones de MetaTrader 5 cerradas.".into(),
+                                message_key: None,
+                                message_params: None,
+                            },
+                            message,
+                            message_key: None,
+                            message_params: None,
+                        });
+                    }
+                }
+                Err(RpcError::Failed(NOTHING_CONNECTED.into()))
             }
             methods::TRADING_CONNECT => {
                 let account = self
@@ -4778,26 +4820,49 @@ impl RpcService for EngineRpc {
                 }
             }
             methods::TRADING_LINK_ADD => {
-                self.require_demo_trading("Añadir una conexión")?;
                 let p: zeron_proto::trading::LinkAddInput = parse_params(params)?;
-                match zeron_trading::mock::link_add(&p) {
-                    Ok(link) => RpcReply::value(&link),
-                    Err(error) => return Err(RpcError::Failed(error.to_string())),
+                match p.broker.unwrap_or(zeron_proto::trading::Broker::Ibkr) {
+                    zeron_proto::trading::Broker::Mt5 => {
+                        let mt5 = self.trading.mt5().ok_or_else(|| {
+                            RpcError::Failed("MetaTrader 5 no está disponible en este motor.".into())
+                        })?;
+                        let (Some(login), Some(server)) = (p.mt5_login, p.mt5_server.clone()) else {
+                            return Err(RpcError::Failed(
+                                "La conexión MT5 necesita el login y el servidor de la cuenta.".into(),
+                            ));
+                        };
+                        let link = mt5.abrir(login, &server).map_err(RpcError::Failed)?;
+                        self.trading.refresh();
+                        RpcReply::value(&link)
+                    }
+                    // TWS: paper only (the service refuses 7496 itself).
+                    _ => {
+                        let account = self
+                            .trading
+                            .connect()
+                            .await
+                            .map_err(|error| RpcError::Failed(error.to_string()))?;
+                        RpcReply::value(&account)
+                    }
                 }
             }
             methods::TRADING_LINK_REMOVE => {
-                self.require_demo_trading("Quitar una conexión")?;
                 let p: zeron_proto::trading::LinkIdParams = parse_params(params)?;
-                match zeron_trading::mock::link_remove(&p.link_id) {
-                    Ok(links) => RpcReply::value(&links),
-                    Err(error) => return Err(RpcError::Failed(error.to_string())),
+                if let Some(mt5) = self.trading.mt5()
+                    && mt5.quitar(&p.link_id).await
+                {
+                    self.trading.refresh();
+                    return RpcReply::value(&self.trading.snapshot().links.unwrap_or_default());
                 }
+                self.trading.disconnect().await;
+                RpcReply::value(&self.trading.snapshot().links.unwrap_or_default())
             }
             methods::TRADING_MT5_DETECT => {
-                let p: zeron_proto::trading::Mt5DetectParams = parse_params(params)?;
-                RpcReply::value(&zeron_trading::mock::mt5_detect(
-                    p.probe.unwrap_or(false),
-                ))
+                let _: zeron_proto::trading::Mt5DetectParams = parse_params(params)?;
+                let mt5 = self.trading.mt5().ok_or_else(|| {
+                    RpcError::Failed("MetaTrader 5 no está disponible en este motor.".into())
+                })?;
+                RpcReply::value(&mt5.detectar().await.map_err(RpcError::Failed)?)
             }
             methods::TRADING_IBKR_DETECT => {
                 let p: zeron_proto::trading::IbkrDetectParams = parse_params(params)?;
@@ -4843,10 +4908,7 @@ impl RpcService for EngineRpc {
                         Err(error) => return Err(RpcError::Failed(error.to_string())),
                     }
                 } else {
-                    match zeron_trading::mock::pool_select(&p.dir) {
-                        Ok(result) => RpcReply::value(&result),
-                        Err(error) => return Err(RpcError::Failed(error.to_string())),
-                    }
+                    Err(RpcError::Failed("La mesa de trading no está disponible.".into()))
                 }
             }
             // WARP ring (lane C3): the machine's own status, a manual rotation

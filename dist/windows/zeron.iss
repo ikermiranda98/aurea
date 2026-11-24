@@ -107,6 +107,8 @@ Source: "{#PackageDir}\aurea-lite"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
+; MetaTrader 5's private Python (embeddable CPython + MetaTrader5, see package-windows.ps1).
+Source: "{#PackageDir}\mt5-python\*"; DestDir: "{app}\mt5-python"; Flags: ignoreversion recursesubdirs createallsubdirs
 #ifdef Zgx
 ; The zgx app's scripts, plugins and engine, by version.
 Source: "{#PackageDir}\beta\*"; DestDir: "{app}\beta"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -132,6 +134,8 @@ Type: files; Name: "{autodesktop}\Aurea Lite.lnk"
 #endif
 
 [UninstallDelete]
+; Bytecode the private Python wrote while running.
+Type: filesandordirs; Name: "{app}\mt5-python"
 ; Leftovers of in-app updates (crates/update/src/windows.rs).
 Type: files; Name: "{app}\zeron.exe.old"
 Type: files; Name: "{app}\.zeron-update-incoming.exe"
