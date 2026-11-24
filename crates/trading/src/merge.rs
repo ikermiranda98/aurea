@@ -23,6 +23,10 @@ use zeron_proto::trading::{Programs, Snapshot};
 use crate::SnapshotWatch;
 use crate::service::TradingService;
 
+/// How long a change waits for the rest of its burst before the merged desk
+/// goes out (see [`TradingService::watch_merged`]).
+pub const MERGE_COALESCE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// How many log rows the merged snapshot keeps (the engine ring is 800).
 const MAX_LOGS: usize = 800;
 
@@ -84,6 +88,11 @@ impl TradingService {
     /// A stream of merged snapshots: it republishes whenever either half
     /// changes, and stops once every receiver is gone. Outside a tokio
     /// runtime it holds the first merge only.
+    ///
+    /// A burst (TWS sends account values and portfolio rows by the dozen) is
+    /// coalesced: after a change it waits [`MERGE_COALESCE`] and merges the
+    /// latest of both halves once, and an unchanged merge is not re-sent.
+    /// Every send costs a JSON round trip and a full window redraw.
     pub fn watch_merged(&self, mut engine: SnapshotWatch) -> SnapshotWatch {
         let mut broker = self.watch();
         let first = self.merged_with(engine.borrow_and_update().clone());
@@ -100,9 +109,10 @@ impl TradingService {
                     changed = engine.changed() => if changed.is_err() { break },
                     changed = broker.changed() => if changed.is_err() { break },
                 }
+                tokio::time::sleep(MERGE_COALESCE).await;
                 let engine_half = engine.borrow_and_update().clone();
                 broker.borrow_and_update();
-                tx.send_replace(service.merged_with(engine_half));
+                crate::engine::publish_if_changed(&tx, service.merged_with(engine_half));
             }
         });
         rx

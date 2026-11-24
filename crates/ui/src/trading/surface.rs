@@ -130,11 +130,32 @@ impl TradingSurface {
                     cx.notify();
                 }
             });
-            while let Some(value) = stream.recv().await {
+            let lite = crate::lite::enabled();
+            while let Some(mut value) = stream.recv().await {
+                // Lite redraws the desk at most once per `DESK_REFRESH`: what
+                // queued meanwhile collapses into the newest snapshot.
+                if lite {
+                    while let Ok(newer) = stream.try_recv() {
+                        value = newer;
+                    }
+                }
+                crate::perf_stats::bump(&crate::perf_stats::SNAPSHOTS, 1);
+                crate::perf_stats::bump(
+                    &crate::perf_stats::SNAPSHOT_BYTES,
+                    if crate::perf_stats::enabled() { value.to_string().len() as u64 } else { 0 },
+                );
                 match serde_json::from_value::<Snapshot>(value) {
                     Ok(snapshot) => {
                         let alive = this
                             .update(cx, |this, cx| {
+                                // An identical desk draws nothing new: no
+                                // redraw (without a GPU each one is real CPU).
+                                let same = this.snapshot.as_ref() == Some(&snapshot)
+                                    && this.phase == Phase::Live
+                                    && this.error.is_none();
+                                if same {
+                                    return;
+                                }
                                 this.snapshot = Some(snapshot);
                                 this.phase = Phase::Live;
                                 this.error = None;
@@ -151,6 +172,9 @@ impl TradingSurface {
                             cx.notify();
                         });
                     }
+                }
+                if lite {
+                    cx.background_executor().timer(crate::lite::DESK_REFRESH).await;
                 }
             }
             let _ = this.update(cx, |this, cx| {
@@ -310,6 +334,7 @@ impl TradingSurface {
                         let changed = actions_probe.get().map_or(true, |old| (old - left).abs() > 0.5);
                         actions_probe.set(Some(left));
                         if changed {
+                            crate::perf_stats::bump(&crate::perf_stats::RAF_PROBE, 1);
                             // The shell reads the edge on its next render; ask
                             // for one so the clamp lands without waiting on a
                             // snapshot.
@@ -2078,6 +2103,7 @@ impl TradingSurface {
 
 impl Render for TradingSurface {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf_stats::bump(&crate::perf_stats::DESK_RENDERS, 1);
         let theme = Theme::of(cx).clone();
         // The page starts under the titlebar row, which now carries the desk's
         // heading too (`titlebar_row`) — this body keeps only the strips and

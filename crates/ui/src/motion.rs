@@ -1205,7 +1205,8 @@ pub fn resolve(
         ReduceMotion::On => true,
         ReduceMotion::Off => false,
     };
-    reduced || (pause_in_background && !active)
+    // Aurea Lite never animates (every frame is CPU on a GPU-less VPS).
+    reduced || (pause_in_background && !active) || crate::lite::enabled()
 }
 
 /// Install the motion state and set the flag before the first window opens,

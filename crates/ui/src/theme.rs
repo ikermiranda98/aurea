@@ -1524,6 +1524,7 @@ impl Theme {
             .with_font_terminal(crate::typography::terminal_effective_family_name(cx))
             .with_code_font_size(crate::typography::code_font_size(cx))
             .with_terminal_font_size(crate::typography::terminal_font_size(cx));
+        let next = crate::lite::adjust_theme(next);
         sync_gpui_base_scrollbar(&next, cx);
         cx.set_global(next);
         // An accent-only swap leaves CURRENT_APPEARANCE unchanged, but cached
@@ -1599,6 +1600,7 @@ impl Theme {
                 || theme.wallpaper_color != next.wallpaper_color
         });
         set_current_appearance(appearance);
+        let next = crate::lite::adjust_theme(next);
         sync_gpui_base_scrollbar(&next, cx);
         cx.set_global(next);
         if changed || force_generation {

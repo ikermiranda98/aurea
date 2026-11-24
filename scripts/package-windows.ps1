@@ -15,7 +15,12 @@
 param(
     [Parameter(Mandatory)][string]$ReleasesUrl,
     [string]$ZgxVersion,
-    [string]$ZgxEngine
+    [string]$ZgxEngine,
+    # Aurea Lite (small machines without a GPU): the same zeron.exe plus the
+    # `aurea-lite` marker beside it (crates/ui/src/lite.rs), packaged as its own
+    # zip and installer. Its updates download the very same zeron.exe, so the
+    # release's standalone .exe and manifest.json come from the full package.
+    [switch]$Lite
 )
 $ErrorActionPreference = 'Stop'
 if (-not $ReleasesUrl.StartsWith('https://')) { throw 'Release feed must use HTTPS' }
@@ -174,13 +179,17 @@ try {
     $engineText = $null
     $out = Join-Path $root 'target/package'
     $arch = Get-WindowsPackageArch $built
-    $stage = Join-Path $out "zeron-$version-windows-$arch"
+    $flavor = if ($Lite) { 'zeron-lite' } else { 'zeron' }
+    $stage = Join-Path $out "$flavor-$version-windows-$arch"
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     Copy-Item -LiteralPath $built -Destination (Join-Path $stage 'zeron.exe')
     $vcRuntime = Find-VcRuntime $arch
     foreach ($dll in $VcRuntimeDlls) {
         Copy-Item -LiteralPath (Join-Path $vcRuntime $dll) -Destination $stage
+    }
+    if ($Lite) {
+        Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $stage 'aurea-lite') -Value 'Aurea Lite: sin animaciones ni efecto cristal, mesa a 1 refresco por segundo.'
     }
     @{ releases_url = $ReleasesUrl } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $stage 'zeron-update.json')
     Copy-Item -LiteralPath 'LICENSE','THIRD_PARTY_NOTICES.md' -Destination $stage
@@ -202,21 +211,23 @@ try {
         Copy-Item -Path 'apps/zgx/fonts/*-OFL.txt' -Destination $licenses
     }
     Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
-    if (-not $beta) {
+    if (-not $beta -and -not $Lite) {
         Copy-Item -LiteralPath $built -Destination "$stage.exe"
     }
     # The per-user installer wraps the same staged directory (zeron-update.json
     # included), so installed copies update in place like the portable zip.
     $iscc = Find-InnoSetupCompiler
     $zgxDefines = if ($ZgxVersion) { @('/DZgx=1', "/DFileVersion=$(($version -split '-')[0])") } else { @() }
+    if ($Lite) { $zgxDefines += '/DLite=1' }
     & $iscc /Qp "/DAppVersion=$version" "/DArch=$arch" @zgxDefines `
         "/DPackageDir=$([IO.Path]::GetFullPath($stage))" `
         "/DOutputDir=$([IO.Path]::GetFullPath($out))" `
         ([IO.Path]::GetFullPath((Join-Path $root 'dist/windows/zeron.iss')))
     if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
-    $setup = Join-Path $out "aurea-$version-windows-$arch-setup.exe"
+    $setupName = if ($Lite) { 'aurea-lite' } else { 'aurea' }
+    $setup = Join-Path $out "$setupName-$version-windows-$arch-setup.exe"
     if (-not (Test-Path -LiteralPath $setup)) { throw "Installer not produced: $setup" }
-    if (-not $beta) {
+    if (-not $beta -and -not $Lite) {
         $file = Split-Path "$stage.exe" -Leaf
         $hash = (Get-FileHash -LiteralPath "$stage.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
         @{ version = $version; files = @{ $file = @{ sha256 = $hash } } } |

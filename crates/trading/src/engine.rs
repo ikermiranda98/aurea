@@ -129,7 +129,7 @@ impl TradingEngine {
                 state.tasks = tasks_now;
                 let snap = state.snapshot(now);
                 drop(state);
-                let _ = watch_clone.send_replace(snap);
+                publish_if_changed(&watch_clone, snap);
             }
         });
 
@@ -153,7 +153,7 @@ impl TradingEngine {
                     sweep_state_in(&mut state);
                     state.snapshot(now_ms())
                 };
-                let _ = sweep_watch.send_replace(snap);
+                publish_if_changed(&sweep_watch, snap);
             }
         });
 
@@ -195,7 +195,7 @@ impl TradingEngine {
         };
 
         let snap = engine.state.lock().unwrap().snapshot(now_ms());
-        let _ = engine.watch.send_replace(snap);
+        publish_if_changed(&engine.watch, snap);
 
         Ok(engine)
     }
@@ -679,7 +679,7 @@ impl TradingEngine {
             sweep_state_in(&mut state);
             state.snapshot(now_ms())
         };
-        let _ = self.watch.send_replace(snap);
+        publish_if_changed(&self.watch, snap);
     }
 
     pub fn shutdown(&self) {
@@ -689,8 +689,22 @@ impl TradingEngine {
 
     fn publish(&self) {
         let snap = self.state.lock().unwrap().snapshot(now_ms());
-        let _ = self.watch.send_replace(snap);
+        publish_if_changed(&self.watch, snap);
     }
+}
+
+/// Publishes `snap` only when it differs from what the watchers last saw.
+/// The scheduler ticks every second: re-sending an identical desk made every
+/// window redraw (and, without a GPU, each redraw is real CPU).
+pub(crate) fn publish_if_changed(watch: &watch::Sender<Snapshot>, snap: Snapshot) {
+    watch.send_if_modified(|current| {
+        if *current == snap {
+            false
+        } else {
+            *current = snap;
+            true
+        }
+    });
 }
 
 /// One sweep pass over the desk's runtimes (the caller publishes the result).

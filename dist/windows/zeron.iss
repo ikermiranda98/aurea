@@ -38,14 +38,25 @@
   #define ArchAllowed "x64compatible"
 #endif
 
+; Aurea Lite (/DLite=1): the same app with the `aurea-lite` marker beside
+; zeron.exe (crates/ui/src/lite.rs). Same AppId and folder, so one replaces
+; the other; the full installer removes the marker.
+#ifdef Lite
+  #define ProductName "Aurea Lite"
+  #define SetupBase "aurea-lite"
+#else
+  #define ProductName "Aurea"
+  #define SetupBase "aurea"
+#endif
+
 [Setup]
 ; Never change AppId: it identifies the installation across upgrades, and
 ; crates/update/src/windows.rs refreshes DisplayVersion under this key after
 ; in-app updates.
 AppId={{AD5DEC34-E254-467B-8F24-8127EBAF4DA6}
-AppName=Aurea
+AppName={#ProductName}
 AppVersion={#AppVersion}
-AppVerName=Aurea {#AppVersion}
+AppVerName={#ProductName} {#AppVersion}
 AppPublisher=Aurea
 AppPublisherURL=https://github.com/ikermiranda98/aurea
 AppSupportURL=https://github.com/ikermiranda98/aurea/issues
@@ -63,10 +74,10 @@ ArchitecturesInstallIn64BitMode={#ArchAllowed}
 ; the app would install and then fail to start, so Setup refuses up front.
 MinVersion=10.0.19041
 OutputDir={#OutputDir}
-OutputBaseFilename=aurea-{#AppVersion}-windows-{#Arch}-setup
+OutputBaseFilename={#SetupBase}-{#AppVersion}-windows-{#Arch}-setup
 SetupIconFile=zeron.ico
 UninstallDisplayIcon={app}\zeron.exe
-UninstallDisplayName=Aurea
+UninstallDisplayName={#ProductName}
 WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
@@ -90,6 +101,9 @@ Source: "{#PackageDir}\msvcp140_1.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\vcruntime140.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\vcruntime140_1.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\zeron-update.json"; DestDir: "{app}"; Flags: ignoreversion
+#ifdef Lite
+Source: "{#PackageDir}\aurea-lite"; DestDir: "{app}"; Flags: ignoreversion
+#endif
 Source: "{#PackageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -99,11 +113,23 @@ Source: "{#PackageDir}\beta\*"; DestDir: "{app}\beta"; Flags: ignoreversion recu
 #endif
 
 [Icons]
-Name: "{autoprograms}\Aurea"; Filename: "{app}\zeron.exe"
-Name: "{autodesktop}\Aurea"; Filename: "{app}\zeron.exe"; Tasks: desktopicon
+Name: "{autoprograms}\{#ProductName}"; Filename: "{app}\zeron.exe"
+Name: "{autodesktop}\{#ProductName}"; Filename: "{app}\zeron.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\zeron.exe"; Description: "{cm:LaunchProgram,Aurea}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\zeron.exe"; Description: "{cm:LaunchProgram,{#ProductName}}"; Flags: nowait postinstall skipifsilent
+
+[InstallDelete]
+; Switching flavors in place: the other one's shortcuts go, and the full app
+; drops the Lite marker so it draws with every effect again.
+#ifdef Lite
+Type: files; Name: "{autoprograms}\Aurea.lnk"
+Type: files; Name: "{autodesktop}\Aurea.lnk"
+#else
+Type: files; Name: "{app}\aurea-lite"
+Type: files; Name: "{autoprograms}\Aurea Lite.lnk"
+Type: files; Name: "{autodesktop}\Aurea Lite.lnk"
+#endif
 
 [UninstallDelete]
 ; Leftovers of in-app updates (crates/update/src/windows.rs).

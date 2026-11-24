@@ -2350,11 +2350,18 @@ impl ComposerInput {
     /// Caret paint gate: focused input in an active window, in the "on" blink
     /// phase. Also (re)arms the half-period repaint driver while focused, and
     /// drops it on blur so an unfocused input schedules no frames.
-    fn caret_shown(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+    fn caret_shown(&mut self, visible: bool, window: &Window, cx: &mut Context<Self>) -> bool {
         let focused = self.focus_handle.is_focused(window);
-        if !focused || !window.is_window_active() {
+        // Clipped away (the chat drawer closed) is unseen: blinking there only
+        // redrew the whole window twice a second for nothing.
+        if !focused || !window.is_window_active() || !visible {
             self.blink_task = None;
             return false;
+        }
+        // Aurea Lite keeps a steady caret: no frames just to blink.
+        if crate::lite::enabled() {
+            self.blink_task = None;
+            return true;
         }
         if self.blink_task.is_none() {
             self.blink_task = Some(cx.spawn(async move |this, cx| {
@@ -5539,9 +5546,11 @@ impl gpui::Element for ComposerTextElement {
                 // Caret only when this input is actually focused in an active
                 // window (Electron hides it on window deactivation too), and only
                 // in the "on" blink phase — solid while typing, ~500ms blink idle.
+                let mask = window.content_mask().bounds;
+                let visible = mask.size.width > px(0.0) && mask.size.height > px(0.0);
                 if self
                     .input
-                    .update(cx, |input, cx| input.caret_shown(window, cx))
+                    .update(cx, |input, cx| input.caret_shown(visible, window, cx))
                     && let Some(cursor) = prepaint.cursor.take()
                 {
                     window.paint_quad(cursor);

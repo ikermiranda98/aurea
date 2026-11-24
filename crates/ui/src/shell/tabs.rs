@@ -86,6 +86,10 @@ fn panel_titlebar_widths(
 /// The brand box: `Aurea` at 13px semibold fits inside with room on both
 /// sides, so the box's centre is the text's centre.
 const BRAND_WIDTH: f32 = 64.0;
+/// The brand box as drawn: `Aurea Lite` needs more room than `Aurea`.
+fn brand_width() -> f32 {
+    if crate::lite::enabled() { 96.0 } else { BRAND_WIDTH }
+}
 /// Clearance kept between the brand and the desk's actions.
 const BRAND_ACTIONS_GAP: f32 = 16.0;
 
@@ -108,10 +112,10 @@ fn brand_left(viewport: f32, insets: (f32, f32), actions_left: Option<f32>) -> f
     let span = (viewport - left - right).max(0.0);
     let mut center = left + span / 2.0;
     if let Some(actions_left) = actions_left {
-        center = center.min(actions_left - BRAND_ACTIONS_GAP - BRAND_WIDTH / 2.0);
+        center = center.min(actions_left - BRAND_ACTIONS_GAP - brand_width() / 2.0);
     }
-    center = center.max(left + BRAND_WIDTH / 2.0);
-    (center - BRAND_WIDTH / 2.0).clamp(0.0, (viewport - BRAND_WIDTH).max(0.0))
+    center = center.max(left + brand_width() / 2.0);
+    (center - brand_width() / 2.0).clamp(0.0, (viewport - brand_width()).max(0.0))
 }
 
 /// A target the opener names for the new-session canvas, over the sidebar
@@ -607,7 +611,7 @@ impl Shell {
                 .top(px(Theme::TITLEBAR_TOP_PAD))
                 .bottom_0()
                 .left(px(brand_left(self.viewport_width, main_insets, actions_left)))
-                .w(px(BRAND_WIDTH))
+                .w(px(brand_width()))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -615,7 +619,7 @@ impl Shell {
                     div()
                         .text_size(px(13.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child("Aurea"),
+                        .child(crate::lite::app_name()),
                 )
                 .into_any_element()
         });

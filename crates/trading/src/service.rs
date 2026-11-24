@@ -844,7 +844,7 @@ impl Inner {
         snapshot.proposals = (!proposals.is_empty()).then_some(proposals);
         let rules = lock(&self.rules).clone();
         snapshot.rules = (!rules.is_empty()).then_some(rules);
-        self.snapshot.send_replace(snapshot.clone());
+        crate::engine::publish_if_changed(&self.snapshot, snapshot.clone());
         // Rules see the desk as it now stands. A fired one files a proposal
         // and publishes again; the guard in `evaluate_rules` stops there.
         // This half has no pool, and its account and positions are the demo
