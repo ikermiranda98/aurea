@@ -77,6 +77,11 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#PackageDir}\zeron.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The Visual C++ runtime zeron.exe imports (app-local, see package-windows.ps1).
+Source: "{#PackageDir}\msvcp140.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\msvcp140_1.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\vcruntime140.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\vcruntime140_1.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\zeron-update.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion

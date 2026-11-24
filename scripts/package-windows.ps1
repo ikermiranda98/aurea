@@ -40,6 +40,33 @@ function Find-InnoSetupCompiler {
     throw 'Inno Setup 6 (ISCC.exe) is required to build the installer: winget install JRSoftware.InnoSetup'
 }
 
+# zeron.exe links the Visual C++ runtime dynamically (its C/C++ parts: Luau,
+# the dictation runtime), and a clean Windows doesn't have it: "MSVCP140_1.dll
+# was not found". Microsoft allows app-local deployment, so the four DLLs it
+# imports ship beside it, from this machine's Visual Studio redist folder.
+$VcRuntimeDlls = @('msvcp140.dll', 'msvcp140_1.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')
+
+function Find-VcRuntime([string]$Arch) {
+    $redistArch = if ($Arch -eq 'aarch64') { 'arm64' } else { 'x64' }
+    $roots = @()
+    if ($env:VCToolsRedistDir) { $roots += $env:VCToolsRedistDir }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+    if (Test-Path -LiteralPath $vswhere) {
+        foreach ($install in & $vswhere -all -products * -property installationPath) {
+            $roots += Get-ChildItem -Directory -Path (Join-Path $install 'VC/Redist/MSVC') -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending | ForEach-Object { $_.FullName }
+        }
+    }
+    foreach ($root in $roots) {
+        $crt = Get-ChildItem -Directory -Path (Join-Path $root $redistArch) -Filter 'Microsoft.VC14*.CRT' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($crt -and -not ($VcRuntimeDlls | Where-Object { -not (Test-Path -LiteralPath (Join-Path $crt.FullName $_)) })) {
+            return $crt.FullName
+        }
+    }
+    throw "The Visual C++ runtime DLLs ($($VcRuntimeDlls -join ', ')) weren't found: install the Visual Studio C++ build tools"
+}
+
 function Get-WindowsPackageArch([string]$Path) {
     # Match zeron-update's `std::env::consts::ARCH` so the standalone .exe
     # name agrees with crates/update/src/windows.rs::artifact. Read the built
@@ -151,6 +178,10 @@ try {
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     Copy-Item -LiteralPath $built -Destination (Join-Path $stage 'zeron.exe')
+    $vcRuntime = Find-VcRuntime $arch
+    foreach ($dll in $VcRuntimeDlls) {
+        Copy-Item -LiteralPath (Join-Path $vcRuntime $dll) -Destination $stage
+    }
     @{ releases_url = $ReleasesUrl } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $stage 'zeron-update.json')
     Copy-Item -LiteralPath 'LICENSE','THIRD_PARTY_NOTICES.md' -Destination $stage
     $licenses = Join-Path $stage 'licenses/fonts'
