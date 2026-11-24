@@ -26,6 +26,8 @@ fn background_engine_serves_its_port_and_stops_on_request() {
         .env("ZERON_EDGE_URL", "http://127.0.0.1:1")
         .env("ZERON_DISABLE_NOTIFICATIONS", "1")
         .env("ZERON_AUTO_UPDATE", "0")
+        // No 80 MiB managed-CLI download in a test run.
+        .env("ZERON_MANAGED_OPENCODE", "0")
         .spawn()
         .expect("start the background engine");
 

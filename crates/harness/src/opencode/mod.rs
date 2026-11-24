@@ -177,6 +177,10 @@ const RETRY_ABORT_ATTEMPT: u64 = 8;
 const DEFAULT_STALL_BOUND: Duration = Duration::from_secs(60);
 const STALL_ENV: &str = "ZERON_OPENCODE_STALL_MS";
 
+/// One-time managed CLI download (80 MiB + unpack), for a run that gets to it
+/// before the boot prewarm finishes.
+const MANAGED_INSTALL_DEADLINE: Duration = Duration::from_secs(10 * 60);
+
 /// What a wedged/silent run usually means for opencode.
 const STALL_HINT: &str = "The model provider is likely unreachable or rejecting requests. \
      Check the model/provider setup (`opencode auth list`, opencode.json) or the opencode \
@@ -234,27 +238,81 @@ fn opencode_install_paths() -> Vec<PathBuf> {
 }
 
 const INSTALL_HINT: &str = "opencode (searched PATH, the login shell's PATH, ~/.opencode/bin, \
-     ~/.local/bin, ~/.bun/bin, ~/.npm-global/bin, /opt/homebrew/bin, /usr/local/bin, and \
-     fnm/nvm/volta/pnpm/bun install dirs; Windows also checks USERPROFILE, \
-     %APPDATA%\\npm, and explicit NVM_SYMLINK/VOLTA_HOME/PNPM_HOME; install with \
-     `curl -fsSL https://opencode.ai/install | bash` or \
-     `npm install -g @opencode/cli`, then `opencode auth login`; set \
-     OPENCODE_EXECUTABLE to override)";
+     ~/.local/bin, ~/.bun/bin, ~/.npm-global/bin, /opt/homebrew/bin, /usr/local/bin, \
+     fnm/nvm/volta/pnpm/bun install dirs, and Aurea's own managed copy; Windows also checks \
+     USERPROFILE, %APPDATA%\\npm, the OpenCode desktop app, and explicit \
+     NVM_SYMLINK/VOLTA_HOME/PNPM_HOME; Aurea downloads the managed copy when none is found, or \
+     install with `curl -fsSL https://opencode.ai/install | bash` / \
+     `npm install -g @opencode/cli`; set OPENCODE_EXECUTABLE to override)";
 
 /// The user's opencode: `OPENCODE_EXECUTABLE` when it exists, else PATH (plus
-/// install locations). The override is validated at launch through
+/// install locations), else the copy Aurea downloaded and keeps for itself.
+/// The override is validated at launch through
 /// [`crate::executable::validate_native_override`] — including the `.cmd`
 /// shims npm installs on Windows.
 fn resolve_opencode_executable() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("OPENCODE_EXECUTABLE")
-        && !path.is_empty()
-    {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Some(path);
-        }
+    let override_path = std::env::var_os("OPENCODE_EXECUTABLE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    resolve_opencode_executable_with(
+        override_path,
+        || crate::acp::find_on_paths("opencode", opencode_install_paths()),
+        crate::opencode_install::installed,
+    )
+}
+
+/// Precedence, as a pure function so it can be tested: a valid
+/// `OPENCODE_EXECUTABLE`, then whatever this machine already has on PATH (the
+/// person's own install, including the desktop app's), then Aurea's managed
+/// copy. The managed lookup only runs when nothing else resolved.
+fn resolve_opencode_executable_with(
+    override_path: Option<PathBuf>,
+    on_path: impl FnOnce() -> Option<PathBuf>,
+    managed: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(path) = override_path.filter(|path| path.is_file()) {
+        return Some(path);
     }
-    crate::acp::find_on_paths("opencode", opencode_install_paths())
+    on_path().or_else(managed)
+}
+
+/// Start the managed CLI download in the background when this machine has no
+/// OpenCode at all. Called at engine boot so the first chat never waits on an
+/// 80 MiB download; a run that gets there first awaits the same install, and
+/// both converge on one download through the install lock.
+pub fn prewarm_managed_cli() {
+    // Off for test engines and offline/air-gapped machines
+    // (`ZERON_MANAGED_OPENCODE=0`); a run still installs on demand.
+    if std::env::var("ZERON_MANAGED_OPENCODE").is_ok_and(|value| value == "0") {
+        return;
+    }
+    if resolve_opencode_executable().is_some() {
+        return;
+    }
+    if crate::opencode_install::pin().is_none() {
+        return;
+    }
+    // Marked before the spawn: the UI lists harnesses a moment after boot,
+    // and the row must read as "coming" rather than "missing" until it lands.
+    let installing = crate::opencode_install::Installing::begin();
+    tokio::spawn(async move {
+        let _installing = installing;
+        match crate::opencode_install::ensure_installed().await {
+            Ok(path) => {
+                crate::executable::invalidate_versions(&["opencode"]);
+                tracing::info!(
+                    target: "zeron_harness::opencode",
+                    path = %path.display(),
+                    "managed OpenCode CLI ready"
+                );
+            }
+            Err(error) => tracing::warn!(
+                target: "zeron_harness::opencode",
+                %error,
+                "could not fetch the managed OpenCode CLI"
+            ),
+        }
+    });
 }
 
 /// Effort ladder surfaced in the picker; applied per run by picking the
@@ -453,6 +511,40 @@ impl OpencodeHarness {
         resolve_opencode_executable().ok_or_else(|| HarnessError::NotInstalled(INSTALL_HINT.into()))
     }
 
+    /// [`Self::resolve_executable`] for a run or probe: when this machine has
+    /// no OpenCode anywhere, fetch Aurea's managed copy first. A machine with
+    /// its own CLI (or a test's explicit executable/base URL) never downloads.
+    async fn resolve_executable_managed(&self) -> Result<PathBuf, HarnessError> {
+        if let Some(exe) = &self.executable {
+            return Ok(exe.clone());
+        }
+        if let Some(exe) = resolve_opencode_executable() {
+            return Ok(exe);
+        }
+        tracing::info!(
+            target: "zeron_harness::opencode",
+            version = crate::opencode_install::VERSION,
+            "no OpenCode on this machine; fetching Aurea's managed copy"
+        );
+        let installed = tokio::time::timeout(
+            MANAGED_INSTALL_DEADLINE,
+            crate::opencode_install::ensure_installed(),
+        )
+        .await
+        .map_err(|_| {
+            HarnessError::Install(
+                "the managed OpenCode CLI download did not finish in 10 minutes".into(),
+            )
+        })??;
+        crate::executable::invalidate_versions(&["opencode"]);
+        tracing::info!(
+            target: "zeron_harness::opencode",
+            path = %installed.display(),
+            "managed OpenCode CLI ready"
+        );
+        Ok(installed)
+    }
+
     /// Boot (or attach to) a server for a run/probe. Probes have no chat cwd:
     /// they boot in the user's home, where global provider config lives.
     async fn server(
@@ -485,7 +577,7 @@ impl OpencodeHarness {
             }
             return Ok(Server::attached(base.clone()));
         }
-        let exe = self.resolve_executable()?;
+        let exe = self.resolve_executable_managed().await?;
         Server::spawn_with_extras(
             &exe,
             cwd,
@@ -696,6 +788,9 @@ impl Harness for OpencodeHarness {
         self.executable.is_some()
             || self.base_url.is_some()
             || resolve_opencode_executable().is_some()
+            // A managed download that hasn't landed yet: enabled now, and a
+            // run waits for it instead of telling the person to install it.
+            || crate::opencode_install::install_in_progress()
     }
     fn executable_path(&self) -> Option<PathBuf> {
         self.resolve_executable().ok()

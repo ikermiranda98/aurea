@@ -4198,3 +4198,41 @@ fn static_fallback_lists_the_free_tier_with_one_default() {
     assert_eq!(models.iter().filter(|m| m.default).count(), 1);
     assert_eq!(models[0].id, "opencode/deepseek-v4.1-flash-free");
 }
+
+#[test]
+fn the_resolver_prefers_the_override_then_path_then_the_managed_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        path
+    };
+    let override_cli = file("override");
+    let on_path = file("path-opencode");
+    let managed = file("managed-opencode");
+
+    // A valid override beats everything.
+    assert_eq!(
+        resolve_opencode_executable_with(
+            Some(override_cli.clone()),
+            || Some(on_path.clone()),
+            || Some(managed.clone()),
+        ),
+        Some(override_cli)
+    );
+    // A missing override falls through to PATH.
+    assert_eq!(
+        resolve_opencode_executable_with(
+            Some(dir.path().join("gone")),
+            || Some(on_path.clone()),
+            || Some(managed.clone()),
+        ),
+        Some(on_path)
+    );
+    // Only when the machine has none does the managed copy answer.
+    assert_eq!(
+        resolve_opencode_executable_with(None, || None, || Some(managed.clone())),
+        Some(managed)
+    );
+    assert_eq!(resolve_opencode_executable_with(None, || None, || None), None);
+}

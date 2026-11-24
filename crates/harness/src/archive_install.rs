@@ -1,23 +1,46 @@
-//! managed installs for acp agents distributed as prebuilt zip archives
-//! (the ACP registry's `binary` distribution), such as Google's Antigravity
-//! server.
+//! managed installs for agents distributed as prebuilt archives: the ACP
+//! registry's `binary` distribution (such as Google's Antigravity server) and
+//! the OpenCode CLI (see [`crate::opencode_install`]).
 //!
 //! same contract as the npm installs in [`crate::adapter_install`]: the pinned
 //! archive lands ONCE in `~/.zeron/adapters/<name>/<version>`, extraction runs
 //! in a `.tmp-*` sibling that is renamed into place only after the entry
 //! resolves and the marker is written, so a killed download never passes for
-//! a working install.
+//! a working install. Zip and `.tar.gz`/`.tgz` archives both unpack here.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::StreamExt;
-use sha2::{Digest, Sha512};
+use sha2::{Digest as _, Sha256, Sha512};
 use tokio::io::AsyncWriteExt;
 
 use crate::HarnessError;
 use crate::adapter_install::{OK_MARKER, adapters_root, install_lock};
+
+/// The digest an archive is pinned to. Releases publish SHA-256 these days;
+/// pins written earlier used SHA-512.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Digest<'a> {
+    Sha256(&'a str),
+    Sha512(&'a str),
+}
+
+impl<'a> Digest<'a> {
+    pub fn hex(self) -> &'a str {
+        match self {
+            Self::Sha256(hex) | Self::Sha512(hex) => hex,
+        }
+    }
+
+    fn algorithm(self) -> &'static str {
+        match self {
+            Self::Sha256(_) => "SHA-256",
+            Self::Sha512(_) => "SHA-512",
+        }
+    }
+}
 
 /// a pinned archive: where to fetch it and which file inside runs the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +50,7 @@ pub struct ArchivePin {
     pub url: &'static str,
     /// path of the executable relative to the archive root.
     pub entry: &'static str,
-    pub sha512: &'static str,
+    pub digest: Digest<'static>,
 }
 
 /// multi-hundred-megabyte archives outlast any whole-request deadline on a
@@ -53,7 +76,7 @@ struct Source<'a> {
     version: &'a str,
     url: &'a str,
     entry: &'a str,
-    sha512: Option<&'a str>,
+    digest: Option<Digest<'a>>,
     marker: &'a str,
 }
 
@@ -64,8 +87,8 @@ impl<'a> From<&'a ArchivePin> for Source<'a> {
             version: pin.version,
             url: pin.url,
             entry: pin.entry,
-            sha512: Some(pin.sha512),
-            marker: pin.sha512,
+            digest: Some(pin.digest),
+            marker: pin.digest.hex(),
         }
     }
 }
@@ -77,7 +100,7 @@ impl<'a> From<&'a VerifiedRelease<'a>> for Source<'a> {
             version: release.version,
             url: release.url,
             entry: release.entry,
-            sha512: None,
+            digest: None,
             marker: release.marker,
         }
     }
@@ -104,7 +127,7 @@ pub fn installed_entry_with_marker(
 
 /// the entry of a completed install, `None` when absent.
 pub fn installed_entry(pin: &ArchivePin) -> Option<PathBuf> {
-    installed_entry_with_marker(pin.name, pin.version, pin.entry, pin.sha512)
+    installed_entry_with_marker(pin.name, pin.version, pin.entry, pin.digest.hex())
 }
 
 /// the marker of every completed-looking version directory under `name`.
@@ -182,7 +205,8 @@ where
         target: "zeron_harness::adapter_install",
         url = source.url,
         dir = %tmp_dir.display(),
-        "installing {display_name} ACP server"
+        "installing {display_name} {}",
+        source.version
     );
     let prepared = match download_and_extract(&source, &tmp_dir, display_name).await {
         Ok(()) => verify(tmp_dir.clone()).await,
@@ -209,7 +233,7 @@ where
     }
     installed().ok_or_else(|| {
         HarnessError::Install(format!(
-            "install of the {display_name} ACP server {} finished but {} did not resolve",
+            "install of {display_name} {} finished but {} did not resolve",
             source.version, source.entry
         ))
     })
@@ -220,9 +244,14 @@ async fn download_and_extract(
     dir: &Path,
     display_name: &str,
 ) -> Result<(), HarnessError> {
-    let archive = dir.join("download.zip");
+    let tar_gz = source.url.ends_with(".tar.gz") || source.url.ends_with(".tgz");
+    let archive = dir.join(if tar_gz { "download.tar.gz" } else { "download.zip" });
     download(source, &archive, display_name).await?;
-    extract_zip(&archive, dir).await?;
+    if tar_gz {
+        extract_tar_gz(&archive, dir).await?;
+    } else {
+        extract_zip(&archive, dir).await?;
+    }
     let _ = std::fs::remove_file(&archive);
     let entry = dir.join(source.entry);
     if !entry.is_file() {
@@ -232,6 +261,7 @@ async fn download_and_extract(
         )));
     }
     mark_executables(dir)?;
+    mark_entry(&entry)?;
     Ok(())
 }
 
@@ -243,7 +273,7 @@ async fn download(
     let url = source.url;
     let failed = |detail: String| {
         HarnessError::Install(format!(
-            "download of the {display_name} ACP server ({url}) failed: {detail}"
+            "download of {display_name} ({url}) failed: {detail}"
         ))
     };
     let client = reqwest::Client::builder()
@@ -268,7 +298,8 @@ async fn download(
     let mut body = response.bytes_stream();
     let mut file = tokio::fs::File::create(dest).await?;
     let mut received = 0_u64;
-    let mut digest = Sha512::new();
+    let mut sha256 = Sha256::new();
+    let mut sha512 = Sha512::new();
     loop {
         let chunk = tokio::time::timeout(STALL_TIMEOUT, body.next())
             .await
@@ -287,7 +318,8 @@ async fn download(
                         MAX_ARCHIVE_BYTES / (1024 * 1024)
                     )));
                 }
-                digest.update(&bytes);
+                sha256.update(&bytes);
+                sha512.update(&bytes);
                 file.write_all(&bytes).await?;
             }
             Some(Err(e)) => return Err(failed(e.to_string())),
@@ -295,13 +327,18 @@ async fn download(
         }
     }
     file.flush().await?;
-    let actual = format!("{:x}", digest.finalize());
-    if let Some(expected) = source.sha512
-        && actual != expected
-    {
-        return Err(failed(format!(
-            "SHA-512 mismatch (expected {expected}, got {actual})"
-        )));
+    if let Some(expected) = source.digest {
+        let actual = match expected {
+            Digest::Sha256(_) => format!("{:x}", sha256.finalize()),
+            Digest::Sha512(_) => format!("{:x}", sha512.finalize()),
+        };
+        if actual != expected.hex() {
+            return Err(failed(format!(
+                "{} mismatch (expected {}, got {actual})",
+                expected.algorithm(),
+                expected.hex()
+            )));
+        }
     }
     Ok(())
 }
@@ -314,6 +351,69 @@ pub(crate) async fn extract_zip(archive: &Path, dest: &Path) -> Result<(), Harne
         .map_err(|error| {
             HarnessError::Install(format!("archive extraction task failed: {error}"))
         })?
+}
+
+pub(crate) async fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), HarnessError> {
+    let archive = archive.to_owned();
+    let dest = dest.to_owned();
+    tokio::task::spawn_blocking(move || extract_tar_gz_blocking(&archive, &dest))
+        .await
+        .map_err(|error| {
+            HarnessError::Install(format!("archive extraction task failed: {error}"))
+        })?
+}
+
+fn extract_tar_gz_blocking(archive_path: &Path, dest: &Path) -> Result<(), HarnessError> {
+    let file = std::fs::File::open(archive_path)?;
+    let decoder = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|error| HarnessError::Install(format!("invalid tar archive: {error}")))?;
+    let mut extracted = 0_u64;
+    let mut count = 0_usize;
+    for entry in entries {
+        let mut entry = entry.map_err(|error| {
+            HarnessError::Install(format!("could not read archive entry: {error}"))
+        })?;
+        count += 1;
+        if count > MAX_ARCHIVE_ENTRIES {
+            return Err(HarnessError::Install(format!(
+                "archive has more than {MAX_ARCHIVE_ENTRIES} entries"
+            )));
+        }
+        extracted = extracted.checked_add(entry.size()).ok_or_else(|| {
+            HarnessError::Install("archive's extracted size overflows its limit".into())
+        })?;
+        if extracted > MAX_EXTRACTED_BYTES {
+            return Err(HarnessError::Install(format!(
+                "archive expands beyond the {} MiB limit",
+                MAX_EXTRACTED_BYTES / (1024 * 1024)
+            )));
+        }
+        match entry.header().entry_type() {
+            tar::EntryType::Symlink
+            | tar::EntryType::Link
+            | tar::EntryType::Char
+            | tar::EntryType::Block
+            | tar::EntryType::Fifo => {
+                return Err(HarnessError::Install(format!(
+                    "archive entry {} is a link or special file",
+                    entry.path().unwrap_or_default().display()
+                )));
+            }
+            _ => {}
+        }
+        let unpacked = entry.unpack_in(dest).map_err(|error| {
+            HarnessError::Install(format!("could not extract archive entry: {error}"))
+        })?;
+        if !unpacked {
+            return Err(HarnessError::Install(
+                "archive contains an unsafe entry path".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn archive_entry_path(
@@ -405,6 +505,21 @@ fn mark_executables(dir: &Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn mark_executables(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// The entry itself can live in a subdirectory (`package/bin/opencode` in an
+/// npm tarball), which [`mark_executables`] never visits.
+#[cfg(unix)]
+fn mark_entry(entry: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = entry.metadata()?.permissions();
+    permissions.set_mode(permissions.mode() | 0o755);
+    std::fs::set_permissions(entry, permissions)
+}
+
+#[cfg(not(unix))]
+fn mark_entry(_entry: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -572,6 +687,41 @@ mod tests {
         url
     }
 
+    /// The OpenCode CLI ships as a `.tar.gz` on Linux; the same pinned
+    /// download path must unpack it, not just zips.
+    #[test]
+    fn tar_gz_archives_unpack_their_binary() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("download.tar.gz");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut tar = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(9);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(&mut header, "package/bin/opencode", &b"#!/bin/sh"[..])
+                .unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(extract_tar_gz(&archive, &dest))
+            .unwrap();
+        assert_eq!(
+            std::fs::read(dest.join("package/bin/opencode")).unwrap(),
+            b"#!/bin/sh"
+        );
+    }
+
     #[test]
     fn entry_resolves_only_after_a_completed_install() {
         let pin = ArchivePin {
@@ -579,7 +729,7 @@ mod tests {
             version: "0.0.0-test",
             url: "https://example.invalid/x.zip",
             entry: "server",
-            sha512: "test-digest",
+            digest: Digest::Sha512("test-digest"),
         };
         assert!(installed_entry(&pin).is_none());
         if std::env::var_os("HOME").is_some() || std::env::var_os("ZERON_ADAPTERS_DIR").is_some() {

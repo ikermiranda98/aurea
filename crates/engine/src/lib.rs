@@ -1185,6 +1185,10 @@ impl Engine {
         // whose CLI is present but whose adapter isn't yet), so a first chat
         // never waits on — or dies inside — an npm run.
         zeron_harness::acp::prewarm_managed_adapters();
+        // Aurea runs OpenCode and nothing else, so the CLI it needs is its
+        // own: when the machine has none, fetch the pinned release in the
+        // background instead of making the person install it first.
+        zeron_harness::opencode::prewarm_managed_cli();
 
         let host_relay = edge.as_ref().map(|edge| {
             let mut link_config =

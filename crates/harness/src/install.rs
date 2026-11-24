@@ -77,11 +77,7 @@ fn methods(id: HarnessId, platform: Platform) -> Vec<Method> {
             "irm 'https://cursor.com/install?win32=true' | iex",
         )],
         Cursor => vec![Shell("curl https://cursor.com/install -fsS | bash", "bash")],
-        Opencode if windows => vec![Npm("@opencode/cli", false)],
-        Opencode => vec![
-            Shell("curl -fsSL https://opencode.ai/install | bash", "bash"),
-            Npm("@opencode/cli", false),
-        ],
+        Opencode => vec![Archive],
         Pi if windows => vec![Npm("@earendil-works/pi-coding-agent", true)],
         Pi => vec![
             Shell("curl -fsSL https://pi.dev/install.sh | sh", "sh"),
@@ -143,9 +139,15 @@ fn selected(id: HarnessId) -> Option<Method> {
             *method,
             platform,
             &|name| resolve(name).is_some(),
-            crate::acp::can_install(id),
+            archive_available(id),
         )
     })
+}
+
+/// Whether this build can fetch `id`'s pinned archive itself (no npm, curl or
+/// installer script on the machine). Only OpenCode ships one in Aurea.
+fn archive_available(id: HarnessId) -> bool {
+    id == HarnessId::Opencode && crate::opencode_install::pin().is_some()
 }
 
 pub fn can_install(id: HarnessId) -> bool {
@@ -317,7 +319,7 @@ pub async fn install_harness(id: HarnessId, cancel: CancellationToken) -> Result
         tokio::select! {
             biased;
             _ = cancel.cancelled() => Err(HarnessError::Install("installation cancelled".into())),
-            result = tokio::time::timeout(DEADLINE, crate::acp::install_harness(id)) => result.unwrap_or_else(|_| Err(HarnessError::Install("installation timed out after 15 minutes".into()))),
+            result = tokio::time::timeout(DEADLINE, install_archive(id)) => result.unwrap_or_else(|_| Err(HarnessError::Install("installation timed out after 15 minutes".into()))),
         }
     } else {
         run(command(method)?, cancel, DEADLINE).await
@@ -325,6 +327,16 @@ pub async fn install_harness(id: HarnessId, cancel: CancellationToken) -> Result
     invalidate_versions(id);
     result?;
     post_install(id)
+}
+
+/// The pinned-archive installs: OpenCode's own CLI, and any ACP agent whose
+/// registry entry carries a binary distribution.
+async fn install_archive(id: HarnessId) -> Result<(), HarnessError> {
+    if id == HarnessId::Opencode {
+        crate::opencode_install::ensure_installed().await?;
+        return Ok(());
+    }
+    crate::acp::install_harness(id).await
 }
 
 /// Injection seam for integration tests; unavailable in production builds.
