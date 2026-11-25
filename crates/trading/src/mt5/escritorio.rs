@@ -53,7 +53,23 @@ pub struct Mt5Escritorio {
     dir: PathBuf,
     enlaces: Mutex<BTreeMap<String, Arc<EnlaceMt5>>>,
     python: Mutex<Option<PathBuf>>,
+    /// The bots' API (`/bot/*`), once started.
+    bots: std::sync::OnceLock<Arc<super::bots::BotsMt5>>,
+    /// What the translator said about each bot, newest last (the desk log).
+    notas: Mutex<Vec<NotaBot>>,
 }
+
+/// One translator line for the desk's log.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NotaBot {
+    pub ts: i64,
+    pub nivel: super::ordenes::Nivel,
+    pub sistema: String,
+    pub mensaje: String,
+}
+
+/// How many translator lines the desk keeps.
+const NOTAS_MAX: usize = 200;
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -88,6 +104,8 @@ impl Mt5Escritorio {
             dir: trading_dir.join("mt5"),
             enlaces: Mutex::new(BTreeMap::new()),
             python: Mutex::new(None),
+            bots: std::sync::OnceLock::new(),
+            notas: Mutex::new(Vec::new()),
         })
     }
 
@@ -320,6 +338,68 @@ impl Mt5Escritorio {
             }
         }
         fallos
+    }
+
+    /// Where the bots' API keeps its files.
+    pub fn dir_bots(&self) -> PathBuf {
+        self.dir.join("bots")
+    }
+
+    /// Hands over the started bots' API.
+    pub fn set_bots(&self, bots: Arc<super::bots::BotsMt5>) {
+        let _ = self.bots.set(bots);
+    }
+
+    /// The MT5 account the bots trade on: the first registered one whose
+    /// bridge reads its account.
+    pub fn enlace_para_bots(&self) -> Option<String> {
+        let enlaces = lock(&self.enlaces);
+        self.registradas()
+            .into_iter()
+            .map(|c| format!("mt5-{}@{}", c.login, c.server))
+            .find(|id| {
+                enlaces
+                    .get(id)
+                    .is_some_and(|e| e.cuenta().is_some() && e.motivo().is_none())
+            })
+    }
+
+    /// The environment a bot starts with to trade on MT5: `None` while no
+    /// MT5 account is registered (the bot goes to TWS as always), an error
+    /// when one is registered but the bot can't reach it.
+    pub fn entorno_bot(&self, sistema: &str, carpeta: &Path) -> Option<Result<Vec<(String, String)>, String>> {
+        if self.registradas().is_empty() {
+            return None;
+        }
+        let Some(bots) = self.bots.get() else {
+            return Some(Err("la API de los bots de MetaTrader 5 aún no está lista; inténtalo en unos segundos".into()));
+        };
+        let Some(enlace) = self.enlace_para_bots() else {
+            return Some(Err(
+                "la cuenta de MetaTrader 5 no está conectada: abre MetaTrader 5 con tu sesión iniciada".into(),
+            ));
+        };
+        let mut entorno = bots.entorno(sistema, Some(&carpeta.to_string_lossy()));
+        entorno.push(("OPENBOT_MT5_LINK".into(), enlace));
+        Some(Ok(entorno))
+    }
+
+    /// Notes one translator line for the desk's log.
+    pub fn anotar(&self, nivel: super::ordenes::Nivel, sistema: &str, mensaje: &str) {
+        let mut notas = lock(&self.notas);
+        notas.push(NotaBot {
+            ts: chrono::Utc::now().timestamp_millis(),
+            nivel,
+            sistema: sistema.to_string(),
+            mensaje: mensaje.to_string(),
+        });
+        let sobran = notas.len().saturating_sub(NOTAS_MAX);
+        notas.drain(..sobran);
+    }
+
+    /// The translator's lines, oldest first.
+    pub fn notas(&self) -> Vec<NotaBot> {
+        lock(&self.notas).clone()
     }
 
     pub fn hay_enlaces(&self) -> bool {

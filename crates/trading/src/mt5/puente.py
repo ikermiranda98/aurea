@@ -304,7 +304,8 @@ def ejecutar(mt5, verbo, cid, arg):
         return respuesta(cid, True, 0, "", {"symbol": s.name, "digits": s.digits, "contract_size": n(s.trade_contract_size),
                                            "tick_size": n(s.trade_tick_size), "tick_value": n(s.trade_tick_value),
                                            "volume_min": n(s.volume_min), "volume_step": n(s.volume_step), "volume_max": n(s.volume_max),
-                                           "currency_profit": s.currency_profit, "bid": n(s.bid), "ask": n(s.ask)})
+                                           "currency_profit": s.currency_profit, "bid": n(s.bid), "ask": n(s.ask),
+                                           "trade_mode": s.trade_mode})
 
     if verbo == "RATES":
         if len(a) < 4:

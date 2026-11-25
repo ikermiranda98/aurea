@@ -7,6 +7,7 @@
 //! publishes and [`ordenes`] is the translator itself. The Python bridge that
 //! talks to the terminal is embedded as `puente.py`.
 
+pub mod bots;
 pub mod enlace;
 pub mod escritorio;
 pub mod instruments;

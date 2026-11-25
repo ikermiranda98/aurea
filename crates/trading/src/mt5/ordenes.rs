@@ -43,6 +43,9 @@ const GRACIA_MS: i64 = 6_000;
 const REINTENTO: [i64; 8] = [-1, 10004, 10018, 10020, 10021, 10024, 10031, 10012];
 /// The price is already beyond the stop or limit: it would trigger at once.
 const CRUZADO: [i64; 2] = [10015, 10016];
+/// MT5's `SYMBOL_TRADE_MODE_DISABLED`: the broker shows the symbol but this
+/// account can't trade it.
+const SYMBOL_TRADE_MODE_DISABLED: i64 = 0;
 
 /// IB statuses of an order that can still execute.
 pub fn activa(orden: &OrdenVirtual) -> bool {
@@ -1018,6 +1021,7 @@ impl Traductor {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn resolver(
         &self,
         sistema: &str,
@@ -1043,15 +1047,43 @@ impl Traductor {
                 nombres.push(format!("{base}{sufijo}"));
             }
         }
+        // The first symbol the broker lets this account trade; failing that,
+        // the first it has at all (its bars still work), with a warning.
         let mut spec: Option<serde_json::Value> = None;
+        let mut bloqueado: Option<serde_json::Value> = None;
         for nombre in &nombres {
             let r = self.entorno().comando(enlace, "SYMBOL", nombre).await;
             if r.ok && r.data.as_ref().is_some_and(|d| d.is_object()) {
-                spec = r.data;
-                break;
+                let deshabilitado = r
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("trade_mode"))
+                    .and_then(serde_json::Value::as_i64)
+                    == Some(SYMBOL_TRADE_MODE_DISABLED);
+                if !deshabilitado {
+                    spec = r.data;
+                    break;
+                }
+                if bloqueado.is_none() {
+                    bloqueado = r.data;
+                }
+                continue;
             }
             if r.retcode == -1 || r.retcode == -2 {
                 return Err(ErrorTraductor::new(r.message));
+            }
+        }
+        if spec.is_none() {
+            if let Some(datos) = bloqueado {
+                let nombre = datos.get("symbol").and_then(serde_json::Value::as_str).unwrap_or(root);
+                self.entorno().log(
+                    Nivel::Warning,
+                    sistema,
+                    &format!(
+                        "{nombre} no se puede operar en esta cuenta: el bróker lo tiene deshabilitado. El sistema leerá velas pero sus órdenes serán rechazadas; usa una cuenta que permita {root} o pon otro símbolo en \"symbol\" del system.json."
+                    ),
+                );
+                spec = Some(datos);
             }
         }
         let spec = spec.ok_or_else(|| {
@@ -2287,6 +2319,75 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["US100", "USTEC"]
         );
+    }
+
+    #[tokio::test]
+    async fn qualify_skips_a_symbol_the_account_cannot_trade() {
+        let entorno = falso(|_, arg| {
+            let modo = match arg {
+                "USTEC" => 0,
+                "NAS100" => 4,
+                _ => return fallo(4301),
+            };
+            ok(serde_json::json!({
+                "symbol": arg,
+                "digits": 2,
+                "contract_size": 1.0,
+                "tick_size": 0.01,
+                "tick_value": 0.01,
+                "volume_min": 0.1,
+                "volume_step": 0.1,
+                "volume_max": 250.0,
+                "currency_profit": "USD",
+                "trade_mode": modo
+            }))
+        });
+        let traductor = traductor(&entorno, reloj(1_000_000));
+        let peticion = || PeticionContrato {
+            sec_type: Some("FUT".to_string()),
+            symbol: Some("MNQ".to_string()),
+            ..PeticionContrato::default()
+        };
+
+        let contrato = traductor.qualify("7", peticion()).await.expect("qualify");
+
+        assert_eq!(contrato.mt5, "NAS100");
+    }
+
+    #[tokio::test]
+    async fn qualify_keeps_a_disabled_symbol_when_it_is_the_only_one() {
+        let entorno = falso(|_, arg| {
+            if arg != "USTEC" {
+                return fallo(4301);
+            }
+            ok(serde_json::json!({
+                "symbol": "USTEC",
+                "digits": 2,
+                "contract_size": 1.0,
+                "tick_size": 0.01,
+                "tick_value": 0.01,
+                "volume_min": 0.1,
+                "volume_step": 0.1,
+                "volume_max": 250.0,
+                "currency_profit": "USD",
+                "trade_mode": 0
+            }))
+        });
+        let traductor = traductor(&entorno, reloj(1_000_000));
+
+        let contrato = traductor
+            .qualify(
+                "7",
+                PeticionContrato {
+                    sec_type: Some("FUT".to_string()),
+                    symbol: Some("MNQ".to_string()),
+                    ..PeticionContrato::default()
+                },
+            )
+            .await
+            .expect("qualify");
+
+        assert_eq!(contrato.mt5, "USTEC");
     }
 }
 

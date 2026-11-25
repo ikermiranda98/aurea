@@ -221,6 +221,12 @@ impl TradingService {
                 for fallo in mt5.restaurar() {
                     tracing::warn!(target: "mt5", "{fallo}");
                 }
+                match crate::mt5::bots::BotsMt5::iniciar(Arc::clone(&mt5), &mt5.dir_bots()).await {
+                    Ok(bots) => mt5.set_bots(bots),
+                    Err(error) => {
+                        tracing::error!(target: "mt5", "la API de los bots no arrancó: {error}")
+                    }
+                }
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     let Some(inner) = weak.upgrade() else { break };
@@ -861,6 +867,21 @@ impl Inner {
         let mt5 = lock(&self.mt5).clone();
         let mut mt5_read = false;
         if let Some(mt5) = mt5 {
+            for nota in mt5.notas() {
+                let level = match nota.nivel {
+                    crate::mt5::ordenes::Nivel::Info => LogLevel::Info,
+                    crate::mt5::ordenes::Nivel::Warning => LogLevel::Warning,
+                    crate::mt5::ordenes::Nivel::Error => LogLevel::Error,
+                };
+                if let Ok(log) = serde_json::from_value::<Log>(serde_json::json!({
+                    "ts": nota.ts,
+                    "level": level,
+                    "system": nota.sistema,
+                    "message": nota.mensaje,
+                })) {
+                    snapshot.logs.push(log);
+                }
+            }
             let vista = mt5.vista();
             mt5_read = !vista.accounts.is_empty();
             if !vista.links.is_empty() {

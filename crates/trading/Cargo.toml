@@ -16,6 +16,7 @@ zeron-tws.workspace = true
 tracing.workspace = true
 rusqlite.workspace = true
 sha1 = "0.10"
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

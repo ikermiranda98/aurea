@@ -283,6 +283,27 @@ fn start_system_in(
         let reg_offset = crate::lifecycle::today_offset(&registro_path, &today_prefix);
         let con_offset = crate::lifecycle::file_tail_size(&consola_path);
 
+        // A bot trades on MetaTrader 5 while an MT5 account is registered:
+        // OpenBot's ib_async stand-in, its token and the bots' API go in its
+        // environment (crates/trading/src/mt5/bots.rs); otherwise TWS.
+        let mt5 = BOT_ENVIRONMENT
+            .get()
+            .and_then(|entorno| entorno(system_id, &folder));
+        let mt5 = match mt5 {
+            Some(Err(motivo)) => {
+                state.push_log(
+                    zeron_proto::trading::LogLevel::Error,
+                    "motor",
+                    format!("Bot {system_id} no arranca en MetaTrader 5: {motivo}"),
+                    now_ms(),
+                    true,
+                );
+                return Err(TradingError::InvalidRequest { message: motivo });
+            }
+            Some(Ok(entorno)) => Some(entorno),
+            None => None,
+        };
+
         // Spawn.
         let mut cmd = std::process::Command::new(&pythonw);
         cmd.arg(&bot_py)
@@ -294,6 +315,9 @@ fn start_system_in(
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::from(consola_file));
+        if let Some(entorno) = &mt5 {
+            cmd.envs(entorno.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -323,10 +347,15 @@ fn start_system_in(
         runtime.consola_offset = con_offset;
         state.bots.insert(system_id.to_string(), runtime);
 
+        let destino = mt5
+            .as_ref()
+            .and_then(|e| e.iter().find(|(k, _)| k == "OPENBOT_MT5_LINK"))
+            .map(|(_, enlace)| format!(" en MetaTrader 5 ({enlace})"))
+            .unwrap_or_default();
         state.push_log(
             zeron_proto::trading::LogLevel::Info,
             "motor",
-            format!("Bot {} arrancado", system_id),
+            format!("Bot {}{destino} arrancado", system_id),
             now_ms(),
             true,
         );
@@ -693,6 +722,20 @@ impl TradingEngine {
     }
 }
 
+/// Where a bot trades: given its system id and folder, `None` = TWS (no MT5
+/// account registered), `Some(Ok(env))` = MetaTrader 5 with that extra
+/// environment, `Some(Err(why))` = MT5 is registered but unreachable.
+pub type BotEnvironment = Box<
+    dyn Fn(&str, &Path) -> Option<std::result::Result<Vec<(String, String)>, String>> + Send + Sync,
+>;
+
+static BOT_ENVIRONMENT: std::sync::OnceLock<BotEnvironment> = std::sync::OnceLock::new();
+
+/// Set once by the engine's assembly (the desk's MT5 side).
+pub fn set_bot_environment(entorno: BotEnvironment) {
+    let _ = BOT_ENVIRONMENT.set(entorno);
+}
+
 /// Publishes `snap` only when it differs from what the watchers last saw.
 /// The scheduler ticks every second: re-sending an identical desk made every
 /// window redraw (and, without a GPU, each redraw is real CPU).
@@ -974,7 +1017,12 @@ fn parse_bot_line(line: &str) -> Option<(i64, String)> {
     let msg = line[24..].to_string();
     let fixed = ts_part.replacen(',', ".", 1);
     let dt = chrono::NaiveDateTime::parse_from_str(&fixed, "%Y-%m-%d %H:%M:%S%.3f").ok()?;
-    let millis = dt.and_utc().timestamp_millis();
+    // Python's logging writes `asctime` in the machine's local time.
+    use chrono::TimeZone;
+    let millis = chrono::Local
+        .from_local_datetime(&dt)
+        .earliest()
+        .map_or_else(|| dt.and_utc().timestamp_millis(), |t| t.timestamp_millis());
     Some((millis, msg))
 }
 

@@ -434,9 +434,12 @@ impl EngineCore {
         };
         // Real MetaTrader 5: the accounts registered on this desk reconnect
         // their bridges now (crates/trading/src/mt5/escritorio.rs).
-        trading.set_mt5(zeron_trading::mt5::escritorio::Mt5Escritorio::new(
-            &data_dir.join("trading"),
-        ));
+        let mt5 = zeron_trading::mt5::escritorio::Mt5Escritorio::new(&data_dir.join("trading"));
+        trading.set_mt5(std::sync::Arc::clone(&mt5));
+        // Bots trade on MetaTrader 5 while an MT5 account is registered.
+        zeron_trading::engine::set_bot_environment(Box::new(move |sistema, carpeta| {
+            mt5.entorno_bot(sistema, carpeta)
+        }));
         // Rules watch every desk update (the engine ticks once a second), and
         // only ever file a proposal: the person still approves it.
         if let Some(engine) = &trading_engine {
