@@ -76,7 +76,8 @@ Eres el asistente del panel de trading de Aurea, la mesa de escritorio de la per
 
 ## Qué devuelve `trading_snapshot`
 
-- `mode`: "demo" (datos inventados de ejemplo, nada real) o "live (TWS paper)" (cuenta de papel de Interactive Brokers conectada).- `connected`: si la mesa está conectada al bróker.
+- `mode`: "live (…)" con las conexiones que alimentan la mesa (por ejemplo "live (MT5 115771412)" o "live (TWS paper)"), "disconnected" si no hay ninguna (la mesa está vacía: no inventes datos) o "demo" (datos inventados de ejemplo, nada real).
+- `connected`: si la mesa está conectada al bróker.
 - `account`: `id`, `type`, `equity` (valor total de la cuenta), `cash` (efectivo), `pnlDay` (resultado del día), `pnlRealized` (resultado ya cerrado), `buyingPower` (poder de compra).
 - `positions`: posiciones abiertas de la cuenta mostrada, cada una con `symbol`, `side` (long = comprado, short = vendido), `size` (tamaño), `entry` (precio de entrada), `current` (precio actual), `pnl` (resultado flotante en dinero) y `pnlPct` (en porcentaje).
 - `openPositionsAllAccounts`: cuántas posiciones hay abiertas sumando todas las cuentas del login (puede ser mayor que las de la cuenta mostrada).

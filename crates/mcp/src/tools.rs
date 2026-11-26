@@ -312,7 +312,7 @@ fn trading_catalog() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: TRADING_SNAPSHOT_TOOL,
-            description: "Aurea's trading desk right now: whether it is the DEMO fixture or a live TWS paper link, the shown account (equity, cash, P&L of the day), open positions (symbol, side, size, entry, current price, P&L) plus how many are open across every account, the bot systems (running or not, symbol, P&L, the capital the person assigned to each one and that P&L as a percent of it, when each one last wrote to its log, and their own idea and rules when the folder has them), scheduled tasks, watch rules (`rules`: condition, whether it proposes something, status and when it fired or expires), connections, the newest engine log rows, the proposals still waiting (`pendingProposals`) and the last answered ones (`recentProposals`). Read-only; call it before answering about positions, before proposing anything, and when the person asks how a proposal ended or what a rule saw.",
+            description: "Aurea's trading desk right now: which accounts are connected (MetaTrader 5 and/or a TWS paper link; with none connected the desk is empty, never made-up data), the shown account (equity, cash, P&L of the day), open positions (symbol, side, size, entry, current price, P&L) plus how many are open across every account, the bot systems (running or not, symbol, P&L, the capital the person assigned to each one and that P&L as a percent of it, when each one last wrote to its log, and their own idea and rules when the folder has them), scheduled tasks, watch rules (`rules`: condition, whether it proposes something, status and when it fired or expires), connections, the newest engine log rows, the proposals still waiting (`pendingProposals`) and the last answered ones (`recentProposals`). Read-only; call it before answering about positions, before proposing anything, and when the person asks how a proposal ended or what a rule saw.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -767,8 +767,27 @@ fn summarize_trading(snapshot: &Value, logs: usize) -> Value {
         std::cmp::Reverse(row.get("resolvedAt").and_then(Value::as_i64).unwrap_or(0))
     });
     answered.truncate(5);
+    // Which connections feed the desk right now (MT5 accounts, TWS paper).
+    let vivos: Vec<String> = snapshot
+        .get("links")
+        .and_then(Value::as_array)
+        .map(|links| {
+            links
+                .iter()
+                .filter(|l| l.get("connected").and_then(Value::as_bool) == Some(true))
+                .filter_map(|l| l.get("label").and_then(Value::as_str).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mode = if demo {
+        "demo (invented data, nothing real)".to_string()
+    } else if vivos.is_empty() {
+        "disconnected (no broker connected: no data)".to_string()
+    } else {
+        format!("live ({})", vivos.join(", "))
+    };
     json!({
-        "mode": if demo { "demo (invented data, nothing real)" } else { "live (TWS paper)" },
+        "mode": mode,
         "connected": snapshot.get("connected").cloned().unwrap_or(Value::Null),
         "account": snapshot
             .get("account")
