@@ -837,6 +837,11 @@ fn sweep_state_in(state: &mut TradingState) {
             None => (zeron_proto::trading::LogLevel::Info, format!("Bot {id} terminó{detalle}")),
         };
         state.push_log(level, "motor", message, now, true);
+        // Ended on its own terms (done for today): reopening Aurea must not
+        // start it again. One that failed stays wanted, for another try.
+        if !nota.as_deref().is_some_and(|n| n.starts_with("falló")) && state.wanted.remove(&id) {
+            state.wanted_dirty = true;
+        }
         if let Some(nota) = nota {
             state.notes.insert(id.clone(), nota);
         }

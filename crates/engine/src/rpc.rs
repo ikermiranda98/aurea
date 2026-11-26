@@ -4720,6 +4720,18 @@ impl RpcService for EngineRpc {
                         message_params: None,
                     });
                 }
+                // A connected MT5 account with nothing open: nothing to close,
+                // not "nothing connected".
+                if !self.trading.live()
+                    && self.trading.mt5().is_some_and(|mt5| mt5.enlace_para_bots().is_some())
+                {
+                    return RpcReply::value(&zeron_proto::trading::PositionCloseResult {
+                        ok: true,
+                        message: "No hay posiciones abiertas que cerrar.".into(),
+                        message_key: None,
+                        message_params: None,
+                    });
+                }
                 if self.trading.live() {
                     if let Some(engine) = &self.trading_engine {
                         let store = {
