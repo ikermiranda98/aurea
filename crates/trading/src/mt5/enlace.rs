@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -84,6 +85,8 @@ pub struct EnlaceMt5 {
     libro: Arc<RwLock<Option<LibroMt5>>>,
     cuenta: Arc<RwLock<Option<CuentaMt5>>>,
     motivo: Arc<RwLock<Option<String>>>,
+    /// The bridge process ended: this link reads nothing until it is rebuilt.
+    terminado: Arc<AtomicBool>,
 }
 
 impl EnlaceMt5 {
@@ -106,8 +109,10 @@ impl EnlaceMt5 {
         let libro = Arc::new(RwLock::new(None));
         let cuenta = Arc::new(RwLock::new(None));
         let motivo = Arc::new(RwLock::new(None));
+        let terminado = Arc::new(AtomicBool::new(false));
 
         {
+            let terminado = Arc::clone(&terminado);
             let puente = Arc::clone(&puente);
             let libro = Arc::clone(&libro);
             let cuenta = Arc::clone(&cuenta);
@@ -120,6 +125,7 @@ impl EnlaceMt5 {
                             &motivo,
                             Some("el puente de MetaTrader 5 terminó".to_string()),
                         );
+                        terminado.store(true, Ordering::SeqCst);
                         return;
                     }
                     if let Some(leido) = puente.libro().await {
@@ -143,7 +149,13 @@ impl EnlaceMt5 {
             libro,
             cuenta,
             motivo,
+            terminado,
         })
+    }
+
+    /// Whether the bridge process ended (the desk starts a new one).
+    pub fn terminado(&self) -> bool {
+        self.terminado.load(Ordering::SeqCst)
     }
 
     /// The link's last book; `None` while the bridge reads nothing.

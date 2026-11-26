@@ -62,6 +62,9 @@ pub struct Mt5Escritorio {
     /// Closed positions whose closing deal hasn't been read yet, with the
     /// looks left before they are logged without a result.
     cierres: Mutex<Vec<(String, i64, PosicionMt5, u32)>>,
+    /// When each account's bridge was last restarted, so one that dies at
+    /// once is retried every minute, not every pass.
+    revividos: Mutex<BTreeMap<String, i64>>,
 }
 
 /// One translator line for the desk's log.
@@ -127,6 +130,7 @@ impl Mt5Escritorio {
             notas: Mutex::new(Vec::new()),
             posiciones: Mutex::new(BTreeMap::new()),
             cierres: Mutex::new(Vec::new()),
+            revividos: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -359,6 +363,30 @@ impl Mt5Escritorio {
             }
         }
         fallos
+    }
+
+    /// Starts a new bridge for each registered account whose bridge ended
+    /// (it crashed or was killed), and says so in the desk log.
+    pub fn revivir(&self) {
+        for cuenta in self.registradas() {
+            let id = format!("mt5-{}@{}", cuenta.login, cuenta.server);
+            let caido = lock(&self.enlaces).get(&id).is_some_and(|e| e.terminado());
+            if !caido {
+                continue;
+            }
+            let ahora = chrono::Utc::now().timestamp_millis();
+            if lock(&self.revividos).get(&id).is_some_and(|t| ahora - t < 60_000) {
+                continue;
+            }
+            lock(&self.revividos).insert(id.clone(), ahora);
+            lock(&self.enlaces).remove(&id);
+            let mensaje = match self.abrir(cuenta.login, &cuenta.server) {
+                Ok(_) => format!("El puente de MetaTrader 5 de la cuenta {} se cerró: arrancado de nuevo", cuenta.login),
+                Err(error) => format!("El puente de MetaTrader 5 de la cuenta {} se cerró y no se pudo arrancar: {error}", cuenta.login),
+            };
+            tracing::warn!(target: "mt5", "{mensaje}");
+            self.anotar(super::ordenes::Nivel::Warning, "mesa", &mensaje);
+        }
     }
 
     /// Where the bots' API keeps its files.

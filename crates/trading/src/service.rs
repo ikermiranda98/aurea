@@ -227,9 +227,15 @@ impl TradingService {
                         tracing::error!(target: "mt5", "la API de los bots no arrancó: {error}")
                     }
                 }
+                let mut vueltas: u64 = 0;
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     let Some(inner) = weak.upgrade() else { break };
+                    vueltas += 1;
+                    // A bridge that died (crash, killed) comes back by itself.
+                    if vueltas % 10 == 0 {
+                        mt5.revivir();
+                    }
                     if mt5.hay_enlaces() {
                         inner.publish();
                     }
