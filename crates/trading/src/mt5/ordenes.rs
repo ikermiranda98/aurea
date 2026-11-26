@@ -455,6 +455,22 @@ impl Traductor {
         if !(cantidad > 0.0) {
             return Err(ErrorTraductor::new("la cantidad debe ser mayor que 0"));
         }
+        // MT5 trades whole volume steps: say so when the bot's size doesn't fit.
+        let enviadas = unidades(&i, lotes(&i, cantidad));
+        if (enviadas - cantidad).abs() > cantidad * 0.005 {
+            self.entorno().log(
+                Nivel::Warning,
+                sistema,
+                &format!(
+                    "{} unidades de {} no caben en lotes de {}: se envían {} lotes = {} unidades",
+                    cantidad,
+                    i.mt5,
+                    if i.volume_step > 0.0 { i.volume_step } else { 0.01 },
+                    lotes(&i, cantidad),
+                    enviadas
+                ),
+            );
+        }
         let magic = self.entorno().magic(sistema);
         let aux = precio_de(&i, peticion.aux_price.unwrap_or(0.0));
         let lmt = precio_de(&i, peticion.lmt_price.unwrap_or(0.0));
@@ -1243,8 +1259,11 @@ impl Traductor {
             }
         }
         let Some(fallo) = fallo else {
-            // Small rounding leftovers count as done.
-            o.filled = o.filled.max(o.qty);
+            // Float noise counts as done; a size MT5 could not trade in whole
+            // volume steps keeps what it really executed.
+            if (o.qty - o.filled).abs() <= o.qty.abs() * 1e-6 {
+                o.filled = o.filled.max(o.qty);
+            }
             estado_de(o, "Filled", "", ahora);
             self.entorno().log(
                 Nivel::Info,

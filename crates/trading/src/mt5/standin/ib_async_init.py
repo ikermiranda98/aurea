@@ -534,6 +534,12 @@ class IB:
         t.order.permId = d["permId"]
         if d["filled"]:
             s.lastFillPrice = d["avgFillPrice"]
+        if s.filled != before[1]:
+            # The trade's own executions, as ib_async keeps them on the Trade.
+            try:
+                t.fills = [f for f in self._fills() if f.execution.orderId == oid]
+            except Exception:
+                pass
         if (s.status, s.filled) != before:
             t.log.append(TradeLogEntry(time=_dt.datetime.now(_dt.timezone.utc), status=s.status, message=d.get("message", "")))
             if d.get("message") and s.status == "Inactive":
