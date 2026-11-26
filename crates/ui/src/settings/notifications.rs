@@ -5,9 +5,8 @@
 //! emits [`NotificationsEvent::Changed`], and the shell persists it. Nothing
 //! here talks RPC — all preferences are device-local UI settings.
 
-use gpui::{Context, EventEmitter, SharedString, Window, div, prelude::*, px};
+use gpui::{Context, EventEmitter, Window, div, prelude::*, px};
 
-use crate::icons;
 use crate::popover;
 use crate::settings::search::{SearchAnchor, SettingId};
 use crate::settings::widgets;
@@ -48,7 +47,6 @@ enum NotificationPreference {
     AttentionSound,
     Desktop,
     BackgroundOnly,
-    AgentUpdates,
 }
 
 fn is_switch_activation(key: &str, is_held: bool) -> bool {
@@ -119,7 +117,6 @@ impl NotificationsPage {
             NotificationPreference::AttentionSound => &mut self.attention_sound,
             NotificationPreference::Desktop => &mut self.desktop,
             NotificationPreference::BackgroundOnly => &mut self.background_only,
-            NotificationPreference::AgentUpdates => &mut self.agent_updates,
         };
         *value = !*value;
         self.emit(cx);
@@ -153,7 +150,6 @@ impl Render for NotificationsPage {
         let attention_sound = self.attention_sound;
         let desktop = self.desktop;
         let background_only = self.background_only;
-        let agent_updates = self.agent_updates;
         let toggle = |id: &'static str, label: &'static str, enabled: bool, interactive: bool| {
             // Keep the visual inside its 56×40 activation target.
             // Disabled subordinate controls remain named switches in the
@@ -304,41 +300,6 @@ impl Render for NotificationsPage {
                         cx,
                     ))
                     .search_anchor(SettingId::DesktopNotifications),
-            )
-            .child(
-                widgets::card_row(&theme, false)
-                    .when(!desktop, |el| el.opacity(0.55))
-                    .child(widgets::row_tile(&theme, icons::REFRESH))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(widgets::row_title(&theme, "Agent updates"))
-                            .child(widgets::meta_line(
-                                &theme,
-                                vec![
-                                    div()
-                                        .child(SharedString::from(
-                                            "Show a banner when monitored agent CLIs have updates.",
-                                        ))
-                                        .into_any_element(),
-                                ],
-                            )),
-                    )
-                    .child(
-                        toggle(
-                            "notifications-agent-updates-toggle",
-                            "Agent update notifications",
-                            agent_updates,
-                            desktop,
-                        )
-                        .when(desktop, |el| {
-                            interactive_switch(el, accent, NotificationPreference::AgentUpdates, cx)
-                        }),
-                    )
-                    .search_anchor(SettingId::AgentUpdates),
             )
             .child(
                 // Sub-option of the banner row: dimmed + inert while banners

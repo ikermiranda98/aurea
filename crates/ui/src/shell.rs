@@ -2854,29 +2854,9 @@ impl Shell {
                     if new.is_empty() {
                         return;
                     }
-                    let count = new.len();
+                    // Aurea announces no agent updates: they are only marked seen.
                     for key in &new {
                         this.harness_update_seen.insert(key.clone());
-                    }
-                    let focused = cx.active_window().is_some();
-                    if !this.state.read(cx).engine_posts_banners()
-                        && this.settings.notifications_enabled
-                        && this.settings.agent_update_notifications
-                        && !(this.settings.notifications_background_only && focused)
-                    {
-                        let body = if count == 1 {
-                            "A coding agent update is ready"
-                        } else {
-                            "Coding agent updates are ready"
-                        };
-                        crate::notify::post(
-                            &format!(
-                                "{count} agent update{} available",
-                                if count == 1 { "" } else { "s" }
-                            ),
-                            body,
-                            Some(crate::notify::AGENT_UPDATES_TARGET),
-                        );
                     }
                 })
                 .ok();

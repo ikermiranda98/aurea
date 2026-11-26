@@ -121,8 +121,6 @@ settings_index! {
         "latex formulas scale"),
     (DesktopNotifications, Notifications, Some("Desktop"), "Desktop notifications",
         "alerts banners system"),
-    (AgentUpdates, Notifications, Some("Desktop"), "Agent updates",
-        "cli banner new version"),
     (BackgroundOnly, Notifications, Some("Desktop"), "Only when in the background",
         "focus unfocused"),
     (SessionSounds, Notifications, Some("Sounds"), "Session sounds",

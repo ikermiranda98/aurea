@@ -32,6 +32,8 @@ const LIST_WIDTH: f32 = 360.0;
 const MARK_SIZE: f32 = 22.0;
 const MARK_STEP: f32 = 14.0;
 const MAX_MARKS: usize = 3;
+/// Aurea keeps Home free of the agent-update card.
+const SHOW_UPDATE_CARD: bool = false;
 
 #[derive(Default)]
 pub(super) struct DeviceUpdates {
@@ -386,7 +388,7 @@ impl Shell {
         let marks = visible_rows(&self.harness_update_devices, |id| {
             self.state.read(cx).device_name(id).unwrap_or(id).to_owned()
         });
-        if marks.is_empty() {
+        if marks.is_empty() || !SHOW_UPDATE_CARD {
             self.harness_update_expanded = false;
             self.harness_update_transition = None;
             self.harness_update_geometry = [None; 2];

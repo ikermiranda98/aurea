@@ -202,7 +202,6 @@ impl ViewportFocus {
 struct Prefs {
     enabled: bool,
     background_only: bool,
-    agent_updates: bool,
 }
 
 impl Prefs {
@@ -223,7 +222,6 @@ impl Prefs {
         Self {
             enabled: flag("notificationsEnabled"),
             background_only: flag("notificationsBackgroundOnly"),
-            agent_updates: flag("agentUpdateNotifications"),
         }
     }
 }
@@ -483,31 +481,10 @@ impl Notifier {
             .collect()
     }
 
-    /// Release discoveries finish independently, so the caller debounces and
-    /// this delivers one aggregate banner for everything new.
+    /// Aurea announces no agent updates: new releases are only marked seen.
     fn updates(&mut self, statuses: &[HarnessUpdateStatus]) {
         let new = self.unseen_updates(statuses);
-        if new.is_empty() {
-            return;
-        }
-        let count = new.len();
         self.updates_seen.extend(new);
-        if !self.allowed().is_some_and(|prefs| prefs.agent_updates) {
-            return;
-        }
-        let body = if count == 1 {
-            "A coding agent update is ready"
-        } else {
-            "Coding agent updates are ready"
-        };
-        (self.post)(
-            &format!(
-                "{count} agent update{} available",
-                if count == 1 { "" } else { "s" }
-            ),
-            body,
-            Some(zeron_notify::AGENT_UPDATES_TARGET),
-        );
     }
 }
 
@@ -790,7 +767,6 @@ mod tests {
             Prefs {
                 enabled: true,
                 background_only: true,
-                agent_updates: true
             }
         );
         let value = serde_json::json!({
@@ -803,7 +779,6 @@ mod tests {
             Prefs {
                 enabled: false,
                 background_only: false,
-                agent_updates: true
             }
         );
     }
@@ -971,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_updates_banner_once_per_release() {
+    fn agent_updates_post_no_banner() {
         let dir = tempfile::tempdir().unwrap();
         let (mut notifier, posted, _) = notifier(dir.path());
         let status = |phase: &str, version: Option<&str>| -> HarnessUpdateStatus {
@@ -983,16 +958,7 @@ mod tests {
             .expect("update fixture")
         };
         notifier.updates(&[status("available", Some("1.2"))]);
-        notifier.updates(&[status("available", Some("1.2"))]);
-        assert_eq!(posted.lock().unwrap().len(), 1);
-        assert_eq!(
-            posted.lock().unwrap()[0].2.as_deref(),
-            Some(zeron_notify::AGENT_UPDATES_TARGET)
-        );
-        // Versionless availability re-arms after the agent reports current.
         notifier.updates(&[status("available", None)]);
-        notifier.updates(&[status("current", None)]);
-        notifier.updates(&[status("available", None)]);
-        assert_eq!(posted.lock().unwrap().len(), 3);
+        assert!(posted.lock().unwrap().is_empty());
     }
 }
