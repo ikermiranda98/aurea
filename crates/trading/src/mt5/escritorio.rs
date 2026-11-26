@@ -567,6 +567,27 @@ impl Mt5Escritorio {
         (todo_bien, lineas)
     }
 
+    /// Removes every pending order on every connected account (panic): none
+    /// may open a position afterwards.
+    pub async fn borrar_pendientes(&self) -> (bool, Vec<String>) {
+        let enlaces = lock(&self.enlaces).clone();
+        let mut todo_bien = true;
+        let mut lineas = Vec::new();
+        for enlace in enlaces.values() {
+            let Some(libro) = enlace.libro() else { continue };
+            for orden in &libro.orders {
+                let r = enlace.puente().comando("DELETE", &orden.ticket.to_string()).await;
+                if r.ok || r.retcode == 10036 {
+                    lineas.push(format!("orden pendiente {} de {} borrada", orden.ticket, orden.symbol));
+                } else {
+                    todo_bien = false;
+                    lineas.push(format!("orden pendiente {} de {}: {}", orden.ticket, orden.symbol, r.message));
+                }
+            }
+        }
+        (todo_bien, lineas)
+    }
+
     /// What the desk shows: every registered account, read or not.
     pub fn vista(&self) -> VistaMt5 {
         let mut vista = VistaMt5::default();

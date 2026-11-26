@@ -4765,10 +4765,44 @@ impl RpcService for EngineRpc {
             }
             methods::TRADING_PANIC => {
                 let _ = params;
-                // MT5 positions close first (TWS's own panic follows when live).
+                // Without TWS the pool's bots stop and its tasks go first, so
+                // nothing reopens while the accounts are being cleared.
+                let mut stopped = Vec::new();
+                let mut tareas = 0;
+                if !self.trading.live()
+                    && let Some(engine) = &self.trading_engine
+                {
+                    let guard = engine.lock().unwrap();
+                    if guard.has_pool() {
+                        for id in guard
+                            .snapshot()
+                            .systems
+                            .into_iter()
+                            .filter(|system| system.running)
+                            .map(|system| system.id)
+                        {
+                            if guard.stop_system(&id).is_ok() {
+                                stopped.push(id);
+                            }
+                        }
+                        for task in guard.task_list().into_iter().filter(|t| t.status == zeron_proto::trading::TaskStatus::Pending) {
+                            if guard.task_cancel(&task.id).is_ok() {
+                                tareas += 1;
+                            }
+                        }
+                    }
+                }
+                // MT5: no pending order may open anything, then every position
+                // closes (TWS's own panic follows when live).
+                let mut mt5_ok = true;
+                let mut mt5_lineas = Vec::new();
                 if let Some(mt5) = self.trading.mt5() {
-                    let (_, lines) = mt5.cerrar_todo().await;
-                    for line in lines {
+                    let (pendientes_ok, pendientes) = mt5.borrar_pendientes().await;
+                    let (cierre_ok, cierres) = mt5.cerrar_todo().await;
+                    mt5_ok = pendientes_ok && cierre_ok;
+                    mt5_lineas.extend(pendientes);
+                    mt5_lineas.extend(cierres);
+                    for line in &mt5_lineas {
                         tracing::warn!(target: "mt5", "pánico: {line}");
                     }
                     self.trading.refresh();
@@ -4792,29 +4826,27 @@ impl RpcService for EngineRpc {
                         return RpcReply::value(&result);
                     }
                 }
-                // Without TWS: stop every bot of the pool (MT5 closed above).
+                // Without TWS: report what the stop above and MT5 did.
                 if let Some(engine) = &self.trading_engine {
                     let guard = engine.lock().unwrap();
                     if guard.has_pool() {
-                        let ids: Vec<String> = guard
-                            .snapshot()
-                            .systems
-                            .into_iter()
-                            .filter(|system| system.running)
-                            .map(|system| system.id)
-                            .collect();
-                        let mut stopped = Vec::new();
-                        for id in ids {
-                            if guard.stop_system(&id).is_ok() {
-                                stopped.push(id);
-                            }
-                        }
-                        let message = format!("Pánico: {} sistemas parados.", stopped.len());
+                        let message = format!(
+                            "Pánico: {} sistemas parados, {} tareas canceladas.",
+                            stopped.len(),
+                            tareas
+                        );
+                        let cierre = if mt5_lineas.is_empty() {
+                            "MetaTrader 5: no había posiciones ni órdenes pendientes.".to_string()
+                        } else if mt5_ok {
+                            format!("MetaTrader 5 limpio: {}", mt5_lineas.join(" · "))
+                        } else {
+                            format!("MetaTrader 5 NO quedó limpio: {}", mt5_lineas.join(" · "))
+                        };
                         return RpcReply::value(&zeron_proto::trading::PanicResult {
                             stopped,
                             close: zeron_proto::trading::PositionCloseResult {
-                                ok: true,
-                                message: "Posiciones de MetaTrader 5 cerradas.".into(),
+                                ok: mt5_ok,
+                                message: cierre,
                                 message_key: None,
                                 message_params: None,
                             },
