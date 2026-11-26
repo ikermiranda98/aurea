@@ -23,9 +23,12 @@ use tokio::net::{TcpListener, TcpStream};
 
 use super::escritorio::Mt5Escritorio;
 use super::libro::{LibroMt5, ResultadoMt5};
+use super::instruments::Instrumento;
 use super::ordenes::{
-    EntornoMt5, EstadoInicial, Nivel, PeticionContrato, PeticionOrden, Resultado, Traductor,
+    Ejecucion, EntornoMt5, EstadoInicial, Nivel, OrdenVirtual, PeticionContrato, PeticionOrden,
+    Resultado, Traductor,
 };
+use crate::store::{BotFill, BotOrder, TradingStore};
 
 const IB_ASYNC_INIT: &str = include_str!("standin/ib_async_init.py");
 const IB_ASYNC_UTIL: &str = include_str!("standin/ib_async_util.py");
@@ -43,6 +46,34 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// What the translator needs, read from the desk's MT5 accounts.
 struct EntornoEscritorio {
     escritorio: Arc<Mt5Escritorio>,
+    /// Where the bots' orders and fills outlive a restart of Aurea.
+    almacen: Option<TradingStore>,
+    /// The instruments bots qualified, as JSON.
+    fichero_instrumentos: PathBuf,
+}
+
+/// The translator's rows from the last run: orders, fills and instruments.
+fn estado_guardado(almacen: Option<&TradingStore>, fichero_instrumentos: &Path) -> EstadoInicial {
+    let mut inicial = EstadoInicial::default();
+    if let Some(almacen) = almacen {
+        inicial.ordenes = almacen
+            .list_bot_orders()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|fila| serde_json::from_str::<OrdenVirtual>(&fila.data).ok())
+            .collect();
+        inicial.ejecuciones = almacen
+            .list_bot_fills()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|fila| serde_json::from_str::<Ejecucion>(&fila.data).ok())
+            .collect();
+    }
+    inicial.instrumentos = std::fs::read(fichero_instrumentos)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<Instrumento>>(&bytes).ok())
+        .unwrap_or_default();
+    inicial
 }
 
 #[async_trait]
@@ -72,6 +103,50 @@ impl EntornoMt5 for EntornoEscritorio {
             Nivel::Error => tracing::error!(target: "mt5", "sistema {sistema}: {mensaje}"),
         }
         self.escritorio.anotar(nivel, sistema, mensaje);
+    }
+
+    fn guardar_orden(&self, orden: &OrdenVirtual) {
+        let (Some(almacen), Ok(data)) = (&self.almacen, serde_json::to_string(orden)) else {
+            return;
+        };
+        let fila = BotOrder {
+            id: orden.order_id,
+            system: orden.system.clone(),
+            status: orden.status.clone(),
+            data,
+            updated: orden.updated,
+            time_created: None,
+            time_updated: None,
+        };
+        if let Err(error) = almacen.upsert_bot_order(&fila) {
+            tracing::warn!(target: "mt5", "no se pudo guardar la orden {}: {error}", orden.order_id);
+        }
+    }
+
+    fn guardar_ejecucion(&self, ejecucion: &Ejecucion) {
+        let (Some(almacen), Ok(data)) = (&self.almacen, serde_json::to_string(ejecucion)) else {
+            return;
+        };
+        let fila = BotFill {
+            id: ejecucion.exec_id.clone(),
+            system: ejecucion.system.clone(),
+            time: ejecucion.time,
+            data,
+            time_created: None,
+            time_updated: None,
+        };
+        if let Err(error) = almacen.insert_bot_fill(&fila) {
+            tracing::warn!(target: "mt5", "no se pudo guardar la ejecución {}: {error}", ejecucion.exec_id);
+        }
+    }
+
+    fn guardar_instrumentos(&self, lista: &[Instrumento]) {
+        if let Ok(texto) = serde_json::to_vec(lista) {
+            let temporal = self.fichero_instrumentos.with_extension("json.tmp");
+            if std::fs::write(&temporal, texto).is_ok() {
+                let _ = std::fs::rename(&temporal, &self.fichero_instrumentos);
+            }
+        }
     }
 }
 
@@ -118,9 +193,23 @@ impl BotsMt5 {
                 std::fs::write(&ruta, texto)?;
             }
         }
+        // `{trading}/mt5/bots` → `{trading}/trading.db`.
+        let almacen = dir
+            .parent()
+            .and_then(Path::parent)
+            .map(|trading| trading.join("trading.db"))
+            .and_then(|ruta| match TradingStore::open(&ruta) {
+                Ok(almacen) => Some(almacen),
+                Err(error) => {
+                    tracing::warn!(target: "mt5", "las órdenes de los bots no se guardarán: {error}");
+                    None
+                }
+            });
+        let fichero_instrumentos = dir.join("instrumentos.json");
+        let inicial = estado_guardado(almacen.as_ref(), &fichero_instrumentos);
         let traductor = Arc::new(Traductor::new(
-            Arc::new(EntornoEscritorio { escritorio }),
-            EstadoInicial::default(),
+            Arc::new(EntornoEscritorio { escritorio, almacen, fichero_instrumentos }),
+            inicial,
         ));
         let escucha = TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}", escucha.local_addr()?);

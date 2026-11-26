@@ -148,6 +148,9 @@ pub fn compute_run_at_time(now_ms: i64, at_time: &str) -> Result<i64, String> {
     Ok(run_at)
 }
 
+/// The furthest a delay may reach: one week.
+pub const MAX_DELAY_MINUTES: f64 = 7.0 * 24.0 * 60.0;
+
 /// Validate a task input and compute its run time.
 pub fn validate_task_input(
     input: &TaskAddInput,
@@ -161,6 +164,9 @@ pub fn validate_task_input(
     if let Some(minutes) = input.delay_minutes {
         if !minutes.is_finite() || minutes <= 0.0 {
             return Err("delayMinutes must be a positive number of minutes.".into());
+        }
+        if minutes > MAX_DELAY_MINUTES {
+            return Err("delayMinutes can be at most one week (10080 minutes).".into());
         }
         let run_at = compute_run_at_delay(now_ms, minutes);
         return Ok((input.kind, system_ids, run_at));
@@ -378,6 +384,16 @@ mod tests {
         assert_eq!(
             validate_task_input(&negative, now).unwrap_err(),
             "delayMinutes must be a positive number of minutes."
+        );
+        let far = TaskAddInput {
+            kind: TaskKind::StopSystems,
+            system_ids: None,
+            delay_minutes: Some(1e12),
+            at_time: None,
+        };
+        assert_eq!(
+            validate_task_input(&far, now).unwrap_err(),
+            "delayMinutes can be at most one week (10080 minutes)."
         );
         let bad_clock = TaskAddInput {
             kind: TaskKind::StopSystems,
