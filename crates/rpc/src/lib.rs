@@ -1516,7 +1516,7 @@ mod tests {
         ] {
             assert!(!agent_allowed(method), "{method}");
             match agent.call(method, serde_json::json!({})).await {
-                Err(RpcError::Failed(message)) => assert!(message.contains("isn't open to agents"), "{method}: {message}"),
+                Err(RpcError::Failed(message)) => assert!(message.contains("no está abierto a los agentes"), "{method}: {message}"),
                 other => panic!("an agent reached {method}: {other:?}"),
             }
         }

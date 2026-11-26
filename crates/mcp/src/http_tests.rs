@@ -192,7 +192,7 @@ async fn one_run_s_token_acts_only_as_its_own_chat() {
     assert_eq!(lock(&engine.awaited).len(), 2, "never reached the engine");
     // Methods outside the agent scope stay shut, as on the agent IPC token.
     let refused = client.call(methods::STOP_ENGINE, json!({})).await.unwrap_err();
-    assert!(refused.to_string().contains("isn't open to agents"), "{refused}");
+    assert!(refused.to_string().contains("no está abierto a los agentes"), "{refused}");
 }
 
 #[tokio::test]

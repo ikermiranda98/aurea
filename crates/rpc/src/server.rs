@@ -266,7 +266,7 @@ impl RpcService for AgentGuard {
         if !crate::agent_allowed(method) {
             tracing::warn!(method, chat = ?self.chat, "rpc: refused an agent's call outside its scope");
             return Err(RpcError::Failed(format!(
-                "{method} isn't open to agents: only the person can do that, in Zeron"
+                "{method} no está abierto a los agentes: solo la persona puede hacerlo, en Aurea"
             )));
         }
         if self.pinned
