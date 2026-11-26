@@ -101,7 +101,7 @@ where
 /// Next local wall-clock instant for `"HH:MM"` (today if still in the future,
 /// tomorrow otherwise), anchored on `now_ms`'s local date.
 pub fn compute_run_at_time(now_ms: i64, at_time: &str) -> Result<i64, String> {
-    let invalid = || "atTime must be a local \"HH:MM\" time.".to_string();
+    let invalid = || "La hora debe tener el formato HH:MM.".to_string();
 
     let (h_str, m_str) = at_time.split_once(':').ok_or_else(invalid)?;
     if h_str.is_empty() || h_str.len() > 2 || m_str.len() != 2 {
@@ -157,23 +157,23 @@ pub fn validate_task_input(
     now_ms: i64,
 ) -> Result<(TaskKind, Vec<String>, i64), String> {
     if input.delay_minutes.is_some() && input.at_time.is_some() {
-        return Err("Give either delayMinutes or atTime, not both.".into());
+        return Err("Indica minutos o una hora, no las dos cosas.".into());
     }
     let system_ids = input.system_ids.clone().unwrap_or_default();
 
     if let Some(minutes) = input.delay_minutes {
         if !minutes.is_finite() || minutes <= 0.0 {
-            return Err("delayMinutes must be a positive number of minutes.".into());
+            return Err("Los minutos de espera deben ser un número mayor que cero.".into());
         }
         if minutes > MAX_DELAY_MINUTES {
-            return Err("delayMinutes can be at most one week (10080 minutes).".into());
+            return Err("Como mucho se puede programar a una semana vista (10080 minutos).".into());
         }
         let run_at = compute_run_at_delay(now_ms, minutes);
         return Ok((input.kind, system_ids, run_at));
     }
 
     let Some(at) = input.at_time.as_deref() else {
-        return Err("Give delayMinutes or atTime.".into());
+        return Err("Indica en cuántos minutos o a qué hora.".into());
     };
     let run_at = compute_run_at_time(now_ms, at)?;
     Ok((input.kind, system_ids, run_at))
@@ -190,7 +190,7 @@ pub fn add_task(
 
     for id in &system_ids {
         if !valid_system_ids.iter().any(|v| v == id) {
-            return Err(format!("system not found: {}", id));
+            return Err(format!("no hay ningún sistema {}", id));
         }
     }
 
@@ -250,11 +250,11 @@ pub fn cancel_task(conn: &Connection, task_id: &str, now_ms: i64) -> Result<Task
     );
 
     let (kind_str, system_ids_raw, run_at, status_str, _resolved, time_created, _time_updated) =
-        row.map_err(|_| format!("task not found: {}", task_id))?;
+        row.map_err(|_| format!("no hay ninguna tarea {}", task_id))?;
 
     let status = status_from_str(&status_str);
     if status != TaskStatus::Pending {
-        return Err("Only pending tasks can be cancelled.".into());
+        return Err("Solo se pueden cancelar tareas pendientes.".into());
     }
 
     conn.execute(
@@ -363,7 +363,7 @@ mod tests {
         };
         assert_eq!(
             validate_task_input(&both, now).unwrap_err(),
-            "Give either delayMinutes or atTime, not both."
+            "Indica minutos o una hora, no las dos cosas."
         );
         let neither = TaskAddInput {
             kind: TaskKind::StopSystems,
@@ -373,7 +373,7 @@ mod tests {
         };
         assert_eq!(
             validate_task_input(&neither, now).unwrap_err(),
-            "Give delayMinutes or atTime."
+            "Indica en cuántos minutos o a qué hora."
         );
         let negative = TaskAddInput {
             kind: TaskKind::StopSystems,
@@ -383,7 +383,7 @@ mod tests {
         };
         assert_eq!(
             validate_task_input(&negative, now).unwrap_err(),
-            "delayMinutes must be a positive number of minutes."
+            "Los minutos de espera deben ser un número mayor que cero."
         );
         let far = TaskAddInput {
             kind: TaskKind::StopSystems,
@@ -393,7 +393,7 @@ mod tests {
         };
         assert_eq!(
             validate_task_input(&far, now).unwrap_err(),
-            "delayMinutes can be at most one week (10080 minutes)."
+            "Como mucho se puede programar a una semana vista (10080 minutos)."
         );
         let bad_clock = TaskAddInput {
             kind: TaskKind::StopSystems,
@@ -403,7 +403,7 @@ mod tests {
         };
         assert_eq!(
             validate_task_input(&bad_clock, now).unwrap_err(),
-            "atTime must be a local \"HH:MM\" time."
+            "La hora debe tener el formato HH:MM."
         );
         let bad_minute = TaskAddInput {
             kind: TaskKind::StopSystems,
@@ -413,7 +413,7 @@ mod tests {
         };
         assert_eq!(
             validate_task_input(&bad_minute, now).unwrap_err(),
-            "atTime must be a local \"HH:MM\" time."
+            "La hora debe tener el formato HH:MM."
         );
     }
 
@@ -471,7 +471,7 @@ mod tests {
         assert!(cancel_task(&conn, &task.id, now + 2).is_err());
         // missing task fails
         let err = cancel_task(&conn, "trd_nope", now).unwrap_err();
-        assert!(err.contains("task not found"));
+        assert!(err.contains("no hay ninguna tarea"));
     }
 
     #[test]
@@ -533,7 +533,7 @@ mod tests {
             at_time: None,
         };
         let err = add_task(&conn, &input, now, &[]).unwrap_err();
-        assert!(err.contains("system not found"));
+        assert!(err.contains("no hay ningún sistema"));
         assert!(err.contains("nope"));
     }
 }

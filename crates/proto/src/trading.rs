@@ -651,11 +651,11 @@ pub struct ResolveProposalParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum TradingError {
-    #[error("system not found: {system_id}")]
+    #[error("no hay ningún sistema {system_id}")]
     SystemNotFound { system_id: String },
     #[error("{message}")]
     InvalidTask { message: String },
-    #[error("task not found: {task_id}")]
+    #[error("no hay ninguna tarea {task_id}")]
     TaskNotFound { task_id: String },
     #[error("{message}")]
     InvalidRequest { message: String },

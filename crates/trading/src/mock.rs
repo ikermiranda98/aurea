@@ -593,24 +593,24 @@ pub fn panic() -> PanicResult {
 fn run_at_from(input: &TaskAddInput) -> Result<i64, TradingError> {
     if input.delay_minutes.is_some() && input.at_time.is_some() {
         return Err(TradingError::InvalidTask {
-            message: "Give either delayMinutes or atTime, not both.".into(),
+            message: "Indica minutos o una hora, no las dos cosas.".into(),
         });
     }
     if let Some(minutes) = input.delay_minutes {
         if !minutes.is_finite() || minutes <= 0.0 {
             return Err(TradingError::InvalidTask {
-                message: "delayMinutes must be a positive number of minutes.".into(),
+                message: "Los minutos de espera deben ser un número mayor que cero.".into(),
             });
         }
         return Ok(now_ms() + (minutes * 60_000.0) as i64);
     }
     let Some(at) = input.at_time.as_deref() else {
         return Err(TradingError::InvalidTask {
-            message: "Give delayMinutes or atTime.".into(),
+            message: "Indica en cuántos minutos o a qué hora.".into(),
         });
     };
     let invalid = || TradingError::InvalidTask {
-        message: "atTime must be a local wall-clock time \"HH:MM\".".into(),
+        message: "La hora debe tener el formato HH:MM.".into(),
     };
     let (hours, minutes) = at.split_once(':').ok_or_else(invalid)?;
     let hour: u32 = hours.parse().map_err(|_| invalid())?;

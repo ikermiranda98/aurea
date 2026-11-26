@@ -379,7 +379,7 @@ impl TradingService {
             let mut list = lock(&self.inner.rules);
             let Some(rule) = list.iter_mut().find(|rule| rule.id == id) else {
                 return Err(TradingError::InvalidRequest {
-                    message: format!("No such rule: {id}"),
+                    message: format!("no hay ninguna regla {id}"),
                 });
             };
             if rule.status != RuleStatus::Watching {
@@ -435,9 +435,9 @@ impl TradingService {
     pub fn start_proposal(&self, id: &str) -> Result<ProposalAction, String> {
         let list = lock(&self.inner.proposals);
         match list.iter().find(|p| p.id == id) {
-            None => Err(format!("No such proposal: {id}")),
+            None => Err(format!("no hay ninguna propuesta {id}")),
             Some(p) if p.status != ProposalStatus::Pending => {
-                Err("That proposal was already resolved.".into())
+                Err("Esa propuesta ya se resolvió.".into())
             }
             Some(p) => {
                 if !lock(&self.inner.claimed).insert(id.to_string()) {
