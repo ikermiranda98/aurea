@@ -168,6 +168,11 @@ impl AsRuntimeRef for Option<Runtime> {
 // State
 // ---------------------------------------------------------------------------
 
+/// Longest log line the desk keeps, in characters.
+const MAX_LOG_CHARS: usize = 2000;
+/// Most lines one system keeps in the desk log (of its 800).
+const MAX_LOGS_PER_SYSTEM: usize = 250;
+
 /// In-memory engine state that feeds `snapshot()`.
 #[derive(Debug, Clone, Default)]
 pub struct TradingState {
@@ -257,18 +262,29 @@ impl TradingState {
 
         self.echo_recent.insert(key, now_ms);
 
+        // One huge line would ride along every desk update: keep its head.
+        let message = match message.char_indices().nth(MAX_LOG_CHARS) {
+            Some((corte, _)) => format!("{}… ({} caracteres más)", &message[..corte], message[corte..].chars().count()),
+            None => message,
+        };
         self.logs.insert(
             0,
             Log {
                 ts: now_ms,
                 level,
-                system,
+                system: system.clone(),
                 message,
                 message_key: None,
                 message_params: None,
                 event: None,
             },
         );
+        // A chatty system must not push every other system's lines out.
+        if self.logs.iter().filter(|l| l.system == system).count() > MAX_LOGS_PER_SYSTEM {
+            if let Some(oldest) = self.logs.iter().rposition(|l| l.system == system) {
+                self.logs.remove(oldest);
+            }
+        }
         if self.logs.len() > 800 {
             self.logs.truncate(800);
         }
@@ -440,11 +456,37 @@ mod tests {
     fn push_log_ring_cap() {
         let mut st = TradingState::default();
         for i in 0..900 {
-            st.push_log(LogLevel::Info, "motor", format!("m{i}"), i as i64, false);
+            for system in ["motor", "01", "02", "03", "04"] {
+                st.push_log(LogLevel::Info, system, format!("m{i}"), i as i64, false);
+            }
         }
         // debounce: same message within 60s skipped, but messages differ so all push then cap
-        assert!(st.logs.len() <= 800);
         assert_eq!(st.logs.len(), 800);
+        for system in ["motor", "01", "02", "03", "04"] {
+            assert!(st.logs.iter().filter(|l| l.system == system).count() <= MAX_LOGS_PER_SYSTEM);
+        }
+    }
+
+    #[test]
+    fn a_chatty_system_keeps_the_others_lines() {
+        let mut st = TradingState::default();
+        st.push_log(LogLevel::Error, "07", "fallo importante", 0, false);
+        for i in 0..3000 {
+            st.push_log(LogLevel::Info, "95", format!("ruido {i}"), i as i64, false);
+        }
+        assert!(st.logs.iter().any(|l| l.system == "07" && l.message == "fallo importante"));
+        assert_eq!(st.logs.iter().filter(|l| l.system == "95").count(), MAX_LOGS_PER_SYSTEM);
+        // The newest noise stays, the oldest went.
+        assert_eq!(st.logs[0].message, "ruido 2999");
+    }
+
+    #[test]
+    fn a_huge_line_keeps_its_head() {
+        let mut st = TradingState::default();
+        st.push_log(LogLevel::Info, "95", "x".repeat(200_000), 0, false);
+        let kept = &st.logs[0].message;
+        assert!(kept.chars().count() < MAX_LOG_CHARS + 40, "{}", kept.len());
+        assert!(kept.ends_with("(198000 caracteres más)"), "{kept:.80}");
     }
 
     #[test]
