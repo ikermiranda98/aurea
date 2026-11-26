@@ -574,7 +574,9 @@ impl Mt5Escritorio {
             if let Some(motivo) = motivo {
                 vista.motivos.push((id.clone(), motivo));
             }
-            let Some(leida) = leida else { continue };
+            // A closed terminal leaves its last read behind: the desk shows
+            // no account (and its rules judge nothing) until it reads again.
+            let Some(leida) = leida.filter(|_| conectado) else { continue };
             vista.accounts.push(Account {
                 id: id.clone(),
                 kind: format!("MT5 · {} · {}", leida.login, leida.server),
