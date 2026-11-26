@@ -455,6 +455,18 @@ impl Traductor {
         if !(cantidad > 0.0) {
             return Err(ErrorTraductor::new("la cantidad debe ser mayor que 0"));
         }
+        // A stop or limit at 0 or below is a mistake: MT5 refuses it as an
+        // invalid price, which must not read as "already crossed" (market).
+        let precio_pedido = match tipo.as_str() {
+            "STP" => peticion.aux_price.unwrap_or(0.0),
+            "LMT" => peticion.lmt_price.unwrap_or(0.0),
+            _ => 1.0,
+        };
+        if !(precio_pedido > 0.0) {
+            return Err(ErrorTraductor::new(format!(
+                "precio no válido para una orden {tipo}: {precio_pedido}"
+            )));
+        }
         // MT5 trades whole volume steps: say so when the bot's size doesn't fit.
         let enviadas = unidades(&i, lotes(&i, cantidad));
         if (enviadas - cantidad).abs() > cantidad * 0.005 {
@@ -1964,6 +1976,23 @@ mod tests {
             .lock()
             .unwrap()
             .insert(ENLACE.to_string(), nuevo);
+    }
+
+    #[tokio::test]
+    async fn a_stop_or_limit_at_zero_or_below_is_refused_and_sends_nothing() {
+        let entorno = falso(|verbo, _| panic!("nothing may reach MT5, got {verbo}"));
+        let traductor = traductor(&entorno, reloj(1_000_000));
+        for (tipo, precio) in [("LMT", 0.0), ("LMT", -1.0), ("STP", 0.0)] {
+            let mut p = peticion("BUY", tipo, 1.0);
+            if tipo == "LMT" {
+                p.lmt_price = Some(precio);
+            } else {
+                p.aux_price = Some(precio);
+            }
+            let error = traductor.place("7", p).await.expect_err("refused");
+            assert!(error.to_string().contains("precio no válido"), "{error}");
+        }
+        assert!(comandos(&entorno).is_empty());
     }
 
     #[tokio::test]
