@@ -59,6 +59,9 @@ pub struct Mt5Escritorio {
     notas: Mutex<Vec<NotaBot>>,
     /// Each account's positions at the last look, to log opens and closes.
     posiciones: Mutex<BTreeMap<String, BTreeMap<i64, PosicionMt5>>>,
+    /// Closed positions whose closing deal hasn't been read yet, with the
+    /// looks left before they are logged without a result.
+    cierres: Mutex<Vec<(String, i64, PosicionMt5, u32)>>,
 }
 
 /// One translator line for the desk's log.
@@ -123,6 +126,7 @@ impl Mt5Escritorio {
             bots: std::sync::OnceLock::new(),
             notas: Mutex::new(Vec::new()),
             posiciones: Mutex::new(BTreeMap::new()),
+            cierres: Mutex::new(Vec::new()),
         })
     }
 
@@ -438,34 +442,38 @@ impl Mt5Escritorio {
                         ),
                     );
                 }
+                let mut cierres = lock(&self.cierres);
                 for p in antes.values().filter(|p| !ahora.contains_key(&p.ticket)) {
-                    let resultado = libro
-                        .deals
-                        .as_ref()
-                        .map(|deals| {
-                            deals
-                                .iter()
-                                .filter(|d| d.position == p.ticket && d.entry != "in")
-                                .map(|d| d.pnl)
-                                .sum::<f64>()
-                        })
-                        .map(|pnl| format!(", resultado {pnl:+.2}"))
-                        .unwrap_or_default();
-                    self.anotar(
-                        super::ordenes::Nivel::Info,
-                        &autor_posicion(p.magic),
-                        &format!(
-                            "Posición cerrada en MT5 {}: {} {} {}{resultado}",
-                            libro.login,
-                            lado_posicion(&p.side),
-                            p.volume,
-                            p.symbol
-                        ),
-                    );
+                    cierres.push((id.clone(), libro.login, p.clone(), 10));
                 }
             }
             vistas.insert(id.clone(), ahora);
         }
+        drop(vistas);
+        // Log each close once its deals are read (or after ten looks without).
+        let mut cierres = lock(&self.cierres);
+        cierres.retain_mut(|(id, login, p, quedan)| {
+            let pnl = enlaces.get(id).and_then(|e| e.libro()).and_then(|libro| libro.deals).and_then(|deals| {
+                let salida: Vec<_> = deals.iter().filter(|d| d.position == p.ticket && d.entry != "in").collect();
+                (!salida.is_empty()).then(|| salida.iter().map(|d| d.pnl).sum::<f64>())
+            });
+            *quedan = quedan.saturating_sub(1);
+            if pnl.is_none() && *quedan > 0 {
+                return true;
+            }
+            let resultado = pnl.map(|pnl| format!(", resultado {pnl:+.2}")).unwrap_or_default();
+            self.anotar(
+                super::ordenes::Nivel::Info,
+                &autor_posicion(p.magic),
+                &format!(
+                    "Posición cerrada en MT5 {login}: {} {} {}{resultado}",
+                    lado_posicion(&p.side),
+                    p.volume,
+                    p.symbol
+                ),
+            );
+            false
+        });
     }
 
     /// The translator's lines, oldest first.
