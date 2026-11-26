@@ -273,6 +273,9 @@ def mandar(mt5, peticion):
 MARCOS = {}
 
 
+SEGUNDOS_MARCO = {"M": 60, "H": 3600, "D": 86400, "W": 604800}
+
+
 def marco(mt5, nombre):
     if not MARCOS:
         for clave in ("M1", "M2", "M3", "M5", "M10", "M15", "M20", "M30", "H1", "H2", "H3", "H4", "H6", "H8", "H12", "D1", "W1"):
@@ -316,6 +319,16 @@ def ejecutar(mt5, verbo, cid, arg):
         mt5.symbol_select(a[0], True)
         desde, hasta = int(float(a[2])) + off, int(float(a[3])) + off
         velas = mt5.copy_rates_range(a[0], tf, desde, hasta)
+        # After a gap (the terminal was closed) the first ask returns only what the
+        # terminal kept and starts the download: wait a little for the fresh bars.
+        segundos = SEGUNDOS_MARCO.get(a[1][:1], 0) * int(a[1][1:] or 1)
+        tick = mt5.symbol_info_tick(a[0])
+        if segundos and tick is not None and tick.time and hasta >= tick.time - segundos:
+            for _ in range(10):
+                if velas is not None and len(velas) and int(velas[-1]["time"]) >= tick.time - 2 * segundos:
+                    break
+                time.sleep(0.5)
+                velas = mt5.copy_rates_range(a[0], tf, desde, hasta)
         if velas is None:
             codigo, texto = mt5.last_error()
             return respuesta(cid, False, int(codigo), "MT5 no devolvi\u00f3 velas de " + a[0] + " (" + str(texto) + ")", [])
