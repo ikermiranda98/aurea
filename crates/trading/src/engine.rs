@@ -257,9 +257,22 @@ impl TradingEngine {
     pub fn start_system(&self, system_id: &str) -> Result<(), TradingError> {
         let outcome = start_system_in(&self.state, &self.systems_dir, system_id);
         if outcome.is_ok() {
+            self.save_wanted();
             self.publish();
         }
         outcome
+    }
+
+    /// Writes what the person wants running now, not on the next tick: Aurea
+    /// may close right after a start or a stop.
+    fn save_wanted(&self) {
+        let wanted = {
+            let mut state = self.state.lock().unwrap();
+            std::mem::take(&mut state.wanted_dirty).then(|| state.wanted.clone())
+        };
+        if let Some(wanted) = wanted {
+            let _ = self.store.meta_set(WANTED_KEY, &serde_json::to_string(&wanted).unwrap_or_default());
+        }
     }
 }
 
@@ -405,6 +418,7 @@ fn start_system_in(
 impl TradingEngine {
     pub fn stop_system(&self, system_id: &str) -> Result<(), TradingError> {
         let outcome = stop_system_in(&self.state, &self.systems_dir, system_id);
+        self.save_wanted();
         self.publish();
         outcome
     }
