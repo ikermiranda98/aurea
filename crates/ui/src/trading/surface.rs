@@ -473,14 +473,24 @@ impl TradingSurface {
         } else if connected == 0 {
             (theme.text_faint, "desconectado".to_string())
         } else {
-            let label = match links.as_slice() {
-                [link] => match (link.broker, link.port) {
+            // Name the links that work; a registered one that is down (an
+            // idle TWS next to a working MT5) is in the menu, not the chip.
+            let mut names: Vec<String> = Vec::new();
+            for link in links.iter().filter(|link| link.connected) {
+                let name = match (link.broker, link.port) {
                     (Some(Broker::Mt5), _) => "MT5".to_string(),
                     (Some(Broker::Nt), _) => "NT".to_string(),
                     (_, Some(port)) => format!("TWS {port}"),
                     _ => "IBKR".to_string(),
-                },
-                many => format!("{connected}/{} enlaces", many.len()),
+                };
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            let label = if names.len() > 2 {
+                format!("{connected} enlaces")
+            } else {
+                names.join(" · ")
             };
             (theme.success, label)
         };
@@ -1904,18 +1914,48 @@ impl TradingSurface {
                     .child(SharedString::from(system.id.clone())),
             )
             .child(
+                // The name, then why it stopped or what's wrong (faint, cut
+                // with "…" when the row runs out of room).
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .truncate()
-                    .text_size(px(11.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(if system.running {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    })
-                    .child(SharedString::from(model::system_label(&system.name))),
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .gap(px(6.0))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(px(220.0))
+                            .truncate()
+                            .text_size(px(11.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(if system.running {
+                                theme.text
+                            } else {
+                                theme.text_muted
+                            })
+                            .child(SharedString::from(model::system_label(&system.name))),
+                    )
+                    .when_some(system.note.clone(), |row, note| {
+                        let tone = if note.starts_with("falló") {
+                            theme.danger
+                        } else if note.starts_with("aviso") {
+                            theme.warning
+                        } else {
+                            theme.text_faint
+                        };
+                        row.child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .truncate()
+                                .text_size(px(10.0))
+                                .text_color(tone)
+                                .child(SharedString::from(note)),
+                        )
+                    }),
             )
             .child(
                 div()

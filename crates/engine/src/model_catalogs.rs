@@ -200,7 +200,13 @@ async fn list_inner(
             }
         }
         result => {
-            tracing::warn!(error = ?result, binary_path = %context.binary_path.display(), binary_version = ?context.binary_version, "Model discovery unavailable");
+            // With a cached catalog to fall back on this is routine (the CLI
+            // was slow or offline at boot), not something to warn about.
+            if disk.is_some() {
+                tracing::debug!(error = ?result, binary_path = %context.binary_path.display(), binary_version = ?context.binary_version, "Model discovery unavailable; using the cached catalog");
+            } else {
+                tracing::warn!(error = ?result, binary_path = %context.binary_path.display(), binary_version = ?context.binary_version, "Model discovery unavailable");
+            }
             match disk {
                 Some(models) => ModelCatalog {
                     models,

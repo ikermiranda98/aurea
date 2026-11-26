@@ -53,6 +53,13 @@ impl TradingEngine {
             state.scan_pool(dir);
             state.set_systems_dir(dir.clone());
         }
+        state.wanted = store
+            .meta_get(WANTED_KEY)
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        let resume_from = now_ms() + RESUME_DELAY_MS;
 
         // Reuse or generate client_id.
         if store.meta_get("client_id").map_err(|e| e.to_string())?.is_none() {
@@ -76,6 +83,8 @@ impl TradingEngine {
         let listener_clone = Arc::clone(&task_listener);
 
         let scheduler = tokio::spawn(async move {
+            let mut resuming = true;
+            let mut last_resume = 0_i64;
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
@@ -120,6 +129,26 @@ impl TradingEngine {
                             true,
                         );
                     }
+                }
+
+                // What the person wants running survives a restart.
+                let wanted = {
+                    let mut state = state_clone.lock().unwrap();
+                    std::mem::take(&mut state.wanted_dirty).then(|| state.wanted.clone())
+                };
+                if let Some(wanted) = wanted {
+                    let conn = store_conn.lock().unwrap();
+                    let _ = conn.execute(
+                        "INSERT INTO trading_meta (id, value, time_created, time_updated) \
+                         VALUES (?1, ?2, ?3, ?3) \
+                         ON CONFLICT(id) DO UPDATE SET value = excluded.value, time_updated = excluded.time_updated",
+                        rusqlite::params![WANTED_KEY, serde_json::to_string(&wanted).unwrap_or_default(), now],
+                    );
+                }
+                // After a restart: bring back the bots the person had running.
+                if resuming && now >= resume_from && now - last_resume >= 5_000 {
+                    last_resume = now;
+                    resuming = resume_step(&state_clone, &scheduler_dir, now >= resume_from + RESUME_WINDOW_MS);
                 }
 
                 let conn = store_conn.lock().unwrap();
@@ -267,8 +296,12 @@ fn start_system_in(
 
         let bot_py = folder.join("bot.py");
 
-        // Open consola.log in append mode.
+        // A fresh consola.log per start: the previous run's errors move to
+        // consola.anterior.log instead of reading as today's.
         let consola_path = folder.join("consola.log");
+        if std::fs::metadata(&consola_path).is_ok_and(|m| m.len() > 0) {
+            let _ = std::fs::rename(&consola_path, folder.join("consola.anterior.log"));
+        }
         let consola_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -346,6 +379,11 @@ fn start_system_in(
         runtime.registro_offset = reg_offset;
         runtime.consola_offset = con_offset;
         state.bots.insert(system_id.to_string(), runtime);
+        state.notes.remove(system_id);
+        state.adopted.remove(system_id);
+        if state.wanted.insert(system_id.to_string()) {
+            state.wanted_dirty = true;
+        }
 
         let destino = mt5
             .as_ref()
@@ -384,6 +422,10 @@ fn stop_system_in(
                 system_id: system_id.to_string(),
             });
         }
+        if state.wanted.remove(system_id) {
+            state.wanted_dirty = true;
+        }
+        state.notes.remove(system_id);
         let running = state.bots.get(system_id).map(|r| r.started_at.is_some()).unwrap_or(false);
         if !running {
             return Ok(());
@@ -765,22 +807,36 @@ fn sweep_state_in(state: &mut TradingState) {
     }
     for (id, pid) in to_remove {
         state.bots.remove(&id);
+        state.adopted.remove(&id);
+        let mut nota = None;
         if let Some(dir_name) = state
             .systems
             .iter()
             .find(|d| d.id == id)
             .map(|d| d.dir_name.clone())
         {
-            let _ = std::fs::remove_file(systems_dir.join(dir_name).join("panel.pid"));
+            let folder = systems_dir.join(dir_name);
+            let _ = std::fs::remove_file(folder.join("panel.pid"));
+            // The runtime's offsets already sit at the end (the log reader
+            // moved them): read today's lines, and this run's consola (each
+            // start rotates it).
+            let hoy = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let registro_offset = crate::lifecycle::today_offset(&folder.join("registro.log"), &hoy);
+            nota = stop_reason(&folder, registro_offset, 0);
         }
         let detalle = pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
-        state.push_log(
-            zeron_proto::trading::LogLevel::Info,
-            "motor",
-            format!("Bot {id} terminó{detalle}"),
-            now,
-            true,
-        );
+        let (level, message) = match &nota {
+            Some(nota) if nota.starts_with("falló") => (
+                zeron_proto::trading::LogLevel::Error,
+                format!("Bot {id} {nota}{detalle}"),
+            ),
+            Some(nota) => (zeron_proto::trading::LogLevel::Info, format!("Bot {id} {nota}{detalle}")),
+            None => (zeron_proto::trading::LogLevel::Info, format!("Bot {id} terminó{detalle}")),
+        };
+        state.push_log(level, "motor", message, now, true);
+        if let Some(nota) = nota {
+            state.notes.insert(id.clone(), nota);
+        }
     }
 
     // Adopt a bot whose `panel.pid` points at a live process: it was started
@@ -835,6 +891,7 @@ fn sweep_state_in(state: &mut TradingState) {
         );
         runtime.consola_offset = crate::lifecycle::file_tail_size(&folder.join("consola.log"));
         state.bots.insert(id.clone(), runtime);
+        state.adopted.insert(id.clone());
         state.push_log(
             zeron_proto::trading::LogLevel::Info,
             "motor",
@@ -843,6 +900,139 @@ fn sweep_state_in(state: &mut TradingState) {
             true,
         );
     }
+}
+
+/// Where the systems the person wants running are kept in the store.
+const WANTED_KEY: &str = "bots-en-marcha";
+/// A restart waits this long (the sweep adopts what is still alive, MT5
+/// reconnects) before bringing bots back…
+const RESUME_DELAY_MS: i64 = 4_000;
+/// …and keeps trying this long while MT5 is not ready yet.
+const RESUME_WINDOW_MS: i64 = 5 * 60_000;
+
+/// One pass of the post-restart resume. Bots the person had running come
+/// back; a bot adopted from the previous run that trades on MT5 is restarted,
+/// since its token died with that run. Returns whether to try again.
+fn resume_step(state_arc: &Arc<Mutex<TradingState>>, systems_dir: &Option<PathBuf>, last: bool) -> bool {
+    let (wanted, adopted, folders) = {
+        let state = state_arc.lock().unwrap();
+        let dir = state.systems_dir.clone().or(systems_dir.clone());
+        let folders: std::collections::HashMap<String, PathBuf> = state
+            .systems
+            .iter()
+            .filter_map(|d| dir.as_ref().map(|dir| (d.id.clone(), dir.join(&d.dir_name))))
+            .collect();
+        let wanted: Vec<String> = state
+            .wanted
+            .iter()
+            .filter(|id| folders.contains_key(*id))
+            .filter(|id| !state.bots.get(*id).is_some_and(|r| r.started_at.is_some()))
+            .cloned()
+            .collect();
+        let adopted: Vec<String> = state.adopted.iter().cloned().collect();
+        (wanted, adopted, folders)
+    };
+    let mut pending = false;
+    let mut fallos = Vec::new();
+    for id in adopted.iter().chain(wanted.iter()) {
+        let Some(folder) = folders.get(id) else { continue };
+        let mt5 = BOT_ENVIRONMENT.get().and_then(|entorno| entorno(id, folder));
+        if let Some(Err(motivo)) = &mt5 {
+            pending = true;
+            fallos.push(format!("{id}: {motivo}"));
+            continue;
+        }
+        let reinicio = adopted.contains(id);
+        if reinicio {
+            if mt5.is_none() {
+                // A TWS bot keeps its connection across a restart.
+                state_arc.lock().unwrap().adopted.remove(id);
+                continue;
+            }
+            if let Err(error) = stop_system_in(state_arc, systems_dir, id) {
+                fallos.push(format!("{id}: {error}"));
+                continue;
+            }
+        }
+        match start_system_in(state_arc, systems_dir, id) {
+            Ok(()) => state_arc.lock().unwrap().push_log(
+                zeron_proto::trading::LogLevel::Info,
+                "motor",
+                if reinicio {
+                    format!("Bot {id} reiniciado para reconectarlo a MetaTrader 5 tras reabrir Aurea")
+                } else {
+                    format!("Bot {id} rearrancado: estaba en marcha al cerrar Aurea")
+                },
+                now_ms(),
+                true,
+            ),
+            Err(error) => fallos.push(format!("{id}: {error}")),
+        }
+    }
+    if pending && !last {
+        return true;
+    }
+    if !fallos.is_empty() {
+        state_arc.lock().unwrap().push_log(
+            zeron_proto::trading::LogLevel::Error,
+            "motor",
+            format!("No se pudieron rearrancar algunos bots — {}", fallos.join(" · ")),
+            now_ms(),
+            true,
+        );
+    }
+    false
+}
+
+/// Why a bot that exited on its own stopped: the error it died with (from
+/// `consola.log`) or its own last word (from `registro.log`), as a short note.
+fn stop_reason(folder: &Path, registro_offset: u64, consola_offset: u64) -> Option<String> {
+    fn tail(path: &Path, from: u64) -> String {
+        let Ok(bytes) = std::fs::read(path) else {
+            return String::new();
+        };
+        let from = usize::try_from(from).unwrap_or(0).min(bytes.len());
+        String::from_utf8_lossy(&bytes[from..]).into_owned()
+    }
+    fn short(text: &str) -> String {
+        let text = text.trim();
+        match text.char_indices().nth(140) {
+            Some((cut, _)) => format!("{}…", &text[..cut]),
+            None => text.to_string(),
+        }
+    }
+    let consola = tail(&folder.join("consola.log"), consola_offset);
+    if consola.contains("Traceback") {
+        let ultima = consola
+            .lines()
+            .rev()
+            .map(str::trim_end)
+            .find(|l| !l.is_empty() && !l.starts_with(' ') && !l.contains("Warning"))?;
+        return Some(format!("falló: {}", short(ultima)));
+    }
+    const GENERICAS: [&str; 5] = [
+        "desconectado",
+        "la estrategia ha terminado por hoy",
+        "disconnecting",
+        "disconnected",
+        "conectado a ",
+    ];
+    let registro = tail(&folder.join("registro.log"), registro_offset);
+    let ultima = registro
+        .lines()
+        .rev()
+        .filter_map(parse_bot_line)
+        .map(|(_, msg)| msg)
+        .find(|msg| {
+            let low = msg.to_lowercase();
+            !GENERICAS.iter().any(|g| low.starts_with(g))
+        })?;
+    // The bots prefix their lines with the strategy's name.
+    let ultima = match ultima.strip_prefix('[').and_then(|r| r.split_once("] ")) {
+        Some((_, resto)) => resto.to_string(),
+        None => ultima,
+    };
+    Some(format!("terminó: {}", short(&ultima)))
 }
 
 /// The sweep's verdict on one runtime: a live process is never retired, and an
@@ -1473,5 +1663,64 @@ mod tests {
         let snap = engine.snapshot();
         let stored = snap.tasks.iter().find(|t| t.id == task.id).unwrap();
         assert_eq!(stored.status, TaskStatus::Missed, "{stored:?}");
+    }
+
+    #[test]
+    fn stop_reason_reads_the_bots_last_word_without_the_generic_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("registro.log"),
+            [
+                "2026-11-25 21:35:46,100 contexto: 87 sesiones",
+                "2026-11-25 21:35:46,200 [Apertura Alcista] el bot ha arrancado despues de la hora de la senal: hoy no opera",
+                "2026-11-25 21:35:47,300 la estrategia ha terminado por hoy",
+                "2026-11-25 21:35:49,400 desconectado",
+                "",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        fs::write(dir.path().join("consola.log"), "aviso de pandas\n").unwrap();
+
+        let nota = stop_reason(dir.path(), 0, 0);
+
+        assert_eq!(
+            nota.as_deref(),
+            Some("terminó: el bot ha arrancado despues de la hora de la senal: hoy no opera")
+        );
+    }
+
+    #[test]
+    fn stop_reason_reports_the_error_a_bot_died_with() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("registro.log"), "2026-11-25 21:35:46,100 contexto\n").unwrap();
+        fs::write(
+            dir.path().join("consola.log"),
+            [
+                "Traceback (most recent call last):",
+                "  File \"bot.py\", line 1",
+                "    ov.getresult()",
+                "ConnectionRefusedError: [WinError 1225] refused",
+                "C:/bot.py:256: Pandas4Warning: deprecated",
+                "  df = df[x]",
+                "",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let nota = stop_reason(dir.path(), 0, 0);
+
+        assert_eq!(nota.as_deref(), Some("falló: ConnectionRefusedError: [WinError 1225] refused"));
+    }
+
+    #[test]
+    fn stop_reason_ignores_what_came_before_this_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let viejo = "Traceback (most recent call last):\nValueError: viejo\n";
+        fs::write(dir.path().join("consola.log"), viejo).unwrap();
+        fs::write(dir.path().join("registro.log"), "").unwrap();
+
+        assert_eq!(stop_reason(dir.path(), 0, viejo.len() as u64), None);
     }
 }

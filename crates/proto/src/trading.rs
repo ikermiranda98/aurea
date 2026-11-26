@@ -117,6 +117,11 @@ pub struct System {
     /// The system's rules as key→text pairs; null when reglas.json is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<BTreeMap<String, String>>,
+    /// Why a stopped system stopped (its own last word, or its error), or a
+    /// warning about a running one (a symbol its account can't trade); null
+    /// when there is nothing to say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// One open position row of the shown account (or of the aggregated exposure).

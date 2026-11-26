@@ -309,6 +309,7 @@ mod tests {
             last_activity_at: Some(1_000_000),
             description: None,
             rules: None,
+            note: None,
         }
     }
 

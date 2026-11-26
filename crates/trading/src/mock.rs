@@ -42,6 +42,7 @@ pub fn fixture() -> Snapshot {
             last_activity_at: Some(now - 60_000),
             description: Some("Demo: momentum intradía sobre EURUSD en MT5.".into()),
             rules: None,
+            note: None,
         },
         System {
             id: "02_nq_tws".into(),
@@ -60,6 +61,7 @@ pub fn fixture() -> Snapshot {
             last_activity_at: Some(now - 7_200_000),
             description: Some("Demo: apertura de sesión NY sobre NQ en TWS paper.".into()),
             rules: None,
+            note: None,
         },
     ];
 

@@ -867,6 +867,17 @@ impl Inner {
         let mt5 = lock(&self.mt5).clone();
         let mut mt5_read = false;
         if let Some(mt5) = mt5 {
+            // A running system's newest MT5 warning (a symbol its account
+            // can't trade) shows on its row, not only in the log.
+            for system in snapshot.systems.iter_mut().filter(|s| s.running && s.note.is_none()) {
+                system.note = mt5
+                    .notas()
+                    .into_iter()
+                    .rev()
+                    .find(|n| n.sistema == system.id && n.nivel != crate::mt5::ordenes::Nivel::Info)
+                    .filter(|n| system.started_at.is_none_or(|t| n.ts >= t))
+                    .map(|n| format!("aviso: {}", n.mensaje));
+            }
             for nota in mt5.notas() {
                 let level = match nota.nivel {
                     crate::mt5::ordenes::Nivel::Info => LogLevel::Info,

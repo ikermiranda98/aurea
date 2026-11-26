@@ -372,6 +372,8 @@ class IB:
         self._connected = True
         self.clientId = clientId
         self._accounts = list(hello.get("accounts", []))
+        # Where the bot really trades, for its own "conectado a ..." line.
+        self.destino = f"MetaTrader 5 ({hello.get('account')}) via Aurea"
         _log.info("Conectado a OpenBot (%s, cuenta %s, magic %s) en lugar de TWS %s:%s",
                   hello.get("broker", "mt5").upper(), hello.get("account"), hello.get("magic"), host, port)
         self._sync(force=True)

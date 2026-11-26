@@ -349,7 +349,18 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>, tokens
     {
         Ok(ws) => ws,
         Err(err) => {
-            tracing::warn!(error = %err, "rpc: websocket handshake failed");
+            // A peer that opens the port and leaves (a liveness probe) never
+            // finishes the handshake: routine, not a warning.
+            if matches!(
+                err,
+                tokio_tungstenite::tungstenite::Error::Protocol(
+                    tokio_tungstenite::tungstenite::error::ProtocolError::HandshakeIncomplete
+                )
+            ) {
+                tracing::debug!(error = %err, "rpc: websocket handshake abandoned");
+            } else {
+                tracing::warn!(error = %err, "rpc: websocket handshake failed");
+            }
             return;
         }
     };

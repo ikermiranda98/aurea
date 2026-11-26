@@ -187,6 +187,15 @@ pub struct TradingState {
     pub account: Option<Account>,
     pub programs: Option<Programs>,
     pub echo_recent: HashMap<String, i64>,
+    /// Why each system last stopped on its own (system id → note).
+    pub notes: HashMap<String, String>,
+    /// The systems the person wants running (started and not stopped by
+    /// them); kept in the store so a restart brings them back.
+    pub wanted: std::collections::BTreeSet<String>,
+    /// `wanted` changed since the store last saw it.
+    pub wanted_dirty: bool,
+    /// Bots the sweep adopted from a previous run (alive, not started here).
+    pub adopted: std::collections::HashSet<String>,
 }
 
 /// Alias kept for callers that prefer the longer name.
@@ -323,6 +332,7 @@ impl TradingState {
             last_activity_at: runtime.and_then(|r| r.ultima_actividad),
             description: dossier.description.clone(),
             rules: dossier.rules.clone(),
+            note: None,
         }
     }
 
@@ -333,6 +343,9 @@ impl TradingState {
             .iter()
             .map(|d| {
                 let mut s = Self::to_schema_system(d, self.bots.get(&d.id));
+                if !s.running {
+                    s.note = self.notes.get(&d.id).cloned();
+                }
                 if let Some(pnl) = self.pnl_bots.get(&d.id) {
                     s.pnl_day = Some(*pnl);
                     s.pnl_pct = Self::pnl_pct(*pnl, s.capital);

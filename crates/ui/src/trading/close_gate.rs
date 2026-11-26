@@ -152,6 +152,7 @@ mod tests {
             last_activity_at: None,
             description: None,
             rules: None,
+            note: None,
         }
     }
 

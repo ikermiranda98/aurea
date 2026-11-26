@@ -386,6 +386,7 @@ mod tests {
                     last_activity_at: None,
                     description: None,
                     rules: None::<BTreeMap<String, String>>,
+                    note: None,
                 },
                 System {
                     id: "01_a".into(),
@@ -404,6 +405,7 @@ mod tests {
                     last_activity_at: None,
                     description: None,
                     rules: None,
+                    note: None,
                 },
             ],
             positions: vec![
