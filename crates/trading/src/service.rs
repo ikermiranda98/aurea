@@ -842,6 +842,19 @@ impl Inner {
             if let Some(listener) = &listener {
                 listener(rule);
             }
+            // The desk log keeps it too: a banner may be off or unseen.
+            let linea = match &rule.note {
+                Some(note) => format!("Regla «{}» cumplida: {note}", rule.name),
+                None => format!("Regla «{}» cumplida: {}", rule.name, rule.reason),
+            };
+            if let Some(mt5) = lock(&self.mt5).clone() {
+                mt5.anotar(crate::mt5::ordenes::Nivel::Info, "reglas", &linea);
+            } else {
+                let mut state = lock(&self.state);
+                if state.live {
+                    state.push_log(LogLevel::Info, linea);
+                }
+            }
             if let Some(action) = rule.proposal.clone() {
                 self.push_proposal(
                     action,

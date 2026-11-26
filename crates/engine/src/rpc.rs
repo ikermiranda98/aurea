@@ -4652,6 +4652,21 @@ impl RpcService for EngineRpc {
             }
             methods::TRADING_RULE_ADD => {
                 let p: zeron_proto::trading::RuleAddInput = parse_params(params)?;
+                // A rule on a system the pool doesn't have would watch forever.
+                use zeron_proto::trading::RuleCondition as C;
+                let vigilado = match &p.condition {
+                    C::SystemPnlPct { system_id, .. }
+                    | C::SystemPnlUsd { system_id, .. }
+                    | C::SystemStopped { system_id }
+                    | C::SystemIdle { system_id, .. } => Some(system_id.clone()),
+                    _ => None,
+                };
+                if let (Some(id), Some(engine)) = (vigilado, &self.trading_engine) {
+                    let existe = engine.lock().unwrap().snapshot().systems.iter().any(|s| s.id == id);
+                    if !existe {
+                        return Err(RpcError::Failed(format!("no hay ningún sistema {id}")));
+                    }
+                }
                 match self.trading.add_rule(p) {
                     Ok(rule) => RpcReply::value(&rule),
                     Err(error) => Err(RpcError::Failed(error.to_string())),
