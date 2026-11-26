@@ -619,6 +619,31 @@ impl TradingEngine {
             )
         };
         self.note(zeron_proto::trading::LogLevel::Info, message);
+        // A bot that keeps running keeps the code it started with.
+        let tocados: Vec<String> = {
+            let state = self.state.lock().unwrap();
+            state
+                .systems
+                .iter()
+                .filter(|d| state.bots.get(&d.id).is_some_and(|r| r.started_at.is_some()))
+                .filter(|d| {
+                    report
+                        .changed
+                        .iter()
+                        .any(|path| path.split('/').any(|part| part == d.dir_name))
+                })
+                .map(|d| d.id.clone())
+                .collect()
+        };
+        if !tocados.is_empty() {
+            self.note(
+                zeron_proto::trading::LogLevel::Warning,
+                format!(
+                    "Sistemas en marcha con código nuevo: {}. Siguen con el anterior hasta que los pares y arranques",
+                    tocados.join(", ")
+                ),
+            );
+        }
         Ok(())
     }
 
