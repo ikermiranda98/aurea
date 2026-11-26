@@ -20,7 +20,7 @@ use zeron_proto::trading::{
 };
 
 use super::enlace::{ConfiguracionMt5, EnlaceMt5};
-use super::libro::CuentaMt5;
+use super::libro::{CuentaMt5, PosicionMt5};
 
 /// The bridge, written next to the desk's data on first use.
 const PUENTE_PY: &str = include_str!("puente.py");
@@ -57,6 +57,8 @@ pub struct Mt5Escritorio {
     bots: std::sync::OnceLock<Arc<super::bots::BotsMt5>>,
     /// What the translator said about each bot, newest last (the desk log).
     notas: Mutex<Vec<NotaBot>>,
+    /// Each account's positions at the last look, to log opens and closes.
+    posiciones: Mutex<BTreeMap<String, BTreeMap<i64, PosicionMt5>>>,
 }
 
 /// One translator line for the desk's log.
@@ -66,6 +68,20 @@ pub struct NotaBot {
     pub nivel: super::ordenes::Nivel,
     pub sistema: String,
     pub mensaje: String,
+}
+
+/// Who a position belongs to in the log: a system (by its default magic),
+/// the person (magic 0) or the desk.
+fn autor_posicion(magic: i64) -> String {
+    match magic {
+        0 => "manual".to_string(),
+        m if (7_700_001..7_701_000).contains(&m) => format!("{:02}", m - 7_700_000),
+        _ => "mesa".to_string(),
+    }
+}
+
+fn lado_posicion(side: &str) -> &'static str {
+    if side == "short" { "venta" } else { "compra" }
 }
 
 /// How many translator lines the desk keeps.
@@ -106,6 +122,7 @@ impl Mt5Escritorio {
             python: Mutex::new(None),
             bots: std::sync::OnceLock::new(),
             notas: Mutex::new(Vec::new()),
+            posiciones: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -397,6 +414,60 @@ impl Mt5Escritorio {
         notas.drain(..sobran);
     }
 
+    /// Logs each position that appeared or went since the last look, one
+    /// placed by hand included. The first look at an account only remembers
+    /// what it holds.
+    fn vigilar_posiciones(&self, enlaces: &BTreeMap<String, Arc<EnlaceMt5>>) {
+        let mut vistas = lock(&self.posiciones);
+        for (id, enlace) in enlaces {
+            let Some(libro) = enlace.libro() else { continue };
+            let ahora: BTreeMap<i64, PosicionMt5> =
+                libro.positions.iter().map(|p| (p.ticket, p.clone())).collect();
+            if let Some(antes) = vistas.get(id) {
+                for p in ahora.values().filter(|p| !antes.contains_key(&p.ticket)) {
+                    self.anotar(
+                        super::ordenes::Nivel::Info,
+                        &autor_posicion(p.magic),
+                        &format!(
+                            "Posición abierta en MT5 {}: {} {} {} a {}",
+                            libro.login,
+                            lado_posicion(&p.side),
+                            p.volume,
+                            p.symbol,
+                            p.entry
+                        ),
+                    );
+                }
+                for p in antes.values().filter(|p| !ahora.contains_key(&p.ticket)) {
+                    let resultado = libro
+                        .deals
+                        .as_ref()
+                        .map(|deals| {
+                            deals
+                                .iter()
+                                .filter(|d| d.position == p.ticket && d.entry != "in")
+                                .map(|d| d.pnl)
+                                .sum::<f64>()
+                        })
+                        .map(|pnl| format!(", resultado {pnl:+.2}"))
+                        .unwrap_or_default();
+                    self.anotar(
+                        super::ordenes::Nivel::Info,
+                        &autor_posicion(p.magic),
+                        &format!(
+                            "Posición cerrada en MT5 {}: {} {} {}{resultado}",
+                            libro.login,
+                            lado_posicion(&p.side),
+                            p.volume,
+                            p.symbol
+                        ),
+                    );
+                }
+            }
+            vistas.insert(id.clone(), ahora);
+        }
+    }
+
     /// The translator's lines, oldest first.
     pub fn notas(&self) -> Vec<NotaBot> {
         lock(&self.notas).clone()
@@ -464,6 +535,7 @@ impl Mt5Escritorio {
     pub fn vista(&self) -> VistaMt5 {
         let mut vista = VistaMt5::default();
         let enlaces = lock(&self.enlaces).clone();
+        self.vigilar_posiciones(&enlaces);
         for cuenta in self.registradas() {
             let id = format!("mt5-{}@{}", cuenta.login, cuenta.server);
             let enlace = enlaces.get(&id);

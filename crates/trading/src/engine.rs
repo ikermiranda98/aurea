@@ -427,11 +427,12 @@ fn stop_system_in(
         }
         // Stopped by hand: the post-restart resume must not bring it back.
         state.adopted.remove(system_id);
-        state.notes.remove(system_id);
         let running = state.bots.get(system_id).map(|r| r.started_at.is_some()).unwrap_or(false);
         if !running {
+            // Already stopped: keep the note saying why it stopped.
             return Ok(());
         }
+        state.notes.remove(system_id);
 
         let systems_dir = state.systems_dir.clone().or(systems_dir.clone());
         let dossier = state.systems.iter().find(|d| d.id == system_id).cloned();

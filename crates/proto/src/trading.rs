@@ -892,6 +892,7 @@ mod tests {
             close_hour: None,
             last_activity_at: None,
             description: None,
+            note: None,
             rules: None,
         }];
         assert_eq!(
