@@ -163,7 +163,7 @@ def main():
             fallos.append(str(posicion.ticket) + ": " + salida)
     if fallos:
         responder(False, "Cerradas " + str(cerradas) + " de " + str(len(abiertas)) + " posiciones de " + simbolo + "; fallaron " + "; ".join(fallos))
-    responder(True, "Cierre de " + simbolo + " ejecutado (" + str(cerradas) + " posición" + ("" if cerradas == 1 else "es") + ")")
+    responder(True, "Cierre de " + simbolo + " ejecutado (" + str(cerradas) + (" posición" if cerradas == 1 else " posiciones") + ")")
 
 main()
 "#;

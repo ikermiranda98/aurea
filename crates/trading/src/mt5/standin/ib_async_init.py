@@ -516,6 +516,8 @@ class IB:
     def _apply(self, d: dict) -> Trade:
         oid = d["orderId"]
         t = self._trades.get(oid)
+        # An order from an earlier run, already over: known, not news.
+        historica = t is None and d["status"] not in ("PendingSubmit", "PreSubmitted", "Submitted")
         if t is None:
             c = self._contracts.get(d["conId"]) or self._contract_from({"conId": d["conId"], "localSymbol": d["symbol"]})
             o = Order(orderId=oid, clientId=d.get("clientId", 0), permId=d["permId"], action=d["action"],
@@ -534,12 +536,15 @@ class IB:
         t.order.permId = d["permId"]
         if d["filled"]:
             s.lastFillPrice = d["avgFillPrice"]
-        if s.filled != before[1]:
+        if s.filled != before[1] and not historica:
             # The trade's own executions, as ib_async keeps them on the Trade.
             try:
                 t.fills = [f for f in self._fills() if f.execution.orderId == oid]
             except Exception:
                 pass
+        if historica:
+            t.log.append(TradeLogEntry(time=_dt.datetime.now(_dt.timezone.utc), status=s.status, message=d.get("message", "")))
+            return t
         if (s.status, s.filled) != before:
             t.log.append(TradeLogEntry(time=_dt.datetime.now(_dt.timezone.utc), status=s.status, message=d.get("message", "")))
             if d.get("message") and s.status == "Inactive":
