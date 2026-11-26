@@ -425,6 +425,8 @@ fn stop_system_in(
         if state.wanted.remove(system_id) {
             state.wanted_dirty = true;
         }
+        // Stopped by hand: the post-restart resume must not bring it back.
+        state.adopted.remove(system_id);
         state.notes.remove(system_id);
         let running = state.bots.get(system_id).map(|r| r.started_at.is_some()).unwrap_or(false);
         if !running {
